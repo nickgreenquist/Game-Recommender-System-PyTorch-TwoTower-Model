@@ -211,16 +211,23 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
-                 fs: dict, exclude_iids: set, top_n: int = 20):
-    """Raw dot-product rank all corpus games; exclude seeds; return top-n DataFrame."""
+                 fs: dict, exclude_iids: set, top_n: int = 20,
+                 mark_iids: set = None):
+    """Raw dot-product rank all corpus games; exclude seeds; return top-n DataFrame.
+    mark_iids: item IDs to include but label '  ◀ seed' in the Title column.
+    """
     import pandas as pd
+    mark_iids  = mark_iids or set()
     raw_scores = (all_embs @ user_emb.T).squeeze(-1)
     rows = []
     for idx in raw_scores.argsort(descending=True).tolist():
         iid = all_ids[idx]
         if iid in exclude_iids:
             continue
-        rows.append(_game_meta(iid, fs))
+        row = _game_meta(iid, fs)
+        if iid in mark_iids:
+            row['Title'] += '  ◀ seed'
+        rows.append(row)
         if len(rows) >= top_n:
             break
     return pd.DataFrame(rows)
@@ -478,8 +485,9 @@ def tab_examples(model, fs, all_ids, all_embs):
     with torch.no_grad():
         user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, fav_genres)
 
-    exclude_iids = set(liked_iids) | set(anchor_iids)
-    df = _score_games(user_emb, all_ids, all_embs, fs, exclude_iids)
+    df = _score_games(user_emb, all_ids, all_embs, fs,
+                      exclude_iids=set(liked_iids),
+                      mark_iids=set(anchor_iids))
 
     st.subheader(f"Recommendations for: {selected}")
     if fav_titles:
