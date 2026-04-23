@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.pth
+!serving/*.pth
 data/
 saved_models/
 .DS_Store
