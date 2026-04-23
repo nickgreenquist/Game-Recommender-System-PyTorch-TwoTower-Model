@@ -7,6 +7,7 @@ Usage:
 """
 import glob
 import os
+from itertools import zip_longest
 
 import numpy as np
 import torch
@@ -14,6 +15,90 @@ import torch.nn.functional as F
 
 from src.model import GameRecommender
 from src.train import build_model, get_config, print_model_summary
+
+
+# ── Canary user definitions ───────────────────────────────────────────────────
+# All game titles must match base_games.parquet exactly (verified against corpus).
+# Genres must match base_vocab.parquet type='genre' values exactly.
+# Tags must match base_vocab.parquet type='tag' values exactly.
+
+USER_TYPE_TO_FAVORITE_GENRES = {
+    'Western RPG Lover': ['RPG'],
+    'JRPG Lover':        ['RPG'], 
+    'FPS Lover':         [],
+    'Civ Lover':         ['Strategy'],
+    'Citybuilder Lover': ['Simulation'],
+    'Indie Lover':       ['Indie'],
+    'Racing Lover':      ['Racing'],
+    'Fighting Lover':    []
+}
+
+USER_TYPE_TO_FAVORITE_GAMES = {
+    'Western RPG Lover': [
+        'The Witcher 2: Assassins of Kings Enhanced Edition',
+        'The Elder Scrolls IV: Oblivion® Game of the Year Edition',
+        'DARK SOULS™: Prepare To Die™ Edition',
+        'Divinity: Original Sin (Classic)',
+        'Fallout: New Vegas',
+        'Mass Effect 2',
+    ],
+    'JRPG Lover': [
+        'FINAL FANTASY VI',
+        'Disgaea PC / 魔界戦記ディスガイア PC',
+        'FINAL FANTASY VIII'
+    ],
+    'FPS Lover': [
+        'Counter-Strike: Global Offensive',
+        'DOOM',
+        'Call of Duty®: Black Ops',
+        'Battlefield: Bad Company™ 2'
+    ],
+    'Civ Lover': [
+        "Sid Meier's Civilization® V",
+        'Civilization IV®: Warlords',
+        "Sid Meier's Civilization IV: Colonization",
+        'Total War™: ROME II - Emperor Edition'
+    ],
+    'Citybuilder Lover': [
+        'SimCity™ 4 Deluxe Edition',
+        'Caesar™ 3',
+        'Cities: Skylines',
+        'Cities XXL'
+    ],
+    'Indie Lover': [
+        'Terraria',
+        'FTL: Faster Than Light',
+        'The Binding of Isaac: Rebirth',
+        'Rogue Legacy',
+        'Spelunky',
+    ],
+    'Racing Lover': [
+        'F1 2012™',
+        'Need For Speed: Hot Pursuit',
+        'Test Drive Unlimited 2'
+    ],
+    'Fighting Lover': [
+        'Mortal Kombat Komplete Edition',
+        'Street Fighter X Tekken',
+        'Ultra Street Fighter® IV',
+        'Injustice: Gods Among Us Ultimate Edition'
+    ]
+}
+
+USER_TYPE_TO_TAGS = {
+    'Western RPG Lover':  ['Action RPG'],
+    'JRPG Lover':         ['JRPG'],
+    'FPS Lover':          ['FPS'],
+    'Civ Lover':          [],
+    'Citybuilder Lover':  ['City Builder'],
+    'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
+    'Racing Lover':       ['Racing'],
+    'Fighting Lover':     ['Fighting']
+}
+
+SIMULATED_FAV_LOG_HOURS    = 10.0   # weight for favorite games
+SIMULATED_ANCHOR_LOG_HOURS =  2.0   # weight for tag-based anchor games
+ANCHORS_PER_TAG            =  5
 
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
@@ -80,6 +165,176 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
         }
 
     return game_embeddings, item_ids, combined
+
+
+# ── Canary user inference ─────────────────────────────────────────────────────
+
+def _get_anchor_titles(fs: dict, tag_names: list, exclude: set) -> list:
+    """
+    Return up to ANCHORS_PER_TAG top games per tag by raw TF-IDF score,
+    skipping titles already in exclude.
+    """
+    tag_matrix = fs['game_tag_matrix']   # (n_items, n_tags) numpy
+    tag_to_i   = fs['tag_to_i']
+    item_ids   = fs['item_ids']
+    id_to_title = fs['item_id_to_title']
+
+    valid_tags = [t for t in tag_names if t in tag_to_i]
+    anchor_titles = []
+    seen = set(exclude)
+
+    for tag in valid_tags:
+        tag_idx     = tag_to_i[tag]
+        sorted_iids = sorted(
+            item_ids,
+            key=lambda iid: float(tag_matrix[fs['item_to_idx'][iid], tag_idx]),
+            reverse=True,
+        )
+        count = 0
+        for iid in sorted_iids:
+            if count >= ANCHORS_PER_TAG:
+                break
+            title = id_to_title[iid]
+            if title not in seen:
+                anchor_titles.append(title)
+                seen.add(title)
+                count += 1
+
+    return anchor_titles
+
+
+def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> torch.Tensor:
+    """
+    Build a synthetic user embedding for a canary user type.
+    Mirrors model.user_embedding() logic exactly — no timestamp tower.
+
+    Simulated play weights:
+        favorite games → SIMULATED_FAV_LOG_HOURS
+        tag anchor games → SIMULATED_ANCHOR_LOG_HOURS
+    Genre context is computed from the synthetic play history using the same
+    formula as dataset.py: [debiased_avg_log_playtime | play_frac] per genre.
+    """
+    fav_genres  = USER_TYPE_TO_FAVORITE_GENRES[user_type]
+    fav_titles  = USER_TYPE_TO_FAVORITE_GAMES[user_type]
+    tag_names   = USER_TYPE_TO_TAGS.get(user_type, [])
+
+    anchor_titles = _get_anchor_titles(fs, tag_names, exclude=set(fav_titles))
+
+    title_to_iid = {v: k for k, v in fs['item_id_to_title'].items()}
+    item_to_idx  = fs['item_to_idx']
+
+    # (title, simulated_log_hours)
+    all_games_weighted = (
+        [(t, SIMULATED_FAV_LOG_HOURS)    for t in fav_titles]   +
+        [(t, SIMULATED_ANCHOR_LOG_HOURS) for t in anchor_titles]
+    )
+
+    # Resolve to (item_idx, log_weight), skip titles not in corpus
+    history = []
+    for title, w in all_games_weighted:
+        iid = title_to_iid.get(title)
+        if iid is None or iid not in item_to_idx:
+            continue
+        history.append((item_to_idx[iid], w))
+
+    # ── Genre context (mirrors dataset.py _build_rollback_dataset) ────────────
+    n_genres     = fs['n_genres']
+    genre_to_i   = fs['genre_to_i']
+    genre_matrix = fs['game_genre_matrix']   # (n_items, n_genres) float32
+
+    avg_log       = (sum(w for _, w in history) / max(len(history), 1))
+    running_count = np.zeros(n_genres, dtype=np.float32)
+    running_sum   = np.zeros(n_genres, dtype=np.float32)
+
+    for item_idx, raw_log in history:
+        genre_row = genre_matrix[item_idx]
+        for g_idx in np.where(genre_row > 0)[0]:
+            running_count[g_idx] += 1
+            running_sum[g_idx]   += raw_log
+
+    # Explicit favorite-genre boost: override debiased avg with a strong positive signal
+    for g in fav_genres:
+        if g in genre_to_i:
+            g_idx = genre_to_i[g]
+            if running_count[g_idx] == 0:
+                running_count[g_idx] = 1.0
+                running_sum[g_idx]   = avg_log + SIMULATED_FAV_LOG_HOURS
+
+    genre_ctx = np.zeros(2 * n_genres, dtype=np.float32)
+    total_assign = running_count.sum()
+    if total_assign > 0:
+        mask = running_count > 0
+        genre_ctx[:n_genres][mask] = (
+            running_sum[mask] / running_count[mask]
+        ) - avg_log
+        genre_ctx[n_genres:] = running_count / total_assign
+
+    # ── History embedding pool (mirrors model.user_embedding) ─────────────────
+    if history:
+        hist_idxs = torch.tensor([h[0] for h in history], dtype=torch.long).unsqueeze(0)   # (1, H)
+        hist_wts  = torch.tensor([[h[1] for h in history]], dtype=torch.float32)            # (1, H)
+        pad_mask  = torch.ones_like(hist_wts).unsqueeze(-1)                                 # (1, H, 1)
+        w         = hist_wts.unsqueeze(-1) * pad_mask                                       # (1, H, 1)
+        wt_sum    = w.sum(dim=1).clamp(min=1e-6)                                            # (1, 1)
+        hist_embs = model.item_embedding_lookup(hist_idxs)                                  # (1, H, D)
+        history_emb = (hist_embs * w).sum(dim=1) / wt_sum                                  # (1, D)
+    else:
+        history_emb = torch.zeros(1, model.item_embedding_lookup.embedding_dim)
+
+    X_genre   = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
+    genre_emb = model.user_genre_tower(X_genre)
+
+    return torch.cat([history_emb, genre_emb], dim=1)   # (1, user_dim)
+
+
+def run_canary_eval(model: GameRecommender, fs: dict,
+                    game_embeddings: dict, all_ids: list, all_combined: torch.Tensor,
+                    top_n: int = 10) -> None:
+    """Score all games per canary user type and print recommendation tables."""
+    model.eval()
+
+    with torch.no_grad():
+        for user_type in USER_TYPE_TO_FAVORITE_GENRES:
+            user_emb    = _build_user_embedding(model, fs, user_type)
+            fav_titles  = USER_TYPE_TO_FAVORITE_GAMES[user_type]
+            tag_names   = USER_TYPE_TO_TAGS.get(user_type, [])
+            anchor_titles = _get_anchor_titles(fs, tag_names, exclude=set(fav_titles))
+            exclude_set   = set(fav_titles) | set(anchor_titles)
+
+            raw_scores  = (all_combined @ user_emb.T).squeeze(-1)   # (n_items,)
+            scores      = {all_ids[i]: raw_scores[i].item() for i in range(len(all_ids))}
+
+            recs        = []
+            seen_titles = set(exclude_set)
+            for iid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                if len(recs) >= top_n:
+                    break
+                title = fs['item_id_to_title'][iid]
+                if title not in seen_titles:
+                    seen_titles.add(title)
+                    recs.append(title)
+
+            fav_genres  = ', '.join(USER_TYPE_TO_FAVORITE_GENRES[user_type]) or '—'
+            tags_str    = ', '.join(USER_TYPE_TO_TAGS.get(user_type, [])[:4]) or '—'
+
+            col_w      = min(55, max((len(t) for t in fav_titles), default=20))
+            rec_w      = min(55, max((len(r) for r in recs), default=20))
+            title_line = f"{user_type}  |  Genre: {fav_genres}  |  Tags: {tags_str}"
+            bar_w      = max(col_w + rec_w + 4, len(title_line))
+
+            print(f"\n{'═' * bar_w}")
+            print(title_line)
+            print(f"{'═' * bar_w}")
+            if anchor_titles:
+                print(f"Tag anchors (weight={SIMULATED_ANCHOR_LOG_HOURS}):")
+                for t in anchor_titles[:10]:
+                    print(f"  + {t}")
+                print('─' * bar_w)
+            header = f"{'Favorite Games':<{col_w}}  Recommendations"
+            print(header)
+            print('─' * bar_w)
+            for a, b in zip_longest(fav_titles, recs, fillvalue=''):
+                print(f"{a:<{col_w}}  {b}")
 
 
 # ── Embedding probes ──────────────────────────────────────────────────────────
@@ -317,7 +572,7 @@ def run_probes(data_dir: str = 'data', checkpoint_path: str = None,
     probe_tag(model, ['Strategy', 'Turn-Based'],           game_embeddings, fs)
     probe_tag(model, ['Horror', 'Survival Horror'],        game_embeddings, fs)
     probe_tag(model, ['Co-op', 'Multiplayer'],             game_embeddings, fs)
-    probe_tag(model, ['Roguelike', 'Roguelite'],           game_embeddings, fs)
+    probe_tag(model, ['Rogue-like', 'Rogue-lite'],         game_embeddings, fs)
     probe_tag(model, ['Puzzle'],                           game_embeddings, fs)
 
     print("\n── Similarity probes ──")
@@ -327,4 +582,14 @@ def run_probes(data_dir: str = 'data', checkpoint_path: str = None,
 
 def run_canary(data_dir: str = 'data', checkpoint_path: str = None,
                version: str = 'v1') -> None:
-    print("Canary evaluation not yet implemented.")
+    from src.dataset import load_features
+    cp = _resolve_checkpoint(checkpoint_path, 'saved_models')
+    if cp is None:
+        return
+    print("Loading features ...")
+    fs = load_features(data_dir, version)
+    model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id = \
+        _load_model_and_embeddings(cp, fs)
+
+    print("\n── Canary user evaluation ──")
+    run_canary_eval(model, fs, game_embeddings, all_ids, all_combined)
