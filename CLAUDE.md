@@ -1,0 +1,247 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+A PyTorch Two-Tower neural network recommender system trained on the Steam dataset. The model predicts game preferences via dot product of user and item embeddings.
+
+This is a sibling project to:
+- `/Users/nickgreenquist/Documents/Movie-Recommender-System-PyTorch-TwoTower-Model` — MovieLens, MSE objective
+- `/Users/nickgreenquist/Documents/Book-Recommender-System-PyTorch-TwoTower-Model` — Goodreads, softmax objective (primary reference)
+
+The architecture follows the same two-tower design as the book model. The book model is the primary reference — it uses the softmax objective (3× better than MSE), and adds a domain-specific embedding tower (author) not present in the movie model. Here, the analogous addition is a **developer embedding tower**.
+
+**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: play history (playtime-weighted avg pooling of game embeddings), genre affinity, and timestamp. Any user can be represented at inference time with just a few games they've played — no retraining required.
+
+**Rating signal: playtime hours.** Steam does not have star ratings. The `playtime_forever` field (total hours played per game, from `australian_user_items.json`) serves as the implicit feedback signal. Playtime is a strong preference proxy — a user who played 500 hours loves that game. Reviews provide a binary `recommend` signal as supplementary explicit feedback. The primary training signal is playtime.
+
+## Running the Code
+
+```bash
+python main.py preprocess games          # Step 1: filter games → data/base_games.parquet
+python main.py preprocess interactions   # Step 2: process user items → remaining parquets
+python main.py preprocess                # Run both steps in order
+python main.py explore                   # Explore user/game threshold distributions
+python main.py features                  # Stage 2: base parquets → data/features_*.parquet
+python main.py dataset                   # Stage 3: features → data/dataset_*_v1.pt
+python main.py train                     # Stage 4: train, save checkpoints (softmax)
+python main.py canary                    # Canary user recommendations (most recent checkpoint)
+python main.py canary <path>             # Canary user recommendations (specific checkpoint)
+python main.py probe                     # Embedding probes (most recent checkpoint)
+python main.py probe <path>              # Embedding probes (specific checkpoint)
+python main.py eval                      # Offline eval: Recall@K, NDCG@K, Hit Rate@K, MRR
+python main.py eval <path>               # Same, specific checkpoint
+python main.py export                    # Export serving artifacts for Streamlit
+python main.py export <path>             # Export using specific checkpoint
+python main.py                           # Run all stages in order
+```
+
+## Dataset
+
+Raw data lives in `data/` (not in git). All files are gzipped JSONL. This project uses the UCSD Steam dataset (McAuley lab). Required files:
+
+- `australian_users_items.json.gz` (**primary**) — 88,310 users: `user_id, items_count, steam_id, user_url, items[{item_id, item_name, playtime_forever, playtime_2weeks}]`
+- `australian_user_reviews.json.gz` (**supplementary**) — 25,799 users: `user_id, user_url, reviews[{item_id, recommend, review, posted, helpful, funny}]`
+- `steam_games.json.gz` (**item metadata**) — 32,135 games: `id, app_name, title, genres, tags, developer, publisher, release_date, price, discount_price, early_access, sentiment`
+
+**Not used: `steam_reviews.json.gz`** — 7.8M individual V2 review records. Has `hours` and `text` but no `recommend` boolean, no stable `user_id` (uses `username`), and records are not grouped by user. Gives us nothing the other three files don't already provide better.
+
+### Filtering thresholds
+
+```python
+MIN_INTERACTIONS_PER_GAME    = 10      # minimum users who have played the game
+MIN_PLAYTIME_PER_USER        = 5       # minimum total hours played (across corpus games)
+MAX_PLAYTIME_PER_USER        = 10_000  # cap on total hours (removes bots/outliers)
+MIN_HOURS_PER_GAME           = 0.1     # minimum hours for a single game to count as an interaction
+MIN_TAG_COUNT                = 50      # tag must appear in this many corpus games
+MAX_ROLLBACK_EXAMPLES_PER_USER = 50   # rollback cap per user (see note below)
+```
+
+Games below `MIN_INTERACTIONS_PER_GAME` are filtered out entirely. Users outside the playtime bounds are dropped.
+
+**Why MIN_INTERACTIONS_PER_GAME=10 (not 100):** Lowering to 10 nearly triples the recommendation corpus (6,258 games vs 2,509) with almost no cost — rollback examples change by less than 1,000. Games with few interactions have undertrained ID embeddings but their content towers (tags, genres, developer) still give them a reasonable representation.
+
+**Why MAX_ROLLBACK_EXAMPLES_PER_USER=50 (not 10):** This dataset is much smaller than Goodreads — 66k users vs 229k, producing only ~575k rollback examples at cap=10 vs Goodreads' 4.7M. Cap=50 brings us to ~1.9M examples (0.4× Goodreads scale) without introducing bias: the user hour filter (5–10,000h) already excludes bots, the median user has 29 corpus games so cap=50 is rarely binding, and we're still far below the unlimited ceiling of 2.9M. The YouTube DNN paper caps to prevent power users from dominating — that concern is already handled by the hour ceiling here.
+
+### Preprocessing pipeline
+
+Two separate steps — run `preprocess games` first to inspect corpus size, then `preprocess interactions`.
+
+**Step 1 (`preprocess games`)** — reads `steam_games.json.gz`, filters by interaction count (requires a first pass over user items to count per-game interactions), collects game metadata (genres, tags, developer, publisher, release year, price). Writes `base_games.parquet` and `base_game_tags.parquet`.
+
+**Step 2 (`preprocess interactions`)** — processes `australian_users_items.json.gz`:
+- Only keeps items with `playtime_forever >= MIN_HOURS_PER_GAME * 60` (playtime stored in minutes)
+- Filters to corpus games only
+- Counts valid playtime per user → builds `valid_users`
+- Collects interactions for valid users
+- Joins `recommend` signal and `posted` date from `australian_user_reviews.json.gz` where available
+- **Sorts each user's items by `item_id` (Steam app ID) before writing** — Steam app IDs are assigned sequentially as games are added to Steam, so item_id order is a weak proxy for game release chronology. This is the only available ordering: `australian_users_items.json.gz` contains no buy date, install date, or first-play timestamp per game. Rollback examples therefore simulate "given older games in library, predict a newer release" rather than true temporal play order.
+
+**Playtime normalization:** Raw `playtime_forever` is in minutes. Convert to hours. Apply log transform for rating weighting: `log(1 + hours)` — compresses the extreme tail (10,000-hour outliers) while preserving order.
+
+### Tag signals
+
+Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-applied labels (e.g. `Roguelike`, `Co-op`, `Open World`, `Dark Souls-like`). Functionally identical to Goodreads shelves. The field is a plain ordered list — no per-tag counts are provided.
+
+**Tag weighting:** Since `steam_games.json.gz` gives only a list (not counts), we treat list position as an implicit relevance signal. Tags listed first are most commonly applied. Weight by inverse position: `weight = 1 / (position + 1)`, then normalize per game. IDF is computed from corpus frequency (how many games carry each tag). TF-IDF = `(positional_weight) * log(N / df)`.
+
+- Only tags appearing `>= MIN_TAG_COUNT` times across corpus games are kept
+- Stored in `base_game_tags.parquet`
+
+## Key Differences from Book/Movie Models
+
+| Concept            | MovieLens                              | Goodreads                                    | Steam                                                         |
+|--------------------|----------------------------------------|----------------------------------------------|---------------------------------------------------------------|
+| Item ID column     | movieId                                | book_id                                      | item_id (app_id)                                              |
+| User ID column     | userId                                 | user_id                                      | user_id                                                       |
+| Rating signal      | 0.5–5.0 star ratings                   | 1–5 integer ratings                          | `playtime_forever` (minutes) — log-transformed to hours       |
+| Explicit feedback  | Star rating                            | Star rating                                  | `recommend` boolean (supplementary)                           |
+| Timestamp          | Unix timestamp int                     | `read_at` → `date_updated` → `date_added`    | Not available in user_items — omit or use review `posted`     |
+| Year               | Parsed from title (YYYY) regex         | `publication_year` field                     | Parsed from `release_date` string                             |
+| Genres             | Pipe-separated string                  | Curated label dict (vote counts)             | `genres` list — broad labels (Action, RPG, Strategy…)         |
+| Tags               | Genome scores (dense ML)               | `popular_shelves` (sparse user counts)       | `tags` list (ordered, no counts) — IDF from corpus frequency  |
+| Domain tower       | None                                   | Author embedding                             | Developer embedding                                           |
+| Price              | Not available                          | Not available                                | `price` field — bucketed into embedding                       |
+
+## Model Architecture
+
+Two-tower design with dot product prediction. Mirrors the book model with **developer embedding** in place of author embedding.
+
+```
+User Tower (intentionally simple):
+  playtime_weighted_avg_pool(item_embeddings[play_history])  → history_emb   (item_id_embedding_size)
+  user_genre_tower([avg_playtime_per_genre | play_frac])     → genre_emb     (user_genre_embedding_size)
+  timestamp_embedding_tower(play_month)                      → ts_emb        (timestamp_embedding_size)
+  concat → user_combined
+
+Item Tower (all content signals):
+  item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size)
+  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size)
+  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size)   [shared with user history pool]
+  developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size)
+  year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size)
+  price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size)
+  concat → item_combined
+
+Prediction: dot_product(user_combined, item_combined)
+```
+
+`len(user_combined) == len(item_combined)` must hold. Model raises `ValueError` at construction if violated.
+
+### Shared towers
+
+- `item_embedding_tower` — shared between item side and user history avg pool
+
+### Planned embedding sizes (to be tuned)
+
+```python
+item_id_embedding_size      = 40   # shared: user history pool + item tower
+user_genre_embedding_size   = 50
+timestamp_embedding_size    = 10
+item_genre_embedding_size   = 10
+tag_embedding_size          = 25
+developer_embedding_size    = 15
+item_year_embedding_size    = 10
+price_embedding_size        = 5
+
+# user: 40 + 50 + 10 = 100
+# item: 10 + 25 + 40 + 15 + 10 + 5 = 105  ← must match; adjust before construction
+```
+
+### Developer tower details
+
+- One developer embedding per game (primary developer only for multi-developer games)
+- `nn.Embedding(n_developers + 1, developer_embedding_size)` with padding index = `n_developers`
+- Developer index 0 = `__unknown__`
+- Developer signal lives on the **item side only** (same decision as author in book model)
+
+### Price tower details
+
+- `original_price` is a float (dollars). Bucket into ~10 price bins: Free, <$5, $5–$10, $10–$20, $20–$30, $30–$40, $40–$60, >$60, Unknown.
+- `nn.Embedding(n_price_buckets, price_embedding_size)`
+- Price is a real content signal for games — free-to-play vs. premium vs. AAA is a meaningful taste dimension.
+
+## Training Details
+
+**What the model predicts:** "Given this user's play history, which game do they play next?" — a ranking problem, not a regression. Playtime is never a prediction target.
+
+**Playtime role:** Used only as a weighting signal inside the user tower's history avg pool. Each played game's embedding is weighted by `log(1 + hours)` normalized across the user's history — games with 500 hours pull the user embedding harder than games with 2 hours. Playtime does not appear in the loss, the item tower, or anywhere else.
+
+**Note on YouTube DNN:** The YouTube paper predicts watch time, but that is their *ranking* model (stage 2), not the two-tower candidate generation model (stage 1) that we are replicating. Our corpus is ~5,400 games — small enough to score all items exactly at inference time with no ANN needed. A separate ranking stage is unnecessary.
+
+**Primary: In-batch negatives softmax** — same objective as the book model.
+
+- **Loss**: cross-entropy over in-batch negatives. B×B score matrix, diagonal = correct targets.
+- **Dataset**: rollback examples — for each play event, context = all prior plays. Up to `MAX_ROLLBACK_EXAMPLES_PER_USER=50` examples per user sampled randomly.
+- **Playtime weighting**: `weights = log(1 + hours) / sum(log(1 + hours))` per user → `history_emb = sum(weights[i] * item_emb[i])`.
+- **Optimizer**: Adam, `lr=0.001`, `weight_decay=1e-5`
+- **Batch size**: 512
+- **Temperature**: 0.05
+- **Steps**: 150,000
+- **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
+
+**Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. If timestamps are unavailable, omit the `timestamp_embedding_tower` entirely from the user tower (adjust dims accordingly). The review `posted` date is available but only for reviewed games — too sparse to use as a general timestamp.
+
+## Canary Users for Eval
+
+```python
+USER_TYPE_TO_FAVORITE_GENRES = {
+    'RPG Lover':     ['RPG'],
+    'FPS Lover':     ['Action', 'FPS'],
+    'Strategy Lover': ['Strategy'],
+}
+USER_TYPE_TO_FAVORITE_GAMES = {
+    'RPG Lover':     ['The Witcher 3: Wild Hunt', 'Dark Souls III', 'Divinity: Original Sin 2'],
+    'FPS Lover':     ['Counter-Strike: Global Offensive', 'DOOM', 'Titanfall 2'],
+    'Strategy Lover': ['Civilization VI', 'XCOM 2', 'Total War: WARHAMMER II'],
+}
+USER_TYPE_TO_TAGS = {
+    'RPG Lover':     ['RPG', 'Open World', 'Story Rich', 'Character Customization'],
+    'FPS Lover':     ['FPS', 'Multiplayer', 'Action', 'Competitive'],
+    'Strategy Lover': ['Strategy', 'Turn-Based', '4X', 'Tactical'],
+}
+```
+
+Canary users are synthetic — no real play timestamps. All receive `ts_max_bin` if timestamp tower is used.
+
+## Offline Evaluation
+
+`python main.py eval [checkpoint_path]` — Recall@K, NDCG@K, Hit Rate@K, MRR at K = 1, 5, 10, 20, 50.
+
+**Protocol:** User-level train/val split. 90% of users are train-only; the remaining 10% are held out entirely and never seen during training.
+
+- **Train users**: all interactions used for rollback training examples — no within-user cut needed, no leakage possible.
+- **Val users**: all interactions used for rollback eval examples — no within-user cut needed either, since none of their data was ever in training. Any rollback pair from a val user is valid.
+
+At eval time, val user rollback examples are generated the same way as training examples: for each (context, target) pair, rank all corpus games and measure whether the target appears in top K.
+
+**Why no within-user 90/10 split:** The within-user split exists in the book model to prevent leakage — you can't let the model train on a future read and also use it as an eval label. That concern disappears entirely when val users are held out at the user level: the model has seen zero of their interactions, so there is nothing to leak.
+
+**Why not per-user 90/10 split (book model protocol):** That protocol tests "predict future interactions for users the model has already partially seen." For a no-user-ID model this is a weaker test — the model implicitly learned each user's taste profile from their 90% training context. Held-out users are a stricter and more realistic measure of cold-start generalization, which is the actual inference scenario.
+
+## Relationship to Book Repo
+
+| File            | Status                                                             |
+|-----------------|--------------------------------------------------------------------|
+| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline       |
+| `features.py`   | Adapted — same logic, game column names, developer feature added   |
+| `dataset.py`    | Adapted — same logic, playtime-weighted rollback examples          |
+| `model.py`      | Extended — developer + price towers; timestamp may be omitted      |
+| `train.py`      | Identical                                                          |
+| `evaluate.py`   | Adapted — canary dicts use game titles and Steam tags              |
+| `export.py`     | Adapted — exclude large buffers from model.pth                     |
+
+## Serving / Export Notes
+
+`game_tag_matrix` (registered buffer, n_games × n_tags × float32) may exceed GitHub's 100MB limit at scale. Follow the same pattern as the book model: exclude it from `model.pth`, store in `feature_store.pt` instead. Streamlit app rebuilds model via `build_model(config, fs)`.
+
+## Immediate Next Step
+
+Create canary users in `src/evaluate.py` (`run_canary` and supporting functions). Canary users are synthetic users defined by favorite game titles and tags — used to sanity-check recommendations after training. The `run_canary` stub currently just prints "not yet implemented."
+
+## Git Workflow
+
+Never commit and push in the same command. Always commit first, then ask before pushing.
+
+For changes that require retraining to validate (hyperparameters, optimizer, scheduler, loss, dataset logic): write the code, then stop. Do not commit until the user has run training and confirmed the results look better.
