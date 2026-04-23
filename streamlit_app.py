@@ -500,6 +500,106 @@ def tab_examples(model, fs, all_ids, all_embs):
     _render_results(df)
 
 
+# ── Tab: About ───────────────────────────────────────────────────────────────
+
+def tab_about():
+    col, _ = st.columns([1, 1])
+    with col:
+        st.header("What is this?")
+        st.markdown(
+            "A PyTorch two-tower neural network trained on the "
+            "[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) "
+            "(~6,200 games, ~1.9M training examples)."
+        )
+        st.markdown(
+            "Trained with in-batch negatives softmax loss, following the YouTube DNN retrieval "
+            "approach (Covington et al., 2016)."
+        )
+        st.markdown(
+            "At inference, a dot product of the user and item embeddings retrieves the most relevant games."
+        )
+
+        st.subheader("The core design choice: no user ID")
+        st.markdown("Most recommender systems embed a unique ID for every user in the training set.")
+        st.markdown("This works, but has a fundamental limitation: **inference is only possible for users the model has already seen.**")
+        st.markdown("If a new user signs up, you have no embedding for them. Your options are:")
+        st.markdown("""
+- Retrain the entire model
+- Partially fine-tune the new user in with a few gradient steps
+- Find an existing user who seems similar and use their embedding as a proxy
+""")
+        st.markdown("This model takes a different approach. **There is no user ID embedding.**")
+        st.markdown("Instead, every user is represented as a function of their taste signals — play history and genre affinity.")
+        st.markdown("The model learns to embed *features of the user*, not the user themselves.")
+        st.markdown(
+            "This means the model can generate recommendations for **any user** as long as you can provide "
+            "even a small amount of signal: a few games they've played, some tags they like."
+        )
+        st.markdown("No retraining required. No cold-start problem at the user level. The same trained model works for users who never existed when the model was trained.")
+
+    col, _ = st.columns([1, 1])
+    with col:
+        st.header("User Tower")
+        st.markdown(
+            "Two components are concatenated into a single 105-dim user embedding."
+        )
+        st.markdown("""
+| Component | Input | What it learns |
+|---|---|---|
+| Playtime-Weighted Avg Pool | Play history — game IDs weighted by log(1 + hours) | Collaborative taste — heavily-played games pull the user toward similar items in embedding space |
+| user_genre_tower | Debiased avg log-playtime per genre + play fraction per genre | Genre affinity — how strongly you lean toward each broad genre category |
+""", unsafe_allow_html=True)
+
+        st.markdown(
+            "**No timestamp tower** — the Steam dataset (`australian_users_items.json`) contains no "
+            "buy date, install date, or first-play timestamp per game, so this signal is omitted entirely."
+        )
+
+        st.header("Item Tower")
+        st.markdown(
+            "Six independent signals concatenated into a single 105-dim item embedding."
+        )
+        st.markdown("""
+| Component | Input | What it learns |
+|---|---|---|
+| item_embedding_tower | Game ID (shared lookup with user history pool) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
+| item_genre_tower | Uniform-weighted genre vector | Broad genre positioning |
+| item_tag_tower | TF-IDF Steam tag scores (164 tags) | Community descriptors — granular signals like "Open World", "Rogue-like", "Dark Souls-like" |
+| developer_tower | Primary developer index | Developer identity — clusters games by studio and stylistically similar developers |
+| year_embedding_tower | Steam release year | Era — captures generational shifts in game design |
+| price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
+""", unsafe_allow_html=True)
+
+        st.header("Shared Embeddings")
+        st.markdown("""
+**item_embedding_lookup** — The same embedding table is used for the target game's ID
+*and* for each game in the user's play history pool.
+
+This forces the user's history representation and the item's identity into the same
+space: a game you played heavily pulls your user embedding directly toward that game's embedding.
+""")
+
+        st.header("Training")
+        st.markdown("""
+- **Dataset:** UCSD Steam — 88k Australian users, ~5,400 corpus games (≥10 users with ≥6 min playtime)
+- **Corpus filtering:** Games with fewer than 10 qualifying users excluded. Users with fewer than 5 or more than 10,000 total hours excluded. Users with fewer than 2 corpus games excluded.
+- **Playtime signal:** `log(1 + hours)` — compresses the extreme tail while preserving ordering. Used as weighting in the history pool; never a prediction target.
+- **Loss:** Cross-entropy over in-batch negatives (softmax) — each step produces a B×B score matrix; diagonal entries are the correct targets
+- **Optimizer:** Adam, lr=0.001, weight_decay=1e-5, CosineAnnealingLR
+- **Batch size:** 512 (511 in-batch negatives per example)
+- **Steps:** 150,000
+- **Training examples:** Rollback construction — for each play event, context = all prior plays sorted by Steam app ID (release-date proxy). Up to 50 examples per user (~1.9M train / 210k val)
+""")
+
+        st.header("Limitations")
+        st.markdown("""
+- ~6,200-game corpus — games with fewer than 10 qualifying users are excluded
+- No timestamps — items are ordered by Steam app ID as a release-date proxy, not actual play order
+- Witcher 3, Dark Souls III, Skyrim, Civilization VI and other major titles are absent from this version of the dataset's metadata and cannot be recommended
+- Free-to-play games (Dota 2, TF2) are also missing from the metadata file
+""")
+
+
 # ── Layout ────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Steam Game Recommender", layout="wide")
@@ -531,8 +631,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-recommend_tab, examples_tab, similar_tab, genres_tab, tags_tab = st.tabs(
-    ["Recommend", "Examples", "Similar", "Genres", "Tags"]
+recommend_tab, examples_tab, similar_tab, genres_tab, tags_tab, about_tab = st.tabs(
+    ["Recommend", "Examples", "Similar", "Genres", "Tags", "About"]
 )
 
 with recommend_tab:
@@ -549,3 +649,6 @@ with genres_tab:
 
 with tags_tab:
     tab_explore_tags(model, be, fs, all_ids, all_norm_tag)
+
+with about_tab:
+    tab_about()
