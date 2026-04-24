@@ -553,11 +553,6 @@ def tab_about():
 | user_genre_tower | Debiased avg log-playtime per genre + play fraction per genre | Genre affinity — how strongly you lean toward each broad genre category |
 """, unsafe_allow_html=True)
 
-        st.markdown(
-            "**No timestamp tower** — the Steam dataset (`australian_users_items.json`) contains no "
-            "buy date, install date, or first-play timestamp per game, so this signal is omitted entirely."
-        )
-
         st.header("Item Tower")
         st.markdown(
             "Six sub-embeddings are concatenated (80-dim), then passed through a projection MLP → **128-dim**."
