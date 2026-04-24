@@ -109,45 +109,52 @@ Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-a
 Two-tower design with dot product prediction. Mirrors the book model with **developer embedding** in place of author embedding.
 
 ```
-User Tower (intentionally simple):
-  playtime_weighted_avg_pool(item_embeddings[play_history])  → history_emb   (item_id_embedding_size)
-  user_genre_tower([avg_playtime_per_genre | play_frac])     → genre_emb     (user_genre_embedding_size)
-  timestamp_embedding_tower(play_month)                      → ts_emb        (timestamp_embedding_size)
-  concat → user_combined
+User Tower:
+  playtime_weighted_avg_pool(item_embeddings[play_history])  → history_emb   (item_id_embedding_size=32)
+  user_genre_tower([avg_playtime_per_genre | play_frac])     → genre_emb     (user_genre_embedding_size=32)
+  concat → 64-dim
+  user_projection(Linear proj_hidden=256 → ReLU → Linear output_dim=128) → 128-dim
 
-Item Tower (all content signals):
-  item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size)
-  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size)
-  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size)   [shared with user history pool]
-  developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size)
-  year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size)
-  price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size)
-  concat → item_combined
+Item Tower:
+  item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size=8)
+  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=16)
+  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)   [shared with user history pool]
+  developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size=12)
+  year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size=8)
+  price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size=4)
+  concat → 80-dim
+  item_projection(Linear proj_hidden=256 → ReLU → Linear output_dim=128) → 128-dim
 
-Prediction: dot_product(user_combined, item_combined)
+Prediction: dot_product(user_projection_out, item_projection_out)
 ```
 
-`len(user_combined) == len(item_combined)` must hold. Model raises `ValueError` at construction if violated.
+**Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations of the individual sub-embeddings. It cannot model interactions between signals — things like "RPGs from Japanese developers" (genre × developer) or "price sensitivity varies by how many games you've played" (price × history depth) require nonlinearity to learn. Each tower concatenates its sub-embeddings and passes them through a 2-layer MLP before the dot product. Only the final `output_dim` (128) needs to match across towers — the internal concat sizes are decoupled.
+
+**Initialization:** Sub-tower linear layers use `gain=0.1`. Projection layers are re-initialized separately to `gain=1.0` after the rest of the model. Embedding tables use `gain=0.01`. Using `gain=0.01` for the projection layers causes vanishing gradients — the projection adds two more near-zero-gain layers on top of already-small sub-tower outputs, making dot products exactly zero and preventing learning.
 
 ### Shared towers
 
 - `item_embedding_tower` — shared between item side and user history avg pool
 
-### Planned embedding sizes (to be tuned)
+### Embedding sizes
 
 ```python
-item_id_embedding_size      = 40   # shared: user history pool + item tower
-user_genre_embedding_size   = 50
-timestamp_embedding_size    = 10
-item_genre_embedding_size   = 10
-tag_embedding_size          = 25
-developer_embedding_size    = 15
-item_year_embedding_size    = 10
-price_embedding_size        = 5
+item_id_embedding_size      = 32   # shared: user history pool + item tower (must match)
+user_genre_embedding_size   = 32   # user only
+item_genre_embedding_size   = 8    # item only
+tag_embedding_size          = 16   # item only
+developer_embedding_size    = 12   # item only
+item_year_embedding_size    = 8    # item only
+price_embedding_size        = 4    # item only
 
-# user: 40 + 50 + 10 = 100
-# item: 10 + 25 + 40 + 15 + 10 + 5 = 105  ← must match; adjust before construction
+proj_hidden  = 256
+output_dim   = 128   # only this must match across towers
+
+# user concat: 32 + 32 = 64  → proj → 128
+# item concat: 8 + 16 + 32 + 12 + 8 + 4 = 80  → proj → 128
 ```
+
+Only `item_id_embedding_size` and `output_dim` are constrained: the former because it is a shared parameter, the latter because the dot product requires equal dimensions.
 
 ### Developer tower details
 

@@ -18,26 +18,31 @@ This is a sibling project to the [Book Recommender System](https://github.com/ni
 - **Developer embedding tower** — analogous to the author tower in the book model. Clusters games by studio and stylistically similar developers.
 - **Price embedding tower** — free-to-play vs. indie vs. AAA is a meaningful taste dimension; bucketed into 9 price tiers.
 - **No timestamp tower** — `australian_users_items.json` contains no buy date, install date, or first-play timestamp per game, so this signal is omitted entirely.
+- **Projection MLP in each tower** — each tower concatenates its sub-embeddings and passes them through a 2-layer MLP (→256→ReLU→128) before the dot product. A plain concat fed directly into a dot product can only learn additive combinations of the individual signals; the MLP learns cross-feature interactions (e.g. genre × developer, price × history depth) that require nonlinearity. Both towers project to the same 128-dim space; only the output dim needs to match, not the internal concat sizes.
 
 ## Model architecture
 
 ```
 User Tower:
-  playtime_weighted_avg_pool(item_embeddings[play_history])  → 40-dim
-  user_genre_tower([debiased_avg_log_playtime | play_frac])  → 65-dim
-  concat → 105-dim user embedding
+  playtime_weighted_avg_pool(item_embeddings[play_history])  → 32-dim
+  user_genre_tower([debiased_avg_log_playtime | play_frac])  → 32-dim
+  concat → 64-dim
+  user_projection(Linear 256 → ReLU → Linear 128)           → 128-dim
 
 Item Tower:
-  item_genre_tower(genre_onehot)          → 10-dim
-  item_tag_tower(tfidf_tag_scores)        → 25-dim
-  item_embedding_tower(game_id)           → 40-dim  ← shared with user history pool
-  developer_tower(primary_developer_idx)  → 15-dim
-  year_embedding_tower(release_year)      → 10-dim
-  price_embedding_tower(price_bucket)     →  5-dim
-  concat → 105-dim item embedding
+  item_genre_tower(genre_onehot)          →  8-dim
+  item_tag_tower(tfidf_tag_scores)        → 16-dim
+  item_embedding_tower(game_id)           → 32-dim  ← shared with user history pool
+  developer_tower(primary_developer_idx)  → 12-dim
+  year_embedding_tower(release_year)      →  8-dim
+  price_embedding_tower(price_bucket)     →  4-dim
+  concat → 80-dim
+  item_projection(Linear 256 → ReLU → Linear 128)           → 128-dim
 
-Prediction: dot_product(user_embedding, item_embedding)
+Prediction: dot_product(user_projection_out, item_projection_out)
 ```
+
+The projection MLP is critical: a plain concat fed directly into a dot product can only learn additive combinations of the individual sub-embeddings. The MLP learns cross-feature interactions that require nonlinearity. Only the output dim (128) needs to match across towers — the internal concat sizes are independent.
 
 ## Offline Evaluation
 

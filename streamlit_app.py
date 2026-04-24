@@ -541,7 +541,7 @@ def tab_about():
     with col:
         st.header("User Tower")
         st.markdown(
-            "Two components are concatenated into a single 105-dim user embedding."
+            "Two sub-embeddings are concatenated (64-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
@@ -557,7 +557,7 @@ def tab_about():
 
         st.header("Item Tower")
         st.markdown(
-            "Six independent signals concatenated into a single 105-dim item embedding."
+            "Six sub-embeddings are concatenated (80-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
@@ -569,6 +569,21 @@ def tab_about():
 | year_embedding_tower | Steam release year | Era — captures generational shifts in game design |
 | price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
 """, unsafe_allow_html=True)
+
+        st.header("Projection MLP")
+        st.markdown("""
+Concatenating sub-embeddings and feeding them directly into a dot product only learns **additive combinations**
+of the individual signals — it cannot model interactions between them.
+
+Each tower ends with a 2-layer projection MLP (`concat → Linear(256) → ReLU → Linear(128)`) before the dot product.
+This lets the model learn cross-feature interactions, such as:
+- Genre × developer (e.g. JRPGs from Japanese studios vs. Western action-RPGs)
+- Price tier × history depth (price sensitivity varies by play style)
+- Tag cluster × release era (roguelikes from 2012 vs. 2020 are different products)
+
+Both towers project to the same 128-dim output space — only this final dim needs to match.
+The internal concat sizes (64 user, 80 item) are independent of each other.
+""")
 
         st.header("Shared Embeddings")
         st.markdown("""
