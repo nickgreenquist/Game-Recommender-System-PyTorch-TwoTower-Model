@@ -27,7 +27,6 @@ USER_TYPE_TO_FAVORITE_GENRES = {
     'JRPG Lover':        ['RPG'], 
     'FPS Lover':         [],
     'Civ Lover':         ['Strategy'],
-    'Citybuilder Lover': ['Simulation'],
     'Indie Lover':       ['Indie'],
     'Racing Lover':      ['Racing'],
     'Fighting Lover':    []
@@ -59,12 +58,6 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         "Sid Meier's Civilization IV: Colonization",
         'Total War™: ROME II - Emperor Edition'
     ],
-    'Citybuilder Lover': [
-        'SimCity™ 4 Deluxe Edition',
-        'Caesar™ 3',
-        'Cities: Skylines',
-        'Cities XXL'
-    ],
     'Indie Lover': [
         'Terraria',
         'FTL: Faster Than Light',
@@ -90,7 +83,6 @@ USER_TYPE_TO_TAGS = {
     'JRPG Lover':         ['JRPG'],
     'FPS Lover':          ['FPS'],
     'Civ Lover':          [],
-    'Citybuilder Lover':  ['City Builder'],
     'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
     'Racing Lover':       ['Racing'],
     'Fighting Lover':     ['Fighting']
@@ -150,7 +142,14 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
     dev_all   = torch.cat(dev_embs,    dim=0)
     year_all  = torch.cat(year_embs,   dim=0)
     price_all = torch.cat(price_embs,  dim=0)
-    combined  = torch.cat([genre_all, tag_all, game_all, dev_all, year_all, price_all], dim=1)
+
+    # Apply item projection MLP in batches to get final output_dim embeddings
+    concat_all = torch.cat([genre_all, tag_all, game_all, dev_all, year_all, price_all], dim=1)
+    proj_batches = []
+    with torch.no_grad():
+        for s in range(0, n_items, batch_size):
+            proj_batches.append(model.item_projection(concat_all[s:s + batch_size]))
+    combined = torch.cat(proj_batches, dim=0)   # (n_items, output_dim)
 
     game_embeddings = {}
     for i, iid in enumerate(item_ids):
@@ -283,8 +282,8 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
 
     X_genre   = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
     genre_emb = model.user_genre_tower(X_genre)
-
-    return torch.cat([history_emb, genre_emb], dim=1)   # (1, user_dim)
+    concat    = torch.cat([history_emb, genre_emb], dim=1)
+    return model.user_projection(concat)   # (1, output_dim)
 
 
 def run_canary_eval(model: GameRecommender, fs: dict,
