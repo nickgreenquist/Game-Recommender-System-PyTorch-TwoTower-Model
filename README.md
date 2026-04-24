@@ -17,7 +17,6 @@ Trained with in-batch negatives softmax loss, following the YouTube DNN retrieva
 - **In-batch negatives softmax** — cross-entropy over in-batch negatives (batch size 512), following the YouTube DNN approach (Covington et al., 2016).
 - **Developer embedding tower** — analogous to the author tower in the book model. Clusters games by studio and stylistically similar developers.
 - **Price embedding tower** — free-to-play vs. indie vs. AAA is a meaningful taste dimension; bucketed into 9 price tiers.
-- **No timestamp tower** — `australian_users_items.json` contains no buy date, install date, or first-play timestamp per game, so this signal is omitted entirely.
 - **Projection MLP in each tower** — each tower concatenates its sub-embeddings and passes them through a 2-layer MLP (→256→ReLU→128) before the dot product. A plain concat fed directly into a dot product can only learn additive combinations of the individual signals; the MLP learns cross-feature interactions (e.g. genre × developer, price × history depth) that require nonlinearity. Both towers project to the same 128-dim space; only the output dim needs to match, not the internal concat sizes.
 
 ## Model architecture
