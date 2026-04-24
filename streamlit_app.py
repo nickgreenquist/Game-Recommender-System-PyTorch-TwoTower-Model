@@ -591,6 +591,24 @@ space: a game you played heavily pulls your user embedding directly toward that 
 - **Training examples:** Rollback construction — for each play event, context = all prior plays sorted by Steam app ID (release-date proxy). Up to 50 examples per user (~1.9M train / 210k val)
 """)
 
+        st.header("Offline Evaluation")
+        st.markdown(
+            "Evaluated on **2,000 held-out users** (never seen during training) across "
+            "**55,186 rollback examples**. Corpus: 5,442 games. "
+            "Each example has one target; Recall@K = Hit Rate@K for single-target eval."
+        )
+        st.markdown("""
+| K | Recall@K | NDCG@K | vs. Random (HR@K) |
+|---|---|---|---|
+| 1 | 0.0634 | 0.0634 | 350× |
+| 5 | 0.1904 | 0.1280 | 207× |
+| 10 | 0.2751 | 0.1552 | 153× |
+| 20 | 0.3832 | 0.1825 | 104× |
+| 50 | 0.5587 | 0.2173 | 61× |
+
+MRR: **0.1351** (random: 0.0017, +79×)
+""")
+
         st.header("Limitations")
         st.markdown("""
 - ~6,200-game corpus — games with fewer than 10 qualifying users are excluded

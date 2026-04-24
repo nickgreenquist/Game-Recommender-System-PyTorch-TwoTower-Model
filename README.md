@@ -39,6 +39,20 @@ Item Tower:
 Prediction: dot_product(user_embedding, item_embedding)
 ```
 
+## Offline Evaluation
+
+Evaluated on 2,000 held-out users (never seen during training) across 55,186 rollback examples. Corpus: 5,442 games.
+
+| K | Recall@K | NDCG@K | vs. Random (HR@K) |
+|---|---|---|---|
+| 1 | 0.0634 | 0.0634 | 350× |
+| 5 | 0.1904 | 0.1280 | 207× |
+| 10 | 0.2751 | 0.1552 | 153× |
+| 20 | 0.3832 | 0.1825 | 104× |
+| 50 | 0.5587 | 0.2173 | 61× |
+
+MRR: **0.1351** (random: 0.0017, +79×)
+
 ## Usage
 
 ```bash
