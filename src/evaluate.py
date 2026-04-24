@@ -490,6 +490,8 @@ def _resolve_checkpoint(checkpoint_path: str, checkpoint_dir: str):
     if checkpoint_path is not None:
         return checkpoint_path
     candidates = sorted(
+        glob.glob(os.path.join(checkpoint_dir, 'best_proj_softmax_*.pth')) +
+        glob.glob(os.path.join(checkpoint_dir, 'proj_softmax_*_step_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'best_softmax_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'softmax_*_step_*.pth')),
         key=os.path.getmtime, reverse=True

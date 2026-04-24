@@ -19,35 +19,22 @@ from src.model import GameRecommender
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 def get_config() -> dict:
-    item_id_embedding_size    = 40
-    user_genre_embedding_size = 65   # sized so user_dim == item_dim (no timestamp tower)
-    item_genre_embedding_size = 10
-    tag_embedding_size        = 25
-    developer_embedding_size  = 15
-    item_year_embedding_size  = 10
-    price_embedding_size      = 5
-
-    user_dim = item_id_embedding_size + user_genre_embedding_size
-    item_dim = (item_genre_embedding_size + tag_embedding_size
-                + item_id_embedding_size + developer_embedding_size
-                + item_year_embedding_size + price_embedding_size)
-    assert user_dim == item_dim, (
-        f"Tower size mismatch — user={user_dim} "
-        f"(history={item_id_embedding_size} + genre={user_genre_embedding_size}), "
-        f"item={item_dim} "
-        f"(genre={item_genre_embedding_size} + tag={tag_embedding_size} "
-        f"+ game={item_id_embedding_size} + dev={developer_embedding_size} "
-        f"+ year={item_year_embedding_size} + price={price_embedding_size})"
-    )
-
+    # Sub-embedding sizes — intermediate features, not final representations.
+    # Only item_id_embedding_size must match across towers (shared lookup).
+    # user concat: item_id + user_genre = 32 + 32 = 64
+    # item concat: item_genre + tag + item_id + dev + year + price = 8+16+32+12+8+4 = 80
+    # Both project to output_dim via the projection MLP.
     return {
-        'item_id_embedding_size':    item_id_embedding_size,
-        'user_genre_embedding_size': user_genre_embedding_size,
-        'item_genre_embedding_size': item_genre_embedding_size,
-        'tag_embedding_size':        tag_embedding_size,
-        'developer_embedding_size':  developer_embedding_size,
-        'item_year_embedding_size':  item_year_embedding_size,
-        'price_embedding_size':      price_embedding_size,
+        'item_id_embedding_size':    32,   # shared: user history pool + item tower
+        'user_genre_embedding_size': 32,   # user only (no longer constrained by item_dim)
+        'item_genre_embedding_size': 8,    # item only
+        'tag_embedding_size':        16,   # item only (164 tags → MLP handles compression)
+        'developer_embedding_size':  12,   # item only
+        'item_year_embedding_size':  8,    # item only
+        'price_embedding_size':      4,    # item only (9 buckets)
+        # Projection MLP — learns cross-feature interactions after sub-embedding concat
+        'proj_hidden': 256,
+        'output_dim':  128,
         # Training
         'lr':               0.001,
         'weight_decay':     1e-5,
@@ -95,6 +82,8 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
         developer_embedding_size=config['developer_embedding_size'],
         item_year_embedding_size=config['item_year_embedding_size'],
         price_embedding_size=config['price_embedding_size'],
+        proj_hidden=config['proj_hidden'],
+        output_dim=config['output_dim'],
     )
     return model
 
@@ -102,7 +91,7 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
 def print_model_summary(model: GameRecommender) -> None:
     history_dim  = model.item_embedding_lookup.embedding_dim
     genre_dim    = model.user_genre_tower[-2].out_features
-    user_total   = history_dim + genre_dim
+    user_concat  = history_dim + genre_dim
 
     item_genre_d = model.item_genre_tower[-2].out_features
     item_tag_d   = model.item_tag_tower[-2].out_features
@@ -110,14 +99,18 @@ def print_model_summary(model: GameRecommender) -> None:
     item_dev_d   = model.developer_tower[-2].out_features
     year_d       = model.year_embedding_tower[-2].out_features
     price_d      = model.price_embedding_tower[-2].out_features
-    item_total   = item_genre_d + item_tag_d + item_game_d + item_dev_d + year_d + price_d
+    item_concat  = item_genre_d + item_tag_d + item_game_d + item_dev_d + year_d + price_d
 
-    n_params = sum(p.nelement() for p in model.parameters() if p.requires_grad)
+    proj_hidden  = model.user_projection[0].out_features
+    output_dim   = model.output_dim
+    n_params     = sum(p.nelement() for p in model.parameters() if p.requires_grad)
 
     print(f"\n── Model dimensions ──")
-    print(f"  User side:  history({history_dim}) + genre({genre_dim})  =  {user_total}")
+    print(f"  User side:  history({history_dim}) + genre({genre_dim})  =  {user_concat}"
+          f"  → proj({proj_hidden})  → {output_dim}")
     print(f"  Item side:  genre({item_genre_d}) + tag({item_tag_d}) + game({item_game_d})"
-          f" + dev({item_dev_d}) + year({year_d}) + price({price_d})  =  {item_total}")
+          f" + dev({item_dev_d}) + year({year_d}) + price({price_d})  =  {item_concat}"
+          f"  → proj({proj_hidden})  → {output_dim}")
     print(f"  Parameters: {n_params:,}")
 
 
@@ -189,7 +182,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     os.makedirs(checkpoint_dir, exist_ok=True)
     run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     best_val_loss = float('inf')
-    best_path     = os.path.join(checkpoint_dir, f'best_softmax_{run_timestamp}.pth')
+    best_path     = os.path.join(checkpoint_dir, f'best_proj_softmax_{run_timestamp}.pth')
 
     loss_train = []
 
@@ -240,7 +233,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
 
             if i > 0 and i % checkpoint_every == 0:
                 periodic = os.path.join(checkpoint_dir,
-                                        f'softmax_{run_timestamp}_step_{i:06d}.pth')
+                                        f'proj_softmax_{run_timestamp}_step_{i:06d}.pth')
                 torch.save(model.state_dict(), periodic)
                 print(f"  → periodic checkpoint → {periodic}")
         else:

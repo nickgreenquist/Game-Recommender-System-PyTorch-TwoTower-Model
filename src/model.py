@@ -3,20 +3,24 @@ Two-Tower GameRecommender model.
 
 No timestamp tower — Steam has no buy date / first-play timestamp in australian_users_items.json.
 
-User tower: play-history playtime-weighted avg pool + genre context
-Item tower: genre + tag + game_id + developer + year + price
+User tower: play-history playtime-weighted avg pool + genre context → projection MLP
+Item tower: genre + tag + game_id + developer + year + price → projection MLP
 
-Embedding sizes (must satisfy user_dim == item_dim):
+Both towers project to output_dim via a shared-size MLP so they can be dot-producted.
+The projection MLP learns cross-feature interactions (e.g. genre × tag, price × history)
+that a plain concat + dot-product cannot express.
+
+Sub-embedding sizes (inputs to the projection MLPs):
   item_id_embedding_size    = 40   shared: user history pool + item tower
-  user_genre_embedding_size = 65   user only (sized to match item_dim with no timestamp)
+  user_genre_embedding_size = 65   user only
   item_genre_embedding_size = 10   item only
   tag_embedding_size        = 25   item only
   developer_embedding_size  = 15   item only
   item_year_embedding_size  = 10   item only
   price_embedding_size      = 5    item only
 
-  user: 40 + 65 = 105
-  item: 10 + 25 + 40 + 15 + 10 + 5 = 105  ✓
+  user concat:  40 + 65      = 105  → proj MLP → output_dim
+  item concat:  10+25+40+15+10+5 = 105  → proj MLP → output_dim
 """
 import torch
 import torch.nn as nn
@@ -40,6 +44,8 @@ class GameRecommender(nn.Module):
                  developer_embedding_size=15,
                  item_year_embedding_size=10,
                  price_embedding_size=5,
+                 proj_hidden=256,
+                 output_dim=128,
                  ):
         """
         game_tag_matrix : float32 tensor (n_games+1, n_tags)
@@ -48,11 +54,14 @@ class GameRecommender(nn.Module):
         game_dev_idx    : int64 tensor (n_games+1,)
             Entry i = developer vocab index for game at embedding index i.
             Last entry (index n_games) = n_developers — padding.
+        proj_hidden     : hidden size of the projection MLP in both towers.
+        output_dim      : final embedding size for dot-product comparison.
         """
         super().__init__()
 
         self.game_pad_idx = n_games
         self.dev_pad_idx  = n_developers
+        self.output_dim   = output_dim
 
         self.register_buffer('game_tag_matrix', game_tag_matrix)
         self.register_buffer('game_dev_idx',    game_dev_idx)
@@ -113,25 +122,36 @@ class GameRecommender(nn.Module):
             nn.Tanh()
         )
 
-        # ── Dimension check ───────────────────────────────────────────────────
-        user_dim = item_id_embedding_size + user_genre_embedding_size
-        item_dim = (item_genre_embedding_size + tag_embedding_size
-                    + item_id_embedding_size + developer_embedding_size
-                    + item_year_embedding_size + price_embedding_size)
-        if user_dim != item_dim:
-            raise ValueError(
-                f"User dim ({user_dim}) != item dim ({item_dim}). "
-                f"user: history {item_id_embedding_size} + genre {user_genre_embedding_size}. "
-                f"item: genre {item_genre_embedding_size} + tag {tag_embedding_size} "
-                f"+ game {item_id_embedding_size} + dev {developer_embedding_size} "
-                f"+ year {item_year_embedding_size} + price {price_embedding_size}."
-            )
+        # ── Projection MLPs (learn cross-feature interactions) ────────────────
+        user_concat_dim = item_id_embedding_size + user_genre_embedding_size
+        item_concat_dim = (item_genre_embedding_size + tag_embedding_size
+                           + item_id_embedding_size + developer_embedding_size
+                           + item_year_embedding_size + price_embedding_size)
+
+        # No activation on the final linear — feeds directly into dot product.
+        self.user_projection = nn.Sequential(
+            nn.Linear(user_concat_dim, proj_hidden),
+            nn.ReLU(),
+            nn.Linear(proj_hidden, output_dim),
+        )
+        self.item_projection = nn.Sequential(
+            nn.Linear(item_concat_dim, proj_hidden),
+            nn.ReLU(),
+            nn.Linear(proj_hidden, output_dim),
+        )
 
         self.apply(self._init_weights)
+        # Projection layers need standard gain — gain=0.01 compounds across multiple
+        # layers and causes vanishing gradients when sub-tower outputs are also small.
+        for proj in [self.user_projection, self.item_projection]:
+            for m in proj.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.constant_(m.bias, 0)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight, gain=0.01)
+            nn.init.xavier_uniform_(module.weight, gain=0.1)
             if module.bias is not None:
                 nn.init.constant_(module.bias, 0)
         elif isinstance(module, nn.Embedding):
@@ -149,7 +169,8 @@ class GameRecommender(nn.Module):
         history_embs   = self.item_embedding_lookup(X_history)
         history_emb    = (history_embs * w).sum(dim=1) / weight_sum
         genre_emb      = self.user_genre_tower(X_genre)
-        return torch.cat([history_emb, genre_emb], dim=1)
+        concat         = torch.cat([history_emb, genre_emb], dim=1)
+        return self.user_projection(concat)
 
     def item_embedding(self, target_genre, target_year_idx, target_game_idx,
                        target_dev_idx, target_price):
@@ -171,8 +192,9 @@ class GameRecommender(nn.Module):
                              self.year_embedding_lookup(target_year_idx))
         price_emb      = self.price_embedding_tower(
                              self.price_embedding_lookup(target_price))
-        return torch.cat([item_genre_emb, item_tag_emb, item_emb,
-                          dev_emb, year_emb, price_emb], dim=1)
+        concat         = torch.cat([item_genre_emb, item_tag_emb, item_emb,
+                                    dev_emb, year_emb, price_emb], dim=1)
+        return self.item_projection(concat)
 
     def forward(self, X_genre, X_history, X_history_weights,
                 target_genre, target_year_idx, target_game_idx,
