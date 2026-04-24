@@ -207,7 +207,8 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
 
     X_genre   = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
     genre_emb = model.user_genre_tower(X_genre)
-    return torch.cat([history_emb, genre_emb], dim=1)
+    concat    = torch.cat([history_emb, genre_emb], dim=1)
+    return model.user_projection(concat)
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,

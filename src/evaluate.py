@@ -24,7 +24,7 @@ from src.train import build_model, get_config, print_model_summary
 
 USER_TYPE_TO_FAVORITE_GENRES = {
     'Western RPG Lover': ['RPG'],
-    'JRPG Lover':        ['RPG'], 
+    'JRPG Lover':        [], 
     'FPS Lover':         [],
     'Civ Lover':         ['Strategy'],
     'Indie Lover':       ['Indie'],
@@ -42,15 +42,19 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Mass Effect 2',
     ],
     'JRPG Lover': [
-        'FINAL FANTASY VI',
+        'Mugen Souls',
+        'OH! RPG!',
+        'Ys VI: The Ark of Napishtim',
+        'Wild Season',
         'Disgaea PC / 魔界戦記ディスガイア PC',
-        'FINAL FANTASY VIII'
+        'Hyperdevotion Noire: Goddess Black Heart (Neptunia)',
+        'FINAL FANTASY® XIII'
     ],
     'FPS Lover': [
-        'Counter-Strike: Global Offensive',
-        'DOOM',
-        'Call of Duty®: Black Ops',
-        'Battlefield: Bad Company™ 2'
+        'QUAKE II',
+        "Unreal Tournament 2004: Editor's Choice Edition",
+        'Quake IV',
+        'Final DOOM'
     ],
     'Civ Lover': [
         "Sid Meier's Civilization® V",
@@ -71,10 +75,13 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Test Drive Unlimited 2'
     ],
     'Fighting Lover': [
-        'Mortal Kombat Komplete Edition',
         'Street Fighter X Tekken',
         'Ultra Street Fighter® IV',
-        'Injustice: Gods Among Us Ultimate Edition'
+        'Injustice: Gods Among Us Ultimate Edition',
+        'Divekick',
+        'Street Fighter® IV',
+        'DEAD OR ALIVE 5 Last Round: Core Fighters',
+        'THE KING OF FIGHTERS XIII STEAM EDITION',
     ]
 }
 
@@ -85,7 +92,7 @@ USER_TYPE_TO_TAGS = {
     'Civ Lover':          [],
     'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
     'Racing Lover':       ['Racing'],
-    'Fighting Lover':     ['Fighting']
+    'Fighting Lover':     []
 }
 
 SIMULATED_FAV_LOG_HOURS    = 10.0   # weight for favorite games
