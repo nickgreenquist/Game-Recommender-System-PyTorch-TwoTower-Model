@@ -64,6 +64,8 @@ def load_artifacts():
         developer_embedding_size=cfg['developer_embedding_size'],
         item_year_embedding_size=cfg['item_year_embedding_size'],
         price_embedding_size=cfg['price_embedding_size'],
+        proj_hidden=cfg.get('proj_hidden', 256),
+        output_dim=cfg.get('output_dim', 128),
     )
     model.load_state_dict(
         torch.load('serving/model.pth', weights_only=True), strict=False
