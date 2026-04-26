@@ -43,11 +43,17 @@ _NON_GAME_GENRES = {
 
 @st.cache_resource
 def load_artifacts():
-    fs  = torch.load('serving/feature_store.pt', weights_only=False)
-    be  = torch.load('serving/game_embeddings.pt', weights_only=False)
-    cfg = fs['model_config']
+    fs         = torch.load('serving/feature_store.pt', weights_only=False)
+    be         = torch.load('serving/game_embeddings.pt', weights_only=False)
+    state_dict = torch.load('serving/model.pth', weights_only=True)
+    cfg        = fs['model_config']
 
-    use_ipool = cfg.get('use_item_pool_for_history', False)
+    # Auto-detect architecture from weight shape — same logic as export.py / evaluate.py.
+    # Avoids shape mismatch if cfg and model.pth ever fall out of sync.
+    user_proj_in = state_dict['user_projection.0.weight'].shape[1]
+    gpool_concat = cfg['item_id_embedding_size'] + cfg['user_genre_embedding_size']
+    use_ipool    = (user_proj_in != gpool_concat)
+
     hist_genre_buf = hist_year_buf = hist_price_buf = None
     if use_ipool:
         genre_mat = torch.from_numpy(np.array(fs['game_genre_matrix'], dtype=np.float32))
@@ -81,9 +87,7 @@ def load_artifacts():
         hist_year_buf=hist_year_buf,
         hist_price_buf=hist_price_buf,
     )
-    model.load_state_dict(
-        torch.load('serving/model.pth', weights_only=True), strict=False
-    )
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
 
     all_ids   = list(be.keys())
