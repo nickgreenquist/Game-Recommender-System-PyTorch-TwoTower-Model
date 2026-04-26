@@ -42,12 +42,17 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         checkpoint_path = candidates[0]
 
     print(f"Checkpoint: {checkpoint_path}")
-    config = get_config()
 
     print("Loading features ...")
     fs = load_features(data_dir, version)
 
     state_dict = torch.load(checkpoint_path, weights_only=True)
+    config = get_config()
+    # Auto-detect architecture from checkpoint weight shape.
+    user_proj_in = state_dict['user_projection.0.weight'].shape[1]
+    gpool_concat = config['item_id_embedding_size'] + config['user_genre_embedding_size']
+    config['use_item_pool_for_history'] = (user_proj_in != gpool_concat)
+    print(f"Architecture: {'ipool_gpool' if config['use_item_pool_for_history'] else 'gpool'}")
     model = build_model(config, fs)
     model.load_state_dict(state_dict)
     model.eval()
@@ -153,9 +158,11 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         'genres_ordered':  genres_ordered,
         'tags_ordered':    tags_ordered,
         # Game feature matrices
-        'game_genre_matrix': fs['game_genre_matrix'],   # numpy (n_items, n_genres)
-        'game_tag_matrix':   game_tag_matrix,           # tensor (n_items+1, n_tags) — buffer
-        'game_dev_idx':      game_dev_idx,              # tensor (n_items+1,) — buffer
+        'game_genre_matrix':  fs['game_genre_matrix'],   # numpy (n_items, n_genres)
+        'game_tag_matrix':    game_tag_matrix,           # tensor (n_items+1, n_tags) — buffer
+        'game_dev_idx':       game_dev_idx,              # tensor (n_items+1,) — buffer
+        'game_year_idx':      fs['game_year_idx'],       # numpy (n_items,) int64 — ipool hist buf
+        'game_price_bucket':  fs['game_price_bucket'],   # numpy (n_items,) int64 — ipool hist buf
         # Per-game display metadata
         'item_id_to_developer':  item_id_to_developer,
         'item_id_to_year':       item_id_to_year,

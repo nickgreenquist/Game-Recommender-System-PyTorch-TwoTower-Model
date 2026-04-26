@@ -26,7 +26,7 @@ def get_config() -> dict:
     # Both project to output_dim via the projection MLP.
     return {
         'item_id_embedding_size':    32,   # shared: user history pool + item tower
-        'user_genre_embedding_size': 32,   # user only (no longer constrained by item_dim)
+        'user_genre_embedding_size': 32,   # user only
         'item_genre_embedding_size': 8,    # item only
         'tag_embedding_size':        16,   # item only (164 tags → MLP handles compression)
         'developer_embedding_size':  12,   # item only
@@ -35,6 +35,9 @@ def get_config() -> dict:
         # Projection MLP — learns cross-feature interactions after sub-embedding concat
         'proj_hidden': 256,
         'output_dim':  128,
+        # ipool: pool full item_embedding() output (128-dim) instead of raw item_id (32-dim)
+        # user concat: 128 + 32 = 160 → proj → 128  (vs gpool: 32 + 32 = 64 → proj → 128)
+        'use_item_pool_for_history': True,
         # Training
         'lr':               0.001,
         'weight_decay':     1e-5,
@@ -60,10 +63,24 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
     game_tag_matrix = torch.from_numpy(np.vstack([tag_matrix, pad_row]))
 
     # game_dev_idx: (n_games+1,) — last entry = n_developers (padding index)
-    dev_idx_arr = fs['game_developer_idx']                       # (n_games,) int64
+    dev_idx_arr  = fs['game_developer_idx']                      # (n_games,) int64
     game_dev_idx = torch.from_numpy(
         np.append(dev_idx_arr, n_developers).astype(np.int64)
     )
+
+    use_ipool = config.get('use_item_pool_for_history', False)
+    hist_genre_buf = hist_year_buf = hist_price_buf = None
+    if use_ipool:
+        # Non-persistent buffers indexed by game embedding index, pad row at index n_games.
+        genre_mat      = torch.from_numpy(fs['game_genre_matrix'].astype(np.float32))
+        hist_genre_buf = torch.cat([genre_mat,
+                                    torch.zeros(1, genre_mat.shape[1])], dim=0)
+
+        year_arr      = torch.from_numpy(fs['game_year_idx'].astype(np.int64))
+        hist_year_buf = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
+
+        price_arr      = torch.from_numpy(fs['game_price_bucket'].astype(np.int64))
+        hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
 
     model = GameRecommender(
         n_genres=fs['n_genres'],
@@ -84,12 +101,21 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
         price_embedding_size=config['price_embedding_size'],
         proj_hidden=config['proj_hidden'],
         output_dim=config['output_dim'],
+        use_item_pool_for_history=use_ipool,
+        hist_genre_buf=hist_genre_buf,
+        hist_year_buf=hist_year_buf,
+        hist_price_buf=hist_price_buf,
     )
     return model
 
 
 def print_model_summary(model: GameRecommender) -> None:
-    history_dim  = model.item_embedding_lookup.embedding_dim
+    if model.use_item_pool_for_history:
+        history_dim = model.output_dim
+        pool_label  = f"item_proj_pool({history_dim})"
+    else:
+        history_dim = model.item_embedding_lookup.embedding_dim
+        pool_label  = f"id_pool({history_dim})"
     genre_dim    = model.user_genre_tower[-2].out_features
     user_concat  = history_dim + genre_dim
 
@@ -106,7 +132,7 @@ def print_model_summary(model: GameRecommender) -> None:
     n_params     = sum(p.nelement() for p in model.parameters() if p.requires_grad)
 
     print(f"\n── Model dimensions ──")
-    print(f"  User side:  history({history_dim}) + genre({genre_dim})  =  {user_concat}"
+    print(f"  User side:  {pool_label} + genre({genre_dim})  =  {user_concat}"
           f"  → proj({proj_hidden})  → {output_dim}")
     print(f"  Item side:  genre({item_genre_d}) + tag({item_tag_d}) + game({item_game_d})"
           f" + dev({item_dev_d}) + year({year_d}) + price({price_d})  =  {item_concat}"
@@ -182,7 +208,8 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     os.makedirs(checkpoint_dir, exist_ok=True)
     run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     best_val_loss = float('inf')
-    best_path     = os.path.join(checkpoint_dir, f'best_proj_softmax_{run_timestamp}.pth')
+    arch_tag  = 'ipool_gpool_softmax' if config.get('use_item_pool_for_history') else 'proj_softmax'
+    best_path = os.path.join(checkpoint_dir, f'best_{arch_tag}_{run_timestamp}.pth')
 
     loss_train = []
 
@@ -233,7 +260,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
 
             if i > 0 and i % checkpoint_every == 0:
                 periodic = os.path.join(checkpoint_dir,
-                                        f'proj_softmax_{run_timestamp}_step_{i:06d}.pth')
+                                        f'{arch_tag}_{run_timestamp}_step_{i:06d}.pth')
                 torch.save(model.state_dict(), periodic)
                 print(f"  → periodic checkpoint → {periodic}")
         else:

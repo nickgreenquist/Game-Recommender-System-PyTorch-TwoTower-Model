@@ -54,7 +54,10 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'QUAKE II',
         "Unreal Tournament 2004: Editor's Choice Edition",
         'Quake IV',
-        'Final DOOM'
+        'Final DOOM',
+        'Serious Sam HD: The First Encounter',
+        'Quake III Arena',
+        'Doom 3: BFG Edition'
     ],
     'Civ Lover': [
         "Sid Meier's Civilization® V",
@@ -72,7 +75,9 @@ USER_TYPE_TO_FAVORITE_GAMES = {
     'Racing Lover': [
         'F1 2012™',
         'Need For Speed: Hot Pursuit',
-        'Test Drive Unlimited 2'
+        'Test Drive Unlimited 2',
+        'Ford Street Racing',
+        'Test Drive: Ferrari Racing Legends'
     ],
     'Fighting Lover': [
         'Street Fighter X Tekken',
@@ -275,22 +280,18 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
         ) - avg_log
         genre_ctx[n_genres:] = running_count / total_assign
 
-    # ── History embedding pool (mirrors model.user_embedding) ─────────────────
+    # Delegate to model.user_embedding() — handles both gpool and ipool internally.
+    X_genre = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
     if history:
-        hist_idxs = torch.tensor([h[0] for h in history], dtype=torch.long).unsqueeze(0)   # (1, H)
-        hist_wts  = torch.tensor([[h[1] for h in history]], dtype=torch.float32)            # (1, H)
-        pad_mask  = torch.ones_like(hist_wts).unsqueeze(-1)                                 # (1, H, 1)
-        w         = hist_wts.unsqueeze(-1) * pad_mask                                       # (1, H, 1)
-        wt_sum    = w.sum(dim=1).clamp(min=1e-6)                                            # (1, 1)
-        hist_embs = model.item_embedding_lookup(hist_idxs)                                  # (1, H, D)
-        history_emb = (hist_embs * w).sum(dim=1) / wt_sum                                  # (1, D)
+        hist_idxs = torch.tensor([[h[0] for h in history]], dtype=torch.long)    # (1, H)
+        hist_wts  = torch.tensor([[h[1] for h in history]], dtype=torch.float32) # (1, H)
     else:
-        history_emb = torch.zeros(1, model.item_embedding_lookup.embedding_dim)
+        # Single pad entry with zero weight → history_emb = zeros.
+        hist_idxs = torch.tensor([[model.game_pad_idx]], dtype=torch.long)
+        hist_wts  = torch.zeros(1, 1, dtype=torch.float32)
 
-    X_genre   = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
-    genre_emb = model.user_genre_tower(X_genre)
-    concat    = torch.cat([history_emb, genre_emb], dim=1)
-    return model.user_projection(concat)   # (1, output_dim)
+    with torch.no_grad():
+        return model.user_embedding(X_genre, hist_idxs, hist_wts)   # (1, output_dim)
 
 
 def run_canary_eval(model: GameRecommender, fs: dict,
@@ -496,6 +497,8 @@ def _resolve_checkpoint(checkpoint_path: str, checkpoint_dir: str):
     if checkpoint_path is not None:
         return checkpoint_path
     candidates = sorted(
+        glob.glob(os.path.join(checkpoint_dir, 'best_ipool_gpool_softmax_*.pth')) +
+        glob.glob(os.path.join(checkpoint_dir, 'ipool_gpool_softmax_*_step_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'best_proj_softmax_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'proj_softmax_*_step_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'best_softmax_*.pth')) +
@@ -513,6 +516,11 @@ def _load_model_and_embeddings(checkpoint_path: str, fs: dict) -> tuple:
     print(f"Loading checkpoint: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, weights_only=True)
     config     = get_config()
+    # Auto-detect architecture: ipool has user_concat = output_dim + user_genre,
+    # gpool has user_concat = item_id_embedding_size + user_genre.
+    user_proj_in  = state_dict['user_projection.0.weight'].shape[1]
+    gpool_concat  = config['item_id_embedding_size'] + config['user_genre_embedding_size']
+    config['use_item_pool_for_history'] = (user_proj_in != gpool_concat)
     model      = build_model(config, fs)
     model.load_state_dict(state_dict)
     model.eval()

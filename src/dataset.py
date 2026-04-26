@@ -15,6 +15,7 @@ from tqdm import tqdm
 from src.features import load_features, FEATURES_VERSION
 
 MAX_ROLLBACK_EXAMPLES_PER_USER = 50
+MAX_HISTORY_LEN                = 50   # cap context fed to the user tower (most recent N games)
 
 
 # ── Rollback dataset builder ──────────────────────────────────────────────────
@@ -106,13 +107,14 @@ def _build_rollback_dataset(users: list, fs: dict,
                     ) - avg_log                                # debiased avg log-playtime per genre
                     genre_ctx[n_genres:] = running_count / total_assign  # play fraction
 
-                # Re-normalize context log(1+h) weights over the slice
-                total_ctx = sum(ctx_raw_logs) or 1.0
-                norm_weights = [rl / total_ctx for rl in ctx_raw_logs]
+                # Cap context to most recent MAX_HISTORY_LEN games.
+                # Store raw proportional weights — model normalizes by weight_sum anyway.
+                ctx_ids_slice = ctx_ids[-MAX_HISTORY_LEN:]
+                ctx_raw_slice = ctx_raw_logs[-MAX_HISTORY_LEN:]
 
                 X_genre.append(genre_ctx.tolist())
-                X_history.append(list(ctx_ids))
-                X_history_weights.append(norm_weights)
+                X_history.append(list(ctx_ids_slice))
+                X_history_weights.append(list(ctx_raw_slice))
                 target_item_idx.append(item_idx)
                 target_genre.append(game_genre_matrix[item_idx].tolist())
                 target_dev_idx.append(int(game_dev_idx[item_idx]))

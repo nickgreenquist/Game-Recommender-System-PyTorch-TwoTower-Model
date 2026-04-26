@@ -47,6 +47,16 @@ def load_artifacts():
     be  = torch.load('serving/game_embeddings.pt', weights_only=False)
     cfg = fs['model_config']
 
+    use_ipool = cfg.get('use_item_pool_for_history', False)
+    hist_genre_buf = hist_year_buf = hist_price_buf = None
+    if use_ipool:
+        genre_mat = torch.from_numpy(np.array(fs['game_genre_matrix'], dtype=np.float32))
+        hist_genre_buf = torch.cat([genre_mat, torch.zeros(1, genre_mat.shape[1])], dim=0)
+        year_arr = torch.from_numpy(np.array(fs['game_year_idx'], dtype=np.int64))
+        hist_year_buf = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
+        price_arr = torch.from_numpy(np.array(fs['game_price_bucket'], dtype=np.int64))
+        hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
+
     model = GameRecommender(
         n_genres=fs['n_genres'],
         n_tags=fs['n_tags'],
@@ -66,6 +76,10 @@ def load_artifacts():
         price_embedding_size=cfg['price_embedding_size'],
         proj_hidden=cfg.get('proj_hidden', 256),
         output_dim=cfg.get('output_dim', 128),
+        use_item_pool_for_history=use_ipool,
+        hist_genre_buf=hist_genre_buf,
+        hist_year_buf=hist_year_buf,
+        hist_price_buf=hist_price_buf,
     )
     model.load_state_dict(
         torch.load('serving/model.pth', weights_only=True), strict=False
@@ -197,20 +211,14 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
         genre_ctx[:n_genres][mask] = (running_sum[mask] / running_count[mask]) - avg_log
         genre_ctx[n_genres:]       = running_count / total_assign
 
-    # History embedding pool
+    X_genre = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
     if history:
-        hist_idxs   = torch.tensor([h[0] for h in history], dtype=torch.long).unsqueeze(0)
-        hist_wts    = torch.tensor([[h[1] for h in history]], dtype=torch.float32)
-        hist_embs   = model.item_embedding_lookup(hist_idxs)
-        wt_sum      = hist_wts.unsqueeze(-1).abs().sum(dim=1).clamp(min=1e-6)
-        history_emb = (hist_embs * hist_wts.unsqueeze(-1)).sum(dim=1) / wt_sum
+        hist_idxs = torch.tensor([[h[0] for h in history]], dtype=torch.long)
+        hist_wts  = torch.tensor([[h[1] for h in history]], dtype=torch.float32)
     else:
-        history_emb = torch.zeros(1, model.item_embedding_lookup.embedding_dim)
-
-    X_genre   = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
-    genre_emb = model.user_genre_tower(X_genre)
-    concat    = torch.cat([history_emb, genre_emb], dim=1)
-    return model.user_projection(concat)
+        hist_idxs = torch.tensor([[model.game_pad_idx]], dtype=torch.long)
+        hist_wts  = torch.zeros(1, 1, dtype=torch.float32)
+    return model.user_embedding(X_genre, hist_idxs, hist_wts)
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
@@ -544,12 +552,12 @@ def tab_about():
     with col:
         st.header("User Tower")
         st.markdown(
-            "Two sub-embeddings are concatenated (64-dim), then passed through a projection MLP → **128-dim**."
+            "Two sub-embeddings are concatenated (160-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
 |---|---|---|
-| Playtime-Weighted Avg Pool | Play history — game IDs weighted by log(1 + hours) | Collaborative taste — heavily-played games pull the user toward similar items in embedding space |
+| Item-Pool History (ipool) | Play history — full 128-dim item embeddings weighted by log(1 + hours) | Collaborative taste — pools the complete item tower output (not just a raw ID lookup), capturing genre, tag, developer, era, and price signals from the user's history |
 | user_genre_tower | Debiased avg log-playtime per genre + play fraction per genre | Genre affinity — how strongly you lean toward each broad genre category |
 """, unsafe_allow_html=True)
 
@@ -580,16 +588,19 @@ This lets the model learn cross-feature interactions, such as:
 - Tag cluster × release era (roguelikes from 2012 vs. 2020 are different products)
 
 Both towers project to the same 128-dim output space — only this final dim needs to match.
-The internal concat sizes (64 user, 80 item) are independent of each other.
+The internal concat sizes (160 user, 80 item) are independent of each other.
 """)
 
         st.header("Shared Embeddings")
         st.markdown("""
-**item_embedding_lookup** — The same embedding table is used for the target game's ID
-*and* for each game in the user's play history pool.
+**item_embedding_tower** — The full item tower (genre + tag + game ID + developer + year + price → projection MLP)
+is shared between the target game *and* each game in the user's play history pool.
 
-This forces the user's history representation and the item's identity into the same
-space: a game you played heavily pulls your user embedding directly toward that game's embedding.
+With ipool, the user history averages the **complete 128-dim item embedding** for each played game,
+weighted by log(1 + hours). This gives the user tower access to all of a game's content signals —
+not just its ID — when forming the user representation.
+
+A game you played heavily pulls your user embedding directly toward that game's full embedding.
 """)
 
         st.header("Training")
@@ -606,20 +617,20 @@ space: a game you played heavily pulls your user embedding directly toward that 
 
         st.header("Offline Evaluation")
         st.markdown(
-            "Evaluated on **2,000 held-out users** (never seen during training) across "
-            "**55,186 rollback examples**. Corpus: 5,442 games. "
+            "Evaluated on **2,000 held-out users** (never seen during training). "
+            "Corpus: 5,442 games. "
             "Each example has one target; Recall@K = Hit Rate@K for single-target eval."
         )
         st.markdown("""
 | K | Recall@K | NDCG@K | vs. Random (HR@K) |
 |---|---|---|---|
-| 1 | 0.0634 | 0.0634 | 350× |
-| 5 | 0.1904 | 0.1280 | 207× |
-| 10 | 0.2751 | 0.1552 | 153× |
-| 20 | 0.3832 | 0.1825 | 104× |
-| 50 | 0.5587 | 0.2173 | 61× |
+| 1 | 0.0902 | 0.0902 | 491× |
+| 5 | 0.2614 | 0.1777 | 284× |
+| 10 | 0.3794 | 0.2158 | 206× |
+| 20 | 0.5182 | 0.2508 | 141× |
+| 50 | 0.7165 | 0.2903 | 78× |
 
-MRR: **0.1351** (random: 0.0017, +79×)
+MRR: **0.1845** (random: 0.0017, +109×)
 """)
 
         st.header("Limitations")

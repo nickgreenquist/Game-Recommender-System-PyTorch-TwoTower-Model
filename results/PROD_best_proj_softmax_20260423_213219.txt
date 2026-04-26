@@ -1,0 +1,153 @@
+── Canary user evaluation ──
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Genre: RPG  |  Tags: Action RPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Numen: Contest of Heroes
+  + Victor Vran ARPG
+  + Grim Dawn
+  + Hazen: The Dark Whispers
+  + BorderZone
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                           Recommendations
+────────────────────────────────────────────────────────────────────────────────────────────────────
+The Witcher 2: Assassins of Kings Enhanced Edition       Divinity: Original Sin - Enhanced Edition
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  DARK SOULS™ III
+DARK SOULS™: Prepare To Die™ Edition                     Dragon's Dogma: Dark Arisen
+Divinity: Original Sin (Classic)                         Exanima
+Fallout: New Vegas                                       Angels Fall First
+Mass Effect 2                                            Fallout 4
+                                                         Battlefleet Gothic: Armada
+                                                         DARK SOULS™ II: Scholar of the First Sin
+                                                         Total War: WARHAMMER
+                                                         Tom Clancy’s The Division™
+
+═══════════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Genre: —  |  Tags: JRPG
+═══════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + I am Setsuna
+  + The Legend of Heroes: Trails in the Sky SC
+  + Grandia® II Anniversary Edition
+  + Agarest: Generations of War
+  + FINAL FANTASY III
+───────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                       Recommendations
+───────────────────────────────────────────────────────────────────────────────────────────
+Mugen Souls                                          Epic Battle Fantasy 3
+OH! RPG!                                             Legionwood 1: Tale of the Two Swords
+Ys VI: The Ark of Napishtim                          Full Tilt Poker
+Wild Season                                          Stories: The Path of Destinies
+Disgaea PC / 魔界戦記ディスガイア PC                           The Sad Story of Emmeline Burns
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Bubsy Two-Fur
+FINAL FANTASY® XIII                                  Ortus Regni
+                                                     Catch Me
+                                                     Danganronpa 2: Goodbye Despair
+                                                     Blueprint Tycoon
+
+════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Genre: —  |  Tags: FPS
+════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + STAR WARS™ - Dark Forces
+  + Singularity™
+  + Quake Live™
+  + Far Cry 3 - Blood Dragon
+  + Painkiller: Resurrection
+────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                   Recommendations
+────────────────────────────────────────────────────────────────────────────────────────────
+QUAKE II                                         Serious Sam Classic: The First Encounter
+Unreal Tournament 2004: Editor's Choice Edition  Serious Sam HD: The First Encounter
+Quake IV                                         MDK
+Final DOOM                                       Earthworm Jim 2
+                                                 Lead and Gold: Gangs of the Wild West
+                                                 Secret Files: Tunguska
+                                                 Earthworm Jim 3D
+                                                 Serious Sam Classic: The Second Encounter
+                                                 Krater
+                                                 Dead Space™ 2
+
+════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Genre: Strategy  |  Tags: —
+════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+────────────────────────────────────────────────────────────────────────────
+Sid Meier's Civilization® V                Wargame: Airland Battle
+Civilization IV®: Warlords                 Risk
+Sid Meier's Civilization IV: Colonization  Divinity II: Developer's Cut
+Total War™: ROME II - Emperor Edition      SHOGUN: Total War™ - Collection
+                                           Kingdom Wars
+                                           Chronostorm: Siberian Border
+                                           Master of Orion
+                                           Age of Empires II HD
+                                           StarDrive
+                                           Blood Bowl: Chaos Edition
+
+════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Genre: Indie  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Hotline Miami 2: Wrong Number Digital Comic
+  + Typefighters (Steam Edition)
+  + The Art of Playing
+  + Over The Void
+  + Super Game Jam
+  + Rogue's Tale
+  + Rogue Shooter: The FPS Roguelike
+  + Dungeonmans
+  + 99 Levels To Hell
+  + ADOM (Ancient Domains Of Mystery)
+────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                 Recommendations
+────────────────────────────────────────────────────────────────────────────────────
+Terraria                       Dungeon Rushers: Crawler RPG
+FTL: Faster Than Light         Reverse Crawl
+The Binding of Isaac: Rebirth  ROD: Revolt Of Defense
+Rogue Legacy                   Ant War: Domination
+Spelunky                       Deathstate: Abyssal Edition
+                               Suits: A Business RPG
+                               CHKN
+                               Phantom Brave PC / ファントム・ブレイブ PC
+                               Dinocide
+                               Timber and Stone
+
+════════════════════════════════════════════════════════════
+Racing Lover  |  Genre: Racing  |  Tags: Racing
+════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Sprint Cars Road to Knoxville
+  + Xpand Rally Xtreme
+  + Ford Street Racing
+  + Truck Racer
+  + Test Drive: Ferrari Racing Legends
+────────────────────────────────────────────────────────────
+Favorite Games               Recommendations
+────────────────────────────────────────────────────────────
+F1 2012™                     F1 2014
+Need For Speed: Hot Pursuit  RaceRoom Racing Experience
+Test Drive Unlimited 2       Ford Racing 3
+                             Towtruck Simulator 2015
+                             DiRT Rally
+                             Aerofly FS 1 Flight Simulator
+                             Firefighters 2014
+                             BeamNG.drive
+                             F1 2015
+                             Colin McRae Rally
+
+═══════════════════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Genre: —  |  Tags: —
+═══════════════════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+───────────────────────────────────────────────────────────────────────────────────────────
+Street Fighter X Tekken                    GUILTY GEAR XX ACCENT CORE PLUS R
+Ultra Street Fighter® IV                   GUILTY GEAR Xrd -SIGN-
+Injustice: Gods Among Us Ultimate Edition  Street Fighter V
+Divekick                                   Devil May Cry® 4 Special Edition
+Street Fighter® IV                         Yatagarasu Attack on Cataclysm
+DEAD OR ALIVE 5 Last Round: Core Fighters  Kings of Kung Fu
+THE KING OF FIGHTERS XIII STEAM EDITION    Raiden III Digital Edition
+                                           Mighty No. 9
+                                           Sonic Lost World
+                                           VEGAS Movie Studio 13 Platinum - Steam Powered
