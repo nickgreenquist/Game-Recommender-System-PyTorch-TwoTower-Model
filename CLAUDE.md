@@ -188,6 +188,8 @@ Only `item_id_embedding_size` and `output_dim` are constrained: the former becau
 - **Steps**: 150,000
 - **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
 
+**Frozen item embedding cache — tried, abandoned.** Cached all corpus item embeddings as a detached `(n_items+1, 128)` tensor, refreshed every 100 steps, so user history pooling uses table lookups instead of running the full item tower per step (standard industry pattern). Result: significantly worse — Recall@10 dropped from 0.3794 → 0.2931 and MRR from 0.1845 → 0.1409, below even the old gpool baseline (0.3529 / 0.1725). Root cause: the item tower in ipool serves two coupled roles — encoding candidate items AND encoding history items for user representation. Freezing the cache breaks this coupling; the item tower is only trained as a retrieval target, losing the signal needed for good history embeddings. The cache infrastructure (`_build_item_cache`, `CACHE_REFRESH_STEPS` in `src/train.py`) is kept for potential future use (e.g., hard negative mining) but training passes `item_cache=None` so full gradients flow.
+
 **Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. If timestamps are unavailable, omit the `timestamp_embedding_tower` entirely from the user tower (adjust dims accordingly). The review `posted` date is available but only for reviewed games — too sparse to use as a general timestamp.
 
 ## Canary Users for Eval
@@ -310,4 +312,6 @@ Only `user_concat_dim` changes. Everything else stays the same.
 
 Never commit and push in the same command. Always commit first, then ask before pushing.
 
-For changes that require retraining to validate (hyperparameters, optimizer, scheduler, loss, dataset logic): write the code, then stop. Do not commit until the user has run training and confirmed the results look better.
+For changes that require retraining to validate (hyperparameters, optimizer, scheduler, loss, dataset logic, model architecture): write the code, then stop. Do not commit until the user has run training and confirmed the results look better.
+
+**After any model/training change: always wait for the user to run `python main.py train`, then `python main.py canary`, then `python main.py eval`, and confirm the results are acceptable before committing anything.**

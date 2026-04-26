@@ -178,27 +178,34 @@ class GameRecommender(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.xavier_uniform_(module.weight, gain=0.01)
 
-    def user_embedding(self, X_genre, X_history, X_history_weights):
+    def user_embedding(self, X_genre, X_history, X_history_weights, item_cache=None):
         """
         X_genre           (B, user_context_size) float
         X_history         (B, max_hist_len)       long  — padded game indices
         X_history_weights (B, max_hist_len)       float — log(1+h) weights; 0 at padding
+        item_cache        (n_items+1, output_dim) float — pre-computed frozen item embeddings,
+                          or None to call item_embedding() for each history entry (slow path).
         """
         pad_mask   = (X_history != self.game_pad_idx).float().unsqueeze(-1)
         w          = X_history_weights.unsqueeze(-1) * pad_mask
         weight_sum = w.sum(dim=1).clamp(min=1e-6)
 
         if self.use_item_pool_for_history:
-            B, H       = X_history.shape
-            flat       = X_history.view(-1)                              # (B*H,)
-            flat_embs  = self.item_embedding(
-                self.hist_genre_buf[flat],
-                self.hist_year_buf[flat],
-                flat,
-                self.game_dev_idx[flat],
-                self.hist_price_buf[flat],
-            )                                                            # (B*H, output_dim)
-            history_emb = (flat_embs.view(B, H, self.output_dim) * w).sum(dim=1) / weight_sum
+            if item_cache is not None:
+                # Fast path: O(B*H) table lookup, no grad flows to item tower.
+                history_emb = (item_cache[X_history] * w).sum(dim=1) / weight_sum
+            else:
+                # Slow path: B*H item tower forward passes — used by evaluate.py / export.
+                B, H      = X_history.shape
+                flat      = X_history.view(-1)
+                flat_embs = self.item_embedding(
+                    self.hist_genre_buf[flat],
+                    self.hist_year_buf[flat],
+                    flat,
+                    self.game_dev_idx[flat],
+                    self.hist_price_buf[flat],
+                )
+                history_emb = (flat_embs.view(B, H, self.output_dim) * w).sum(dim=1) / weight_sum
         else:
             history_embs = self.item_embedding_lookup(X_history)
             history_emb  = (history_embs * w).sum(dim=1) / weight_sum

@@ -60,6 +60,24 @@ Evaluated on 2,000 held-out users (never seen during training) across 55,186 rol
 
 MRR: **0.1845** (random: 0.0017, +109×)
 
+## Experiments
+
+### Frozen item embedding cache (abandoned)
+
+Tried caching all corpus item embeddings as a detached tensor and using table lookups for user history pooling instead of running the full item tower per training step (standard industry pattern for large corpora). Gradients to the item tower would only come from the target-item side of each batch.
+
+Result: significantly worse across all metrics vs. both ipool and gpool baselines.
+
+| Model | Recall@10 | MRR |
+|---|---|---|
+| OLD PROD — gpool (raw 32-dim ID pool) | 0.3529 | 0.1725 |
+| PROD — ipool (full 128-dim item tower pool) | **0.3794** | **0.1845** |
+| frozen-cache ipool | 0.2931 | 0.1409 |
+
+The item tower in ipool serves two roles simultaneously: it encodes candidate items for dot-product retrieval, *and* it encodes history items for user representation. Freezing the cache decouples these roles — the item tower is now only trained to be a good retrieval target, losing the signal that makes history embeddings useful for taste modeling. The two objectives are complementary, not separable.
+
+The frozen-cache code remains in `src/train.py` (`_build_item_cache`, `CACHE_REFRESH_STEPS`) as infrastructure for future experiments (e.g., hard negative mining), but `use_item_pool_for_history=True` training passes `item_cache=None` so full gradients flow.
+
 ## Usage
 
 ```bash
