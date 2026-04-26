@@ -26,11 +26,12 @@ USER_TYPE_TO_FAVORITE_GENRES = {
     'Western RPG Lover': ['RPG'],
     'JRPG Lover':        [], 
     'FPS Lover':         [],
-    'Civ Lover':         ['Strategy'],
+    'Civ Lover':         [],
     'Indie Lover':       ['Indie'],
     'Racing Lover':      ['Racing'],
     'Fighting Lover':    [],
-    'Survival Lover':    []
+    'Survival Lover':    [],
+    'Management Lover':  ['Simulation']
 }
 
 USER_TYPE_TO_FAVORITE_GAMES = {
@@ -61,10 +62,10 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Doom 3: BFG Edition'
     ],
     'Civ Lover': [
-        "Sid Meier's Civilization® V",
-        'Civilization IV®: Warlords',
-        "Sid Meier's Civilization IV: Colonization",
-        'Total War™: ROME II - Emperor Edition'
+        'Civilization IV: Beyond the Sword',
+        "Sid Meier's Civilization®: Beyond Earth™",
+        "Sid Meier's Civilization® IV",
+        "Sid Meier's Civilization® III Complete"
     ],
     'Indie Lover': [
         'Terraria',
@@ -93,7 +94,15 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Unturned',
         'Terraria',
         'Rust',
+        'DayZ',
         'ARK: Survival Evolved'
+    ],
+    'Management Lover': [
+        'Cities: Skylines',
+        'Kerbal Space Program',
+        'Prison Architect',
+        'Game Dev Tycoon',
+        'Euro Truck Simulator 2'
     ]
 }
 
@@ -105,7 +114,8 @@ USER_TYPE_TO_TAGS = {
     'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
     'Racing Lover':       ['Racing'],
     'Fighting Lover':     [],
-    'Survival Lover':     ['Survival']
+    'Survival Lover':     ['Survival'],
+    'Management Lover':   ['Management', 'City Builder']
 }
 
 SIMULATED_FAV_LOG_HOURS    = 10.0   # weight for favorite games
