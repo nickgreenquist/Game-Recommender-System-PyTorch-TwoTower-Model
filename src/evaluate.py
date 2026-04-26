@@ -29,7 +29,8 @@ USER_TYPE_TO_FAVORITE_GENRES = {
     'Civ Lover':         ['Strategy'],
     'Indie Lover':       ['Indie'],
     'Racing Lover':      ['Racing'],
-    'Fighting Lover':    []
+    'Fighting Lover':    [],
+    'Survival Lover':    []
 }
 
 USER_TYPE_TO_FAVORITE_GAMES = {
@@ -87,6 +88,12 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Street Fighter® IV',
         'DEAD OR ALIVE 5 Last Round: Core Fighters',
         'THE KING OF FIGHTERS XIII STEAM EDITION',
+    ],
+    'Survival Lover': [
+        'Unturned',
+        'Terraria',
+        'Rust',
+        'ARK: Survival Evolved'
     ]
 }
 
@@ -97,7 +104,8 @@ USER_TYPE_TO_TAGS = {
     'Civ Lover':          [],
     'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
     'Racing Lover':       ['Racing'],
-    'Fighting Lover':     []
+    'Fighting Lover':     [],
+    'Survival Lover':     ['Survival']
 }
 
 SIMULATED_FAV_LOG_HOURS    = 10.0   # weight for favorite games
@@ -280,7 +288,6 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
         ) - avg_log
         genre_ctx[n_genres:] = running_count / total_assign
 
-    # Delegate to model.user_embedding() — handles both gpool and ipool internally.
     X_genre = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
     if history:
         hist_idxs = torch.tensor([[h[0] for h in history]], dtype=torch.long)    # (1, H)
@@ -497,12 +504,8 @@ def _resolve_checkpoint(checkpoint_path: str, checkpoint_dir: str):
     if checkpoint_path is not None:
         return checkpoint_path
     candidates = sorted(
-        glob.glob(os.path.join(checkpoint_dir, 'best_ipool_gpool_softmax_*.pth')) +
-        glob.glob(os.path.join(checkpoint_dir, 'ipool_gpool_softmax_*_step_*.pth')) +
-        glob.glob(os.path.join(checkpoint_dir, 'best_proj_softmax_*.pth')) +
-        glob.glob(os.path.join(checkpoint_dir, 'proj_softmax_*_step_*.pth')) +
-        glob.glob(os.path.join(checkpoint_dir, 'best_softmax_*.pth')) +
-        glob.glob(os.path.join(checkpoint_dir, 'softmax_*_step_*.pth')),
+        glob.glob(os.path.join(checkpoint_dir, 'best_ipool_softmax_*.pth')) +
+        glob.glob(os.path.join(checkpoint_dir, 'ipool_softmax_*_step_*.pth')),
         key=os.path.getmtime, reverse=True
     )
     if not candidates:
@@ -516,11 +519,6 @@ def _load_model_and_embeddings(checkpoint_path: str, fs: dict) -> tuple:
     print(f"Loading checkpoint: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, weights_only=True)
     config     = get_config()
-    # Auto-detect architecture: ipool has user_concat = output_dim + user_genre,
-    # gpool has user_concat = item_id_embedding_size + user_genre.
-    user_proj_in  = state_dict['user_projection.0.weight'].shape[1]
-    gpool_concat  = config['item_id_embedding_size'] + config['user_genre_embedding_size']
-    config['use_item_pool_for_history'] = (user_proj_in != gpool_concat)
     model      = build_model(config, fs)
     model.load_state_dict(state_dict)
     model.eval()

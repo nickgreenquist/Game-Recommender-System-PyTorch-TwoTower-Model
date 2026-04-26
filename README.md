@@ -66,11 +66,11 @@ MRR: **0.1845** (random: 0.0017, +109×)
 
 Tried caching all corpus item embeddings as a detached tensor and using table lookups for user history pooling instead of running the full item tower per training step (standard industry pattern for large corpora). Gradients to the item tower would only come from the target-item side of each batch.
 
-Result: significantly worse across all metrics vs. both ipool and gpool baselines.
+Result: significantly worse across all metrics vs. both baselines.
 
 | Model | Recall@10 | MRR |
 |---|---|---|
-| OLD PROD — gpool (raw 32-dim ID pool) | 0.3529 | 0.1725 |
+| OLD PROD — raw 32-dim ID pool | 0.3529 | 0.1725 |
 | PROD — ipool (full 128-dim item tower pool) | **0.3794** | **0.1845** |
 | frozen-cache ipool | 0.2931 | 0.1409 |
 

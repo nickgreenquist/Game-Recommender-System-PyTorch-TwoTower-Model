@@ -3,7 +3,7 @@ Two-Tower GameRecommender model.
 
 No timestamp tower — Steam has no buy date / first-play timestamp in australian_users_items.json.
 
-User tower: play-history playtime-weighted avg pool + genre context → projection MLP
+User tower: play-history playtime-weighted avg pool over full item_embedding() output + genre context → projection MLP
 Item tower: genre + tag + game_id + developer + year + price → projection MLP
 
 Both towers project to output_dim via a shared-size MLP so they can be dot-producted.
@@ -11,17 +11,16 @@ The projection MLP learns cross-feature interactions (e.g. genre × tag, price �
 that a plain concat + dot-product cannot express.
 
 Sub-embedding sizes (inputs to the projection MLPs):
-  item_id_embedding_size    = 32   shared: user history pool + item tower
   user_genre_embedding_size = 32   user only
+  item_id_embedding_size    = 32   item only
   item_genre_embedding_size = 8    item only
   tag_embedding_size        = 16   item only
   developer_embedding_size  = 12   item only
   item_year_embedding_size  = 8    item only
   price_embedding_size      = 4    item only
 
-  gpool:  user concat = item_id(32) + user_genre(32)        =  64 → proj → output_dim
-  ipool:  user concat = output_dim(128) + user_genre(32)    = 160 → proj → output_dim
-  item:   item concat = genre(8)+tag(16)+id(32)+dev(12)+year(8)+price(4) = 80 → proj → output_dim
+  user: concat = item_tower_output_dim(128) + user_genre(32) = 160 → proj → output_dim
+  item: concat = genre(8)+tag(16)+id(32)+dev(12)+year(8)+price(4) = 80 → proj → output_dim
 """
 import torch
 import torch.nn as nn
@@ -38,6 +37,9 @@ class GameRecommender(nn.Module):
                  user_context_size,
                  game_tag_matrix,
                  game_dev_idx,
+                 hist_genre_buf,
+                 hist_year_buf,
+                 hist_price_buf,
                  item_id_embedding_size=32,
                  user_genre_embedding_size=32,
                  item_genre_embedding_size=8,
@@ -47,10 +49,6 @@ class GameRecommender(nn.Module):
                  price_embedding_size=4,
                  proj_hidden=256,
                  output_dim=128,
-                 use_item_pool_for_history=False,
-                 hist_genre_buf=None,
-                 hist_year_buf=None,
-                 hist_price_buf=None,
                  ):
         """
         game_tag_matrix : float32 tensor (n_games+1, n_tags)
@@ -59,15 +57,13 @@ class GameRecommender(nn.Module):
         game_dev_idx    : int64 tensor (n_games+1,)
             Entry i = developer vocab index for game at embedding index i.
             Last entry (index n_games) = n_developers — padding.
+        hist_genre_buf  : float32 tensor (n_games+1, n_genres) — genre matrix with pad row.
+        hist_year_buf   : int64 tensor (n_games+1,) — year index with pad entry.
+        hist_price_buf  : int64 tensor (n_games+1,) — price bucket with pad entry.
         proj_hidden     : hidden size of the projection MLP in both towers.
         output_dim      : final embedding size for dot-product comparison.
-        use_item_pool_for_history : when True, pool full item_embedding() output (output_dim)
-            instead of raw item_id embeddings (item_id_embedding_size) in the user tower.
-            Requires hist_genre_buf, hist_year_buf, hist_price_buf (non-persistent buffers
-            indexed by embedding index, with a pad row at index n_games).
         """
         super().__init__()
-        self.use_item_pool_for_history = use_item_pool_for_history
 
         self.game_pad_idx = n_games
         self.dev_pad_idx  = n_developers
@@ -75,14 +71,9 @@ class GameRecommender(nn.Module):
 
         self.register_buffer('game_tag_matrix', game_tag_matrix)
         self.register_buffer('game_dev_idx',    game_dev_idx)
-
-        if use_item_pool_for_history:
-            assert hist_genre_buf is not None and hist_year_buf is not None \
-                   and hist_price_buf is not None, \
-                   "hist_genre_buf, hist_year_buf, hist_price_buf required when use_item_pool_for_history=True"
-            self.register_buffer('hist_genre_buf', hist_genre_buf, persistent=False)
-            self.register_buffer('hist_year_buf',  hist_year_buf,  persistent=False)
-            self.register_buffer('hist_price_buf', hist_price_buf, persistent=False)
+        self.register_buffer('hist_genre_buf',  hist_genre_buf, persistent=False)
+        self.register_buffer('hist_year_buf',   hist_year_buf,  persistent=False)
+        self.register_buffer('hist_price_buf',  hist_price_buf, persistent=False)
 
         # ── Shared item embedding ─────────────────────────────────────────────
         self.item_embedding_lookup = nn.Embedding(
@@ -141,10 +132,9 @@ class GameRecommender(nn.Module):
         )
 
         # ── Projection MLPs (learn cross-feature interactions) ────────────────
-        if use_item_pool_for_history:
-            user_concat_dim = output_dim + user_genre_embedding_size
-        else:
-            user_concat_dim = item_id_embedding_size + user_genre_embedding_size
+        # User: pool full item_embedding() output (output_dim) + user_genre = 160-dim
+        # Item: genre + tag + id + dev + year + price = 80-dim
+        user_concat_dim = output_dim + user_genre_embedding_size
         item_concat_dim = (item_genre_embedding_size + tag_embedding_size
                            + item_id_embedding_size + developer_embedding_size
                            + item_year_embedding_size + price_embedding_size)
@@ -178,37 +168,29 @@ class GameRecommender(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.xavier_uniform_(module.weight, gain=0.01)
 
-    def user_embedding(self, X_genre, X_history, X_history_weights, item_cache=None):
+    def user_embedding(self, X_genre, X_history, X_history_weights):
         """
         X_genre           (B, user_context_size) float
         X_history         (B, max_hist_len)       long  — padded game indices
         X_history_weights (B, max_hist_len)       float — log(1+h) weights; 0 at padding
-        item_cache        (n_items+1, output_dim) float — pre-computed frozen item embeddings,
-                          or None to call item_embedding() for each history entry (slow path).
+
+        History pool: weighted avg of full item_embedding() output (output_dim-dim).
+        Grad flows through item_embedding() so item tower trains from both sides.
         """
         pad_mask   = (X_history != self.game_pad_idx).float().unsqueeze(-1)
         w          = X_history_weights.unsqueeze(-1) * pad_mask
         weight_sum = w.sum(dim=1).clamp(min=1e-6)
 
-        if self.use_item_pool_for_history:
-            if item_cache is not None:
-                # Fast path: O(B*H) table lookup, no grad flows to item tower.
-                history_emb = (item_cache[X_history] * w).sum(dim=1) / weight_sum
-            else:
-                # Slow path: B*H item tower forward passes — used by evaluate.py / export.
-                B, H      = X_history.shape
-                flat      = X_history.view(-1)
-                flat_embs = self.item_embedding(
-                    self.hist_genre_buf[flat],
-                    self.hist_year_buf[flat],
-                    flat,
-                    self.game_dev_idx[flat],
-                    self.hist_price_buf[flat],
-                )
-                history_emb = (flat_embs.view(B, H, self.output_dim) * w).sum(dim=1) / weight_sum
-        else:
-            history_embs = self.item_embedding_lookup(X_history)
-            history_emb  = (history_embs * w).sum(dim=1) / weight_sum
+        B, H  = X_history.shape
+        flat  = X_history.view(-1)
+        embs  = self.item_embedding(
+            self.hist_genre_buf[flat],
+            self.hist_year_buf[flat],
+            flat,
+            self.game_dev_idx[flat],
+            self.hist_price_buf[flat],
+        )
+        history_emb = (embs.view(B, H, self.output_dim) * w).sum(dim=1) / weight_sum
 
         genre_emb = self.user_genre_tower(X_genre)
         concat    = torch.cat([history_emb, genre_emb], dim=1)

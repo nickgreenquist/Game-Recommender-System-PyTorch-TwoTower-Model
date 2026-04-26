@@ -110,15 +110,15 @@ Two-tower design with dot product prediction. Mirrors the book model with **deve
 
 ```
 User Tower:
-  playtime_weighted_avg_pool(item_embeddings[play_history])  → history_emb   (item_id_embedding_size=32)
-  user_genre_tower([avg_playtime_per_genre | play_frac])     → genre_emb     (user_genre_embedding_size=32)
-  concat → 64-dim
+  item_pool_avg(item_tower_output[play_history])             → history_emb   (output_dim=128)
+  user_genre_tower([debiased_avg_log | play_frac])           → genre_emb     (user_genre_embedding_size=32)
+  concat → 160-dim
   user_projection(Linear proj_hidden=256 → ReLU → Linear output_dim=128) → 128-dim
 
 Item Tower:
   item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size=8)
   item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=16)
-  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)   [shared with user history pool]
+  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)   [shared lookup inside item tower]
   developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size=12)
   year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size=8)
   price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size=4)
@@ -127,6 +127,8 @@ Item Tower:
 
 Prediction: dot_product(user_projection_out, item_projection_out)
 ```
+
+The item tower is shared: the same network that encodes a candidate game also encodes every game in the user's play history. Pooling the full 128-dim item tower output (rather than a raw 32-dim ID lookup) means the user representation captures genre, tag, developer, era, and price signals from their history — not just opaque learned IDs.
 
 **Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations of the individual sub-embeddings. It cannot model interactions between signals — things like "RPGs from Japanese developers" (genre × developer) or "price sensitivity varies by how many games you've played" (price × history depth) require nonlinearity to learn. Each tower concatenates its sub-embeddings and passes them through a 2-layer MLP before the dot product. Only the final `output_dim` (128) needs to match across towers — the internal concat sizes are decoupled.
 
@@ -150,7 +152,7 @@ price_embedding_size        = 4    # item only
 proj_hidden  = 256
 output_dim   = 128   # only this must match across towers
 
-# user concat: 32 + 32 = 64  → proj → 128
+# user concat: 128 + 32 = 160  → proj → 128
 # item concat: 8 + 16 + 32 + 12 + 8 + 4 = 80  → proj → 128
 ```
 
@@ -188,7 +190,7 @@ Only `item_id_embedding_size` and `output_dim` are constrained: the former becau
 - **Steps**: 150,000
 - **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
 
-**Frozen item embedding cache — tried, abandoned.** Cached all corpus item embeddings as a detached `(n_items+1, 128)` tensor, refreshed every 100 steps, so user history pooling uses table lookups instead of running the full item tower per step (standard industry pattern). Result: significantly worse — Recall@10 dropped from 0.3794 → 0.2931 and MRR from 0.1845 → 0.1409, below even the old gpool baseline (0.3529 / 0.1725). Root cause: the item tower in ipool serves two coupled roles — encoding candidate items AND encoding history items for user representation. Freezing the cache breaks this coupling; the item tower is only trained as a retrieval target, losing the signal needed for good history embeddings. The cache infrastructure (`_build_item_cache`, `CACHE_REFRESH_STEPS` in `src/train.py`) is kept for potential future use (e.g., hard negative mining) but training passes `item_cache=None` so full gradients flow.
+**Frozen item embedding cache — tried, abandoned.** Cached all corpus item embeddings as a detached `(n_items+1, 128)` tensor, refreshed every 100 steps, so user history pooling uses table lookups instead of running the full item tower per step (standard industry pattern). Result: significantly worse — Recall@10 dropped from 0.3794 → 0.2931 and MRR from 0.1845 → 0.1409, below even the old raw-ID-pool baseline (0.3529 / 0.1725). Root cause: the item tower in ipool serves two coupled roles — encoding candidate items AND encoding history items for user representation. Freezing the cache breaks this coupling; the item tower is only trained as a retrieval target, losing the signal needed for good history embeddings. The cache code has been removed from the codebase after this experiment concluded.
 
 **Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. If timestamps are unavailable, omit the `timestamp_embedding_tower` entirely from the user tower (adjust dims accordingly). The review `posted` date is available but only for reviewed games — too sparse to use as a general timestamp.
 
@@ -271,42 +273,6 @@ Serving artifacts (generated by `python main.py export`):
 - **Tags** — pick Steam tags → anchor-averaged query → cosine-nearest in tag space
 
 Steam cover images fetched live from `cdn.cloudflare.steamstatic.com` using the Steam app ID.
-
-## Planned Work: Item-Pool History (ipool)
-
-Replace the user tower's raw ID-embedding avg pool with a pool over **full projected item embeddings** — i.e., pool the 128-dim output of `item_embedding()` instead of the 32-dim raw ID lookup.
-
-**Motivation:** The current user history avg pool only sees the 32-dim item ID signal. Pooling the full 128-dim projected embedding (which already fuses genre, tags, developer, year, price) gives the user tower a much richer taste representation — "this user's history skews RPG + story-rich + single-player, at ~$20–$40" rather than just opaque learned IDs.
-
-### What changes
-
-| | Old (prod, `gpool`) | New (`ipool_gpool`) |
-|---|---|---|
-| History pool input | `item_embedding_lookup(hist_idx)` → 32-dim | `item_embedding(...)` → 128-dim |
-| User concat | 32 + 32 = 64 → proj → 128 | 128 + 32 = 160 → proj → 128 |
-| item_id_embedding_size constraint | Must match user pool dim | Still must match (shared lookup inside item_embedding) |
-
-Only `user_concat_dim` changes. Everything else stays the same.
-
-### Implementation plan
-
-**`src/model.py`**
-- Add `use_item_pool_for_history=False` flag to `__init__` (default False = backward compat).
-- Register non-persistent buffers needed to call `item_embedding()` from the user side: `genre_buf` (n_games+1, n_genres), `tag_buf` (n_games+1, n_tags), `year_buf` (n_games+1,), `price_buf` (n_games+1,), `dev_buf` (n_games+1,). These are indexed by game embedding index and already available in feature store; pad row = zeros/padding index.
-- When `use_item_pool_for_history=True`: in `user_embedding()`, look up `item_embedding(genre_buf[hist], year_buf[hist], hist_idx, dev_buf[hist], price_buf[hist])` for each batch, weighted avg pool over 128-dim outputs.
-- Update `user_concat_dim` to `output_dim + user_genre_embedding_size` when flag is True.
-
-**`src/train.py`**
-- Pass `use_item_pool_for_history=True` to `build_model()`.
-- Populate the new buffers from `fs` before passing to `GameRecommender`.
-- Checkpoint naming: `best_ipool_gpool_softmax_*.pth`.
-
-**`src/evaluate.py`**
-- `_resolve_checkpoint`: add `ipool_gpool` globs before `proj_softmax` globs.
-- `_resolve_config()`: detect new `user_proj_in` size (160 vs 64) to auto-set `use_item_pool_for_history`.
-- `_build_user_embedding()`: no change needed — model handles it internally via the flag.
-
-**Files NOT to touch yet:** `streamlit_app.py`, `src/export.py`, serving artifacts. Wait until training is complete and canary results verified.
 
 ## Git Workflow
 

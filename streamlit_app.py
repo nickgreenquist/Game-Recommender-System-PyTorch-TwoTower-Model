@@ -48,20 +48,12 @@ def load_artifacts():
     state_dict = torch.load('serving/model.pth', weights_only=True)
     cfg        = fs['model_config']
 
-    # Auto-detect architecture from weight shape — same logic as export.py / evaluate.py.
-    # Avoids shape mismatch if cfg and model.pth ever fall out of sync.
-    user_proj_in = state_dict['user_projection.0.weight'].shape[1]
-    gpool_concat = cfg['item_id_embedding_size'] + cfg['user_genre_embedding_size']
-    use_ipool    = (user_proj_in != gpool_concat)
-
-    hist_genre_buf = hist_year_buf = hist_price_buf = None
-    if use_ipool:
-        genre_mat = torch.from_numpy(np.array(fs['game_genre_matrix'], dtype=np.float32))
-        hist_genre_buf = torch.cat([genre_mat, torch.zeros(1, genre_mat.shape[1])], dim=0)
-        year_arr = torch.from_numpy(np.array(fs['game_year_idx'], dtype=np.int64))
-        hist_year_buf = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
-        price_arr = torch.from_numpy(np.array(fs['game_price_bucket'], dtype=np.int64))
-        hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
+    genre_mat      = torch.from_numpy(np.array(fs['game_genre_matrix'], dtype=np.float32))
+    hist_genre_buf = torch.cat([genre_mat, torch.zeros(1, genre_mat.shape[1])], dim=0)
+    year_arr       = torch.from_numpy(np.array(fs['game_year_idx'], dtype=np.int64))
+    hist_year_buf  = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
+    price_arr      = torch.from_numpy(np.array(fs['game_price_bucket'], dtype=np.int64))
+    hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
 
     model = GameRecommender(
         n_genres=fs['n_genres'],
@@ -73,6 +65,9 @@ def load_artifacts():
         user_context_size=2 * fs['n_genres'],
         game_tag_matrix=fs['game_tag_matrix'],
         game_dev_idx=fs['game_dev_idx'],
+        hist_genre_buf=hist_genre_buf,
+        hist_year_buf=hist_year_buf,
+        hist_price_buf=hist_price_buf,
         item_id_embedding_size=cfg['item_id_embedding_size'],
         user_genre_embedding_size=cfg['user_genre_embedding_size'],
         item_genre_embedding_size=cfg['item_genre_embedding_size'],
@@ -82,10 +77,6 @@ def load_artifacts():
         price_embedding_size=cfg['price_embedding_size'],
         proj_hidden=cfg.get('proj_hidden', 256),
         output_dim=cfg.get('output_dim', 128),
-        use_item_pool_for_history=use_ipool,
-        hist_genre_buf=hist_genre_buf,
-        hist_year_buf=hist_year_buf,
-        hist_price_buf=hist_price_buf,
     )
     model.load_state_dict(state_dict, strict=False)
     model.eval()

@@ -33,7 +33,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
     # ── Resolve checkpoint ────────────────────────────────────────────────────
     if checkpoint_path is None:
         candidates = sorted(
-            glob.glob(os.path.join('saved_models', 'best_softmax_*.pth')),
+            glob.glob(os.path.join('saved_models', 'best_ipool_softmax_*.pth')),
             key=os.path.getmtime, reverse=True,
         )
         if not candidates:
@@ -48,11 +48,6 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
 
     state_dict = torch.load(checkpoint_path, weights_only=True)
     config = get_config()
-    # Auto-detect architecture from checkpoint weight shape.
-    user_proj_in = state_dict['user_projection.0.weight'].shape[1]
-    gpool_concat = config['item_id_embedding_size'] + config['user_genre_embedding_size']
-    config['use_item_pool_for_history'] = (user_proj_in != gpool_concat)
-    print(f"Architecture: {'ipool_gpool' if config['use_item_pool_for_history'] else 'gpool'}")
     model = build_model(config, fs)
     model.load_state_dict(state_dict)
     model.eval()

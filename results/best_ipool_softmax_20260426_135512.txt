@@ -1,0 +1,153 @@
+── Canary user evaluation ──
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Genre: RPG  |  Tags: Action RPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Numen: Contest of Heroes
+  + Victor Vran ARPG
+  + Grim Dawn
+  + Hazen: The Dark Whispers
+  + BorderZone
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                           Recommendations
+────────────────────────────────────────────────────────────────────────────────────────────────────
+The Witcher 2: Assassins of Kings Enhanced Edition       Divinity: Original Sin - Enhanced Edition
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Wizardry 8
+DARK SOULS™: Prepare To Die™ Edition                     Shadowrun: Hong Kong - Extended Edition
+Divinity: Original Sin (Classic)                         FINAL FANTASY X/X-2 HD Remaster
+Fallout: New Vegas                                       FINAL FANTASY IV: THE AFTER YEARS
+Mass Effect 2                                            In Exilium
+                                                         Shroud of the Avatar: Forsaken Virtues
+                                                         Dragon's Dogma: Dark Arisen
+                                                         The Legend of Heroes: Trails in the Sky
+                                                         DARK SOULS™ II: Scholar of the First Sin
+
+═══════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Genre: —  |  Tags: JRPG
+═══════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + I am Setsuna
+  + The Legend of Heroes: Trails in the Sky SC
+  + Grandia® II Anniversary Edition
+  + Agarest: Generations of War
+  + FINAL FANTASY III
+───────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                       Recommendations
+───────────────────────────────────────────────────────────────────────────────────────
+Mugen Souls                                          The Sad Story of Emmeline Burns
+OH! RPG!                                             Aozora Meikyuu
+Ys VI: The Ark of Napishtim                          Just Deserts
+Wild Season                                          Megadimension Neptunia VII
+Disgaea PC / 魔界戦記ディスガイア PC                           WolfQuest
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Stories: The Path of Destinies
+FINAL FANTASY® XIII                                  Planar Conquest
+                                                     Catch Me
+                                                     Epic Battle Fantasy 3
+                                                     Last Days of Spring Visual Novel
+
+════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Genre: —  |  Tags: FPS
+════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + STAR WARS™ - Dark Forces
+  + Singularity™
+  + Quake Live™
+  + Far Cry 3 - Blood Dragon
+  + Painkiller: Resurrection
+────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                   Recommendations
+────────────────────────────────────────────────────────────────────────────────────────────
+QUAKE II                                         Age of Conan: Unchained
+Unreal Tournament 2004: Editor's Choice Edition  Blood: One Unit Whole Blood
+Quake IV                                         Thief™ II: The Metal Age
+Final DOOM                                       Shadow Warrior Classic Redux
+Serious Sam HD: The First Encounter              QUAKE II Mission Pack: The Reckoning
+Quake III Arena                                  Test Drive: Ferrari Racing Legends
+Doom 3: BFG Edition                              Thief™ Gold
+                                                 THE KING OF FIGHTERS 2002 UNLIMITED MATCH
+                                                 Starlight Inception™
+                                                 QUAKE II Mission Pack: Ground Zero
+
+════════════════════════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Genre: Strategy  |  Tags: —
+════════════════════════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+────────────────────────────────────────────────────────────────────────────────────────────────
+Sid Meier's Civilization® V                The Entente Gold
+Civilization IV®: Warlords                 World War I
+Sid Meier's Civilization IV: Colonization  Making History: The Great War
+Total War™: ROME II - Emperor Edition      Z Steel Soldiers
+                                           Imperial Glory
+                                           Faces of War
+                                           Making History: The Calm and the Storm Gold Edition
+                                           Graviteam Tactics: Operation Star
+                                           March of the Eagles
+                                           Battle Group 2
+
+════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Genre: Indie  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Hotline Miami 2: Wrong Number Digital Comic
+  + Typefighters (Steam Edition)
+  + The Art of Playing
+  + Over The Void
+  + Super Game Jam
+  + Rogue's Tale
+  + Rogue Shooter: The FPS Roguelike
+  + Dungeonmans
+  + 99 Levels To Hell
+  + ADOM (Ancient Domains Of Mystery)
+────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                 Recommendations
+────────────────────────────────────────────────────────────────────────────────────
+Terraria                       Deathstate: Abyssal Edition
+FTL: Faster Than Light         Pink Hour
+The Binding of Isaac: Rebirth  RFLEX
+Rogue Legacy                   Princess Remedy in a World of Hurt
+Spelunky                       The Magical Silence
+                               Grow Up
+                               Neon Space
+                               Waltz of the Wizard
+                               Suits: A Business RPG
+                               Bullshot
+
+═════════════════════════════════════════════════════════════════
+Racing Lover  |  Genre: Racing  |  Tags: Racing
+═════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Sprint Cars Road to Knoxville
+  + Xpand Rally Xtreme
+  + Truck Racer
+  + Ignite
+  + RACE - The WTCC Game
+─────────────────────────────────────────────────────────────────
+Favorite Games                      Recommendations
+─────────────────────────────────────────────────────────────────
+F1 2012™                            RC Simulation 2.0
+Need For Speed: Hot Pursuit         Headcrab Frenzy!
+Test Drive Unlimited 2              IHF Handball Challenge 12
+Ford Street Racing                  StuntMANIA Reloaded
+Test Drive: Ferrari Racing Legends  MotoGP™15
+                                    Sledgehammer / Gear Grinder
+                                    Airport Madness 4
+                                    Racecraft
+                                    Quantum Rush Champions
+                                    Ford Racing 3
+
+═════════════════════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Genre: —  |  Tags: —
+═════════════════════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+─────────────────────────────────────────────────────────────────────────────────────────────
+Street Fighter X Tekken                    GUILTY GEAR XX ACCENT CORE PLUS R
+Ultra Street Fighter® IV                   Disillusions Manga Horror
+Injustice: Gods Among Us Ultimate Edition  GUILTY GEAR Xrd -SIGN-
+Divekick                                   Ukrainian Ninja
+Street Fighter® IV                         Yatagarasu Attack on Cataclysm
+DEAD OR ALIVE 5 Last Round: Core Fighters  Sonic Lost World
+THE KING OF FIGHTERS XIII STEAM EDITION    METAL SLUG
+                                           FINAL FANTASY IV: THE AFTER YEARS
+                                           Mega Man Legacy Collection / ロックマン クラシックス コレクション
+                                           //SNOWFLAKE TATTOO//
