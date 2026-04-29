@@ -18,7 +18,6 @@ import torch.nn.functional as F
 import src.evaluate
 importlib.reload(src.evaluate)
 from src.evaluate import (
-    USER_TYPE_TO_FAVORITE_GENRES,
     USER_TYPE_TO_FAVORITE_GAMES,
     USER_TYPE_TO_TAGS,
     SIMULATED_FAV_LOG_HOURS,
@@ -48,13 +47,6 @@ def load_artifacts():
     state_dict = torch.load('serving/model.pth', weights_only=True)
     cfg        = fs['model_config']
 
-    genre_mat      = torch.from_numpy(np.array(fs['game_genre_matrix'], dtype=np.float32))
-    hist_genre_buf = torch.cat([genre_mat, torch.zeros(1, genre_mat.shape[1])], dim=0)
-    year_arr       = torch.from_numpy(np.array(fs['game_year_idx'], dtype=np.int64))
-    hist_year_buf  = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
-    price_arr      = torch.from_numpy(np.array(fs['game_price_bucket'], dtype=np.int64))
-    hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
-
     model = GameRecommender(
         n_genres=fs['n_genres'],
         n_tags=fs['n_tags'],
@@ -62,14 +54,9 @@ def load_artifacts():
         n_years=fs['n_years'],
         n_developers=fs['n_developers'],
         n_price_buckets=fs['n_price_buckets'],
-        user_context_size=2 * fs['n_genres'],
-        game_tag_matrix=fs['game_tag_matrix'],
-        game_dev_idx=fs['game_dev_idx'],
-        hist_genre_buf=hist_genre_buf,
-        hist_year_buf=hist_year_buf,
-        hist_price_buf=hist_price_buf,
         item_id_embedding_size=cfg['item_id_embedding_size'],
         user_genre_embedding_size=cfg['user_genre_embedding_size'],
+        user_tag_embedding_size=cfg['user_tag_embedding_size'],
         item_genre_embedding_size=cfg['item_genre_embedding_size'],
         tag_embedding_size=cfg['tag_embedding_size'],
         developer_embedding_size=cfg['developer_embedding_size'],
@@ -78,6 +65,10 @@ def load_artifacts():
         proj_hidden=cfg.get('proj_hidden', 256),
         output_dim=cfg.get('output_dim', 128),
     )
+    tag_mat = fs['game_tag_matrix']  # already (n_items+1, n_tags) tensor from export
+    if not isinstance(tag_mat, torch.Tensor):
+        tag_mat = torch.from_numpy(np.array(tag_mat, dtype=np.float32))
+    model.game_tag_matrix.copy_(tag_mat)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
@@ -165,16 +156,22 @@ def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
 # ── User embedding builder ────────────────────────────────────────────────────
 
 def _build_user_embedding(model: GameRecommender, fs: dict,
-                          liked_iids: list, anchor_iids: list,
-                          liked_genres: list) -> torch.Tensor:
+                          liked_iids: list, anchor_iids: list) -> torch.Tensor:
     """
-    Build a user embedding from liked game IDs + tag anchors + explicit genres.
-    Mirrors _build_user_embedding in evaluate.py exactly — no timestamp tower.
+    Build a user embedding from liked game IDs + tag anchors.
+    Uses V2 triple-pool signature: liked / disliked / full pools + genre + tag context.
+    In Streamlit: all selected games go into liked + full pools; disliked is empty.
     """
-    genre_matrix = fs['game_genre_matrix']    # numpy (n_items, n_genres)
+    genre_matrix = fs['game_genre_matrix']
+    if isinstance(genre_matrix, torch.Tensor):
+        genre_matrix = genre_matrix.numpy()
+    tag_matrix = fs['game_tag_matrix']
+    if isinstance(tag_matrix, torch.Tensor):
+        tag_matrix = tag_matrix.numpy()
     item_to_idx  = fs['item_to_idx']
-    genre_to_i   = fs['genre_to_i']
     n_genres     = fs['n_genres']
+    n_tags       = fs['n_tags']
+    pad_idx      = model.game_pad_idx
 
     weighted = (
         [(iid, _FAV_WEIGHT)    for iid in liked_iids]  +
@@ -182,7 +179,7 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
     )
     history = [(item_to_idx[iid], w) for iid, w in weighted if iid in item_to_idx]
 
-    # Genre context — mirrors dataset.py _build_rollback_dataset
+    # 1. Genre context — derived from selected games only
     avg_log       = sum(w for _, w in history) / max(len(history), 1)
     running_count = np.zeros(n_genres, dtype=np.float32)
     running_sum   = np.zeros(n_genres, dtype=np.float32)
@@ -190,15 +187,6 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
         for g_idx in np.where(genre_matrix[item_idx] > 0)[0]:
             running_count[g_idx] += 1
             running_sum[g_idx]   += raw_log
-
-    # Explicit genre boost for selected genres not covered by game history
-    for g in liked_genres:
-        if g in genre_to_i:
-            g_idx = genre_to_i[g]
-            if running_count[g_idx] == 0:
-                running_count[g_idx] = 1.0
-                running_sum[g_idx]   = avg_log + _FAV_WEIGHT
-
     genre_ctx    = np.zeros(2 * n_genres, dtype=np.float32)
     total_assign = running_count.sum()
     if total_assign > 0:
@@ -206,14 +194,24 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
         genre_ctx[:n_genres][mask] = (running_sum[mask] / running_count[mask]) - avg_log
         genre_ctx[n_genres:]       = running_count / total_assign
 
-    X_genre = torch.tensor([genre_ctx.tolist()], dtype=torch.float32)
-    if history:
-        hist_idxs = torch.tensor([[h[0] for h in history]], dtype=torch.long)
-        hist_wts  = torch.tensor([[h[1] for h in history]], dtype=torch.float32)
-    else:
-        hist_idxs = torch.tensor([[model.game_pad_idx]], dtype=torch.long)
-        hist_wts  = torch.zeros(1, 1, dtype=torch.float32)
-    return model.user_embedding(X_genre, hist_idxs, hist_wts)
+    # 2. Tag context — sum TF-IDF vectors of all history games
+    tag_ctx = np.zeros(n_tags, dtype=np.float32)
+    for item_idx, _ in history:
+        tag_ctx += tag_matrix[item_idx]
+
+    # 3. Triple pools — all selected games are "liked"; no disliked signal from Streamlit
+    all_idxs = [item_to_idx[iid] for iid, _ in weighted if iid in item_to_idx]
+
+    def to_padded(idxs):
+        return torch.tensor([idxs if idxs else [pad_idx]], dtype=torch.long)
+
+    X_genre    = torch.from_numpy(np.array([genre_ctx], dtype=np.float32))
+    X_tag      = torch.from_numpy(np.array([tag_ctx],   dtype=np.float32))
+    X_liked    = to_padded(all_idxs)
+    X_disliked = to_padded([])
+    X_full     = to_padded(all_idxs)
+
+    return model.user_embedding(X_genre, X_tag, X_liked, X_disliked, X_full)
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
@@ -287,7 +285,7 @@ def tab_recommend(model, fs, all_ids, all_embs):
             return
 
         with torch.no_grad():
-            user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, [])
+            user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
 
         exclude_iids = set(liked_iids) | set(anchor_iids)
         df = _score_games(user_emb, all_ids, all_embs, fs, exclude_iids)
@@ -464,7 +462,7 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
 def tab_examples(model, fs, all_ids, all_embs):
     st.caption("Select a pre-built user profile to see what the model recommends for that taste.")
 
-    profiles = list(USER_TYPE_TO_FAVORITE_GENRES.keys())
+    profiles = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
     selected = st.selectbox(
         "Profile",
         options=[None] + profiles,
@@ -476,7 +474,6 @@ def tab_examples(model, fs, all_ids, all_embs):
         return
 
     fav_titles = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
-    fav_genres = USER_TYPE_TO_FAVORITE_GENRES.get(selected, [])
     tag_names  = USER_TYPE_TO_TAGS.get(selected, [])
 
     title_to_iid = fs['title_to_item_id']
@@ -489,7 +486,7 @@ def tab_examples(model, fs, all_ids, all_embs):
     anchor_iids = _get_tag_anchors(fs, tag_names, exclude=set(fav_titles))
 
     with torch.no_grad():
-        user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, fav_genres)
+        user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
 
     df = _score_games(user_emb, all_ids, all_embs, fs,
                       exclude_iids=set(liked_iids),
@@ -498,8 +495,6 @@ def tab_examples(model, fs, all_ids, all_embs):
     st.subheader(f"Recommendations for: {selected}")
     if fav_titles:
         st.caption("Because you like: " + ", ".join(fav_titles))
-    if fav_genres:
-        st.caption("Favorite genres: " + ", ".join(fav_genres))
     if anchor_iids:
         anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
         st.caption("Tag anchors: " + ", ".join(anchor_names))
@@ -547,26 +542,29 @@ def tab_about():
     with col:
         st.header("User Tower")
         st.markdown(
-            "Two sub-embeddings are concatenated (160-dim), then passed through a projection MLP → **128-dim**."
+            "Five sub-embeddings are concatenated (160-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
 |---|---|---|
-| Item-Pool History (ipool) | Play history — full 128-dim item embeddings weighted by log(1 + hours) | Collaborative taste — pools the complete item tower output (not just a raw ID lookup), capturing genre, tag, developer, era, and price signals from the user's history |
-| user_genre_tower | Debiased avg log-playtime per genre + play fraction per genre | Genre affinity — how strongly you lean toward each broad genre category |
+| liked_pool | Sum of 32-dim item ID embeddings for games you loved (recommend=True, high playtime) | Positive taste signal — what you actively seek out |
+| disliked_pool | Sum of 32-dim item ID embeddings for games you bounced off (recommend=False, very low playtime) | Negative taste signal — what to avoid |
+| full_pool | Sum of 32-dim item ID embeddings for all history | Broad collaborative fingerprint of your overall library |
+| user_genre_tower | Rolling debiased avg log-playtime per genre + genre play fraction | Genre affinity — how strongly you lean toward each broad category |
+| user_tag_tower | Rolling sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like" |
 """, unsafe_allow_html=True)
 
         st.header("Item Tower")
         st.markdown(
-            "Six sub-embeddings are concatenated (80-dim), then passed through a projection MLP → **128-dim**."
+            "Six sub-embeddings are concatenated (96-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
 |---|---|---|
-| item_embedding_tower | Game ID (shared lookup with user history pool) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
+| item_embedding_tower | Game ID (shared lookup with all three user history pools) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
 | item_genre_tower | Uniform-weighted genre vector | Broad genre positioning |
 | item_tag_tower | TF-IDF Steam tag scores (164 tags) | Community descriptors — granular signals like "Open World", "Rogue-like", "Dark Souls-like" |
-| developer_tower | Primary developer index | Developer identity — clusters games by studio and stylistically similar developers |
+| developer_tower | Primary developer index | Developer identity — clusters games by studio |
 | year_embedding_tower | Steam release year | Era — captures generational shifts in game design |
 | price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
 """, unsafe_allow_html=True)
@@ -579,61 +577,64 @@ of the individual signals — it cannot model interactions between them.
 Each tower ends with a 2-layer projection MLP (`concat → Linear(256) → ReLU → Linear(128)`) before the dot product.
 This lets the model learn cross-feature interactions, such as:
 - Genre × developer (e.g. JRPGs from Japanese studios vs. Western action-RPGs)
-- Price tier × history depth (price sensitivity varies by play style)
+- Liked vs. disliked signals interacting with content tags
 - Tag cluster × release era (roguelikes from 2012 vs. 2020 are different products)
 
 Both towers project to the same 128-dim output space — only this final dim needs to match.
-The internal concat sizes (160 user, 80 item) are independent of each other.
+The internal concat sizes (160 user, 96 item) are independent of each other.
 """)
 
         st.header("Shared Embeddings")
         st.markdown("""
-**item_embedding_tower** — The full item tower (genre + tag + game ID + developer + year + price → projection MLP)
-is shared between the target game *and* each game in the user's play history pool.
+**item_embedding_lookup** (32-dim) — shared between all three user history pools and the item tower.
 
-With ipool, the user history averages the **complete 128-dim item embedding** for each played game,
-weighted by log(1 + hours). This gives the user tower access to all of a game's content signals —
-not just its ID — when forming the user representation.
+The user pools sum raw 32-dim ID embeddings directly (shallow pooling). The item tower additionally
+passes the same embedding through a small linear layer before concatenating with other item features.
 
-A game you played heavily pulls your user embedding directly toward that game's full embedding.
+This means a game you played appears in the same embedding space as the game being scored — the model
+learns to align user taste with item identity through training.
 """)
 
         st.header("Training")
         st.markdown("""
 - **Dataset:** UCSD Steam — 88k Australian users, ~5,400 corpus games (≥10 users with ≥6 min playtime)
 - **Corpus filtering:** Games with fewer than 10 qualifying users excluded. Users with fewer than 5 or more than 10,000 total hours excluded. Users with fewer than 2 corpus games excluded.
-- **Playtime signal:** `log(1 + hours)` — compresses the extreme tail while preserving ordering. Used as weighting in the history pool; never a prediction target.
-- **Loss:** Cross-entropy over in-batch negatives (softmax) — each step produces a B×B score matrix; diagonal entries are the correct targets
-- **Optimizer:** Adam, lr=0.001, weight_decay=1e-5, CosineAnnealingLR
-- **Batch size:** 512 (511 in-batch negatives per example)
-- **Steps:** 150,000
-- **Training examples:** Rollback construction — for each play event, context = all prior plays sorted by Steam app ID (release-date proxy). Up to 50 examples per user (~1.9M train / 210k val)
+- **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools and build genre context. Never a prediction target.
+- **Loss:** Full softmax cross-entropy over the entire ~5,400-game corpus every step
+- **Optimizer:** Adam, lr=0.001, weight_decay=1e-5, CosineAnnealingLR (eta_min=1e-4)
+- **Gradient clipping:** max_norm=1.0 (required with temperature=0.05 and full softmax)
+- **Batch size:** 512
+- **Steps:** 50,000
+- **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (57k train users)
 """)
 
         st.header("Offline Evaluation")
         st.markdown(
-            "Evaluated on **2,000 held-out users** (never seen during training). "
+            "Evaluated on **2,000 held-out val users** (never seen during training). "
             "Corpus: 5,442 games. "
             "Each example has one target; Recall@K = Hit Rate@K for single-target eval."
         )
         st.markdown("""
-| K | Recall@K | NDCG@K | vs. Random (HR@K) |
+| K | Recall@K | NDCG@K | vs. Random |
 |---|---|---|---|
-| 1 | 0.0902 | 0.0902 | 491× |
-| 5 | 0.2614 | 0.1777 | 284× |
-| 10 | 0.3794 | 0.2158 | 206× |
-| 20 | 0.5182 | 0.2508 | 141× |
-| 50 | 0.7165 | 0.2903 | 78× |
+| 1 | 0.0417 | 0.0417 | 231× |
+| 5 | 0.1202 | 0.0817 | 134× |
+| 10 | 0.1794 | 0.1007 | 99× |
+| 20 | 0.2668 | 0.1227 | 72× |
+| 50 | 0.4309 | 0.1551 | 47× |
 
-MRR: **0.1845** (random: 0.0017, +109×)
+MRR: **0.0918** (random: 0.0017, +54×)
+
+*Eval uses shuffled history (no release-date ordering) — a harder, more honest protocol than V1.*
 """)
 
         st.header("Limitations")
         st.markdown("""
-- ~6,200-game corpus — games with fewer than 10 qualifying users are excluded
-- No timestamps — items are ordered by Steam app ID as a release-date proxy, not actual play order
-- Witcher 3, Dark Souls III, Skyrim, Civilization VI and other major titles are absent from this version of the dataset's metadata and cannot be recommended
+- ~5,400-game corpus — games with fewer than 10 qualifying users are excluded
+- No timestamps — play history is shuffled randomly (no real play sequence in source data)
+- Witcher 3, Dark Souls III, Skyrim, Civilization VI and other major titles are absent from this version of the dataset's metadata
 - Free-to-play games (Dota 2, TF2) are also missing from the metadata file
+- Popularity bias — very popular Valve games (CS:GO, Left 4 Dead 2) may appear across many recommendation lists
 """)
 
 

@@ -12,7 +12,7 @@ This is a sibling project to:
 
 The architecture follows the same two-tower design as the book model. The book model is the primary reference — it uses the softmax objective (3× better than MSE), and adds a domain-specific embedding tower (author) not present in the movie model. Here, the analogous addition is a **developer embedding tower**.
 
-**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: play history (playtime-weighted avg pooling of game embeddings), genre affinity, and timestamp. Any user can be represented at inference time with just a few games they've played — no retraining required.
+**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: three behavior-partitioned play history pools (Liked, Disliked, Full), rolling genre affinity, and rolling tag affinity. Any user can be represented at inference time with just a few games they've played — no retraining required.
 
 **Rating signal: playtime hours.** Steam does not have star ratings. The `playtime_forever` field (total hours played per game, from `australian_user_items.json`) serves as the implicit feedback signal. Playtime is a strong preference proxy — a user who played 500 hours loves that game. Reviews provide a binary `recommend` signal as supplementary explicit feedback. The primary training signal is playtime.
 
@@ -62,7 +62,11 @@ Games below `MIN_INTERACTIONS_PER_GAME` are filtered out entirely. Users outside
 
 **Why MIN_INTERACTIONS_PER_GAME=10 (not 100):** Lowering to 10 nearly triples the recommendation corpus (6,258 games vs 2,509) with almost no cost — rollback examples change by less than 1,000. Games with few interactions have undertrained ID embeddings but their content towers (tags, genres, developer) still give them a reasonable representation.
 
-**Why MAX_ROLLBACK_EXAMPLES_PER_USER=50 (not 10):** This dataset is much smaller than Goodreads — 66k users vs 229k, producing only ~575k rollback examples at cap=10 vs Goodreads' 4.7M. Cap=50 brings us to ~1.9M examples (0.4× Goodreads scale) without introducing bias: the user hour filter (5–10,000h) already excludes bots, the median user has 29 corpus games so cap=50 is rarely binding, and we're still far below the unlimited ceiling of 2.9M. The YouTube DNN paper caps to prevent power users from dominating — that concern is already handled by the hour ceiling here.
+**Why MAX_ROLLBACK_EXAMPLES_PER_USER=50 (not 10):** This dataset is much smaller than Goodreads — 66k users vs 229k, producing only ~575k rollback examples at cap=10 vs Goodreads' 4.7M. Cap=50 brings us to ~1.4M examples per shuffle pass; with N_SHUFFLES=3 this yields ~4.3M training examples. The YouTube DNN paper caps to prevent power users from dominating — that concern is already handled by the hour ceiling here.
+
+**N_SHUFFLES=3:** Training data is augmented by running `_build_rollback_dataset` 3× per user with independent random shuffles of each user's history. Each shuffle produces genuinely different (context, target) pairs while preserving varied context lengths (early rollback positions still have 1–2 game contexts). Val and offline eval always use `n_shuffles=1` — a single clean pass per user so metrics are not inflated by repeated targets.
+
+**Quality label filter:** Target games must have `hours > 0.5`. Low-quality interactions (very short playtime) stay in the history pools as signal but are never training targets.
 
 ### Preprocessing pipeline
 
@@ -76,7 +80,7 @@ Two separate steps — run `preprocess games` first to inspect corpus size, then
 - Counts valid playtime per user → builds `valid_users`
 - Collects interactions for valid users
 - Joins `recommend` signal and `posted` date from `australian_user_reviews.json.gz` where available
-- **Sorts each user's items by `item_id` (Steam app ID) before writing** — Steam app IDs are assigned sequentially as games are added to Steam, so item_id order is a weak proxy for game release chronology. This is the only available ordering: `australian_users_items.json.gz` contains no buy date, install date, or first-play timestamp per game. Rollback examples therefore simulate "given older games in library, predict a newer release" rather than true temporal play order.
+- **User play history order is not sorted** — `australian_users_items.json.gz` contains no buy date, install date, or first-play timestamp per game. item_id order (Steam app ID ≈ release date) is a spurious proxy that biases targets toward newer games. History is left in ingestion order; `dataset.py` shuffles each user's history with a seeded RNG before building rollback examples, so rollback simulates "given a random subset of games this user plays, predict another" rather than "predict newer releases."
 
 **Playtime normalization:** Raw `playtime_forever` is in minutes. Convert to hours. Apply log transform for rating weighting: `log(1 + hours)` — compresses the extreme tail (10,000-hour outliers) while preserving order.
 
@@ -106,45 +110,58 @@ Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-a
 
 ## Model Architecture
 
-Two-tower design with dot product prediction. Mirrors the book model with **developer embedding** in place of author embedding.
+Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, shallow sum pooling, ReLU activations, and LayerNorm stabilization.
 
 ```
 User Tower:
-  item_pool_avg(item_tower_output[play_history])             → history_emb   (output_dim=128)
-  user_genre_tower([debiased_avg_log | play_frac])           → genre_emb     (user_genre_embedding_size=32)
+  liked_pool:    sum(item_id_emb[liked_ids])    → LayerNorm → 32-dim
+  disliked_pool: sum(item_id_emb[disliked_ids]) → LayerNorm → 32-dim
+  full_pool:     sum(item_id_emb[full_ids])     → LayerNorm → 32-dim
+  user_genre_tower([debiased_avg_log | play_frac]) → genre_emb  (32-dim)
+  user_tag_tower(LayerNorm(rolling_tag_sum))       → tag_emb    (32-dim)
   concat → 160-dim
-  user_projection(Linear proj_hidden=256 → ReLU → Linear output_dim=128) → 128-dim
+  user_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
 Item Tower:
   item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size=8)
-  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=16)
-  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)   [shared lookup inside item tower]
+  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=32)
+  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)
   developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size=12)
   year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size=8)
   price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size=4)
-  concat → 80-dim
-  item_projection(Linear proj_hidden=256 → ReLU → Linear output_dim=128) → 128-dim
+  concat → 96-dim
+  item_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
 Prediction: dot_product(user_projection_out, item_projection_out)
 ```
 
-The item tower is shared: the same network that encodes a candidate game also encodes every game in the user's play history. Pooling the full 128-dim item tower output (rather than a raw 32-dim ID lookup) means the user representation captures genre, tag, developer, era, and price signals from their history — not just opaque learned IDs.
+**Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. LayerNorm after each pool stabilizes the variable-magnitude sums (a user with 50 games gets a 50× larger raw sum than one with 1 game).
 
-**Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations of the individual sub-embeddings. It cannot model interactions between signals — things like "RPGs from Japanese developers" (genre × developer) or "price sensitivity varies by how many games you've played" (price × history depth) require nonlinearity to learn. Each tower concatenates its sub-embeddings and passes them through a 2-layer MLP before the dot product. Only the final `output_dim` (128) needs to match across towers — the internal concat sizes are decoupled.
+**Triple pool partitioning** (computed per rollback position in `dataset.py`):
+- **Liked:** `recommend==True` OR `hours >= game_median` OR `hours >= user_rolling_median × 2`
+- **Disliked:** `recommend==False` OR `(0.1 < hours < 1.0)` OR `hours <= user_rolling_median / 2`
+- **Full:** all context items (most recent MAX_HISTORY_LEN=50)
 
-**Initialization:** Sub-tower linear layers use `gain=0.1`. Projection layers are re-initialized separately to `gain=1.0` after the rest of the model. Embedding tables use `gain=0.01`. Using `gain=0.01` for the projection layers causes vanishing gradients — the projection adds two more near-zero-gain layers on top of already-small sub-tower outputs, making dot products exactly zero and preventing learning.
+Items can appear in both Liked and Disliked simultaneously. `game_median` is the global per-game median playtime; `user_rolling_median` is computed at each rollback step from context hours so far.
 
-### Shared towers
+**Rolling genre/tag context:** Computed left-to-right inside `_build_rollback_dataset` at each rollback position using the full history seen so far. Genre context = debiased avg log playtime + genre fraction. Tag context = sum of TF-IDF tag vectors.
 
-- `item_embedding_tower` — shared between item side and user history avg pool
+**Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations. Nonlinearity is needed to model interactions (e.g. "RPGs from Japanese developers", "price sensitivity varies by history depth"). Each tower passes its concat through a 2-layer MLP. Only `output_dim=128` must match across towers.
+
+**Initialization:** Sub-tower linear layers use `gain=0.1`. Projection layers re-initialized to `gain=1.0`. Embedding tables use `gain=0.01`. Using `gain=0.01` for projections causes vanishing gradients — the projection layers go on top of already-small sub-tower outputs.
+
+### Shared embedding
+
+- `item_embedding_lookup` (32-dim) — shared between the item tower and all three user history pools. Only the raw lookup is shared; the user pools sum it directly, while the item tower passes it through `item_embedding_tower` (Linear 32→32 → ReLU).
 
 ### Embedding sizes
 
 ```python
-item_id_embedding_size      = 32   # shared: user history pool + item tower (must match)
+item_id_embedding_size      = 32   # shared: all 3 user history pools + item tower
 user_genre_embedding_size   = 32   # user only
+user_tag_embedding_size     = 32   # user only
 item_genre_embedding_size   = 8    # item only
-tag_embedding_size          = 16   # item only
+tag_embedding_size          = 32   # item only (was 16 in V1 — increased, tags are rich signal)
 developer_embedding_size    = 12   # item only
 item_year_embedding_size    = 8    # item only
 price_embedding_size        = 4    # item only
@@ -152,11 +169,11 @@ price_embedding_size        = 4    # item only
 proj_hidden  = 256
 output_dim   = 128   # only this must match across towers
 
-# user concat: 128 + 32 = 160  → proj → 128
-# item concat: 8 + 16 + 32 + 12 + 8 + 4 = 80  → proj → 128
+# user concat: 32+32+32 (pools) + 32 (genre) + 32 (tag) = 160 → proj → 128
+# item concat: 8+32+32+12+8+4 = 96 → proj → 128
 ```
 
-Only `item_id_embedding_size` and `output_dim` are constrained: the former because it is a shared parameter, the latter because the dot product requires equal dimensions.
+Only `item_id_embedding_size` and `output_dim` are constrained across towers.
 
 ### Developer tower details
 
@@ -173,26 +190,30 @@ Only `item_id_embedding_size` and `output_dim` are constrained: the former becau
 
 ## Training Details
 
-**What the model predicts:** "Given this user's play history, which game do they play next?" — a ranking problem, not a regression. Playtime is never a prediction target.
+**What the model predicts:** "Given a random subset of this user's play history, which game do they also play?" — a ranking problem, not a regression. Playtime is never a prediction target.
 
-**Playtime role:** Used only as a weighting signal inside the user tower's history avg pool. Each played game's embedding is weighted by `log(1 + hours)` normalized across the user's history — games with 500 hours pull the user embedding harder than games with 2 hours. Playtime does not appear in the loss, the item tower, or anywhere else.
+**Playtime role in V2:** Playtime is used to partition history into Liked/Disliked pools and to build rolling genre context (log playtime weighting). It is NOT used as a per-item weight in the history pools — all items in a pool contribute equally via sum pooling. Playtime does not appear in the loss or item tower.
 
 **Note on YouTube DNN:** The YouTube paper predicts watch time, but that is their *ranking* model (stage 2), not the two-tower candidate generation model (stage 1) that we are replicating. Our corpus is ~5,400 games — small enough to score all items exactly at inference time with no ANN needed. A separate ranking stage is unnecessary.
 
-**Primary: In-batch negatives softmax** — same objective as the book model.
+**Full softmax over entire corpus:**
 
-- **Loss**: cross-entropy over in-batch negatives. B×B score matrix, diagonal = correct targets.
-- **Dataset**: rollback examples — for each play event, context = all prior plays. Up to `MAX_ROLLBACK_EXAMPLES_PER_USER=50` examples per user sampled randomly.
-- **Playtime weighting**: `weights = log(1 + hours) / sum(log(1 + hours))` per user → `history_emb = sum(weights[i] * item_emb[i])`.
+- **Loss**: cross-entropy over all ~5,442 items. Every step scores the full corpus.
+- **Dataset**: rollback examples with N_SHUFFLES=3 → ~4.3M training examples.
 - **Optimizer**: Adam, `lr=0.001`, `weight_decay=1e-5`
+- **Scheduler**: CosineAnnealingLR, `T_max=50_000`, `eta_min=1e-4` (floor prevents LR going to zero)
+- **Gradient clipping**: `clip_grad_norm_(max_norm=1.0)` before each optimizer step
 - **Batch size**: 512
 - **Temperature**: 0.05
-- **Steps**: 150,000
+- **Steps**: 50,000 (~6 passes through 4.3M examples)
+- **Val eval**: fixed 8,192 val examples sampled once at run start — same indices every log step so val loss is comparable across steps (not a fresh random sample each time)
 - **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
 
-**Frozen item embedding cache — tried, abandoned.** Cached all corpus item embeddings as a detached `(n_items+1, 128)` tensor, refreshed every 100 steps, so user history pooling uses table lookups instead of running the full item tower per step (standard industry pattern). Result: significantly worse — Recall@10 dropped from 0.3794 → 0.2931 and MRR from 0.1845 → 0.1409, below even the old raw-ID-pool baseline (0.3529 / 0.1725). Root cause: the item tower in ipool serves two coupled roles — encoding candidate items AND encoding history items for user representation. Freezing the cache breaks this coupling; the item tower is only trained as a retrieval target, losing the signal needed for good history embeddings. The cache code has been removed from the codebase after this experiment concluded.
+**Weight decay is required with full softmax.** Full softmax sends dense gradients to all ~6k item embeddings every step via Adam's adaptive rates. Without weight decay, embedding norms grow unconstrained and cause loss explosion (~step 10k). `weight_decay=1e-5` anchors norms.
 
-**Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. If timestamps are unavailable, omit the `timestamp_embedding_tower` entirely from the user tower (adjust dims accordingly). The review `posted` date is available but only for reviewed games — too sparse to use as a general timestamp.
+**Gradient clipping is required with temperature=0.05.** Temperature amplifies gradients by 20×. Clipping at max_norm=1.0 prevents early explosion. Note: with Adam, clipping alone is insufficient — weight decay is also needed.
+
+**Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. Timestamp tower omitted. The review `posted` date is available but only for reviewed games — too sparse.
 
 ## Canary Users for Eval
 
@@ -237,7 +258,7 @@ Canary users are synthetic — no real play timestamps (timestamp tower omitted 
 - **Train users**: all interactions used for rollback training examples — no within-user cut needed, no leakage possible.
 - **Val users**: all interactions used for rollback eval examples — no within-user cut needed either, since none of their data was ever in training. Any rollback pair from a val user is valid.
 
-At eval time, val user rollback examples are generated the same way as training examples: for each (context, target) pair, rank all corpus games and measure whether the target appears in top K.
+At eval time, val user rollback examples are generated fresh (not from the saved dataset) using `_build_rollback_dataset` with `n_shuffles=1`. For each (context, target) pair, all corpus games are ranked and whether the target appears in top K is measured. Results are written to `eval_results/<checkpoint_stem>.txt`.
 
 **Why no within-user 90/10 split:** The within-user split exists in the book model to prevent leakage — you can't let the model train on a future read and also use it as an eval label. That concern disappears entirely when val users are held out at the user level: the model has seen zero of their interactions, so there is nothing to leak.
 
@@ -245,15 +266,16 @@ At eval time, val user rollback examples are generated the same way as training 
 
 ## Relationship to Book Repo
 
-| File            | Status                                                             |
-|-----------------|--------------------------------------------------------------------|
-| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline       |
-| `features.py`   | Adapted — same logic, game column names, developer feature added   |
-| `dataset.py`    | Adapted — same logic, playtime-weighted rollback examples          |
-| `model.py`      | Extended — developer + price towers; timestamp may be omitted      |
-| `train.py`      | Identical                                                          |
-| `evaluate.py`   | Adapted — canary dicts use game titles and Steam tags              |
-| `export.py`     | Adapted — exclude large buffers from model.pth                     |
+| File            | Status                                                                              |
+|-----------------|-------------------------------------------------------------------------------------|
+| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline, global game medians  |
+| `features.py`   | Adapted — game column names, developer feature, recommend history, game medians     |
+| `dataset.py`    | Heavily extended — triple pools, rolling genre/tag context, N_SHUFFLES, quality filter |
+| `model.py`      | Extended — triple pools, shallow sum pooling, user tag tower, ReLU, LayerNorm      |
+| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, fixed val eval        |
+| `evaluate.py`   | Adapted — canary dicts use game titles and Steam tags; V2 user_embedding signature |
+| `offline_eval.py` | Adapted — V2 triple-pool inputs; writes results to `eval_results/`              |
+| `export.py`     | Adapted — exclude large buffers from model.pth                                     |
 
 ## Serving / Export Notes
 
