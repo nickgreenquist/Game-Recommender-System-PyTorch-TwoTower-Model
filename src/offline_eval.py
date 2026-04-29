@@ -1,19 +1,9 @@
 """
-Offline retrieval evaluation — Recall@K, NDCG@K, Hit Rate@K, MRR.
-
-Protocol: user-level hold-out.
-  Val users are held out entirely from training — none of their interactions
-  are seen during training.  All their rollback examples are used for eval.
-  For each (context, target) pair: rank all corpus games, measure whether
-  the target appears in top K.
-
-  Because each rollback example has exactly one target, Recall@K == Hit Rate@K.
-
-Usage:
-    python main.py eval
-    python main.py eval <checkpoint_path>
+Offline retrieval evaluation V2 — Recall@K, NDCG@K, Hit Rate@K, MRR.
+Results are written to eval_results/<checkpoint_stem>.txt
 """
 import math
+import os
 import random
 
 import torch
@@ -22,7 +12,6 @@ from tqdm import tqdm
 from src.dataset import (
     _build_rollback_dataset,
     pad_history_batch,
-    pad_weights_batch,
     MAX_ROLLBACK_EXAMPLES_PER_USER,
 )
 from src.evaluate import build_game_embeddings
@@ -35,11 +24,11 @@ def run_offline_eval(model: GameRecommender, fs: dict,
                      ks: tuple = (1, 5, 10, 20, 50),
                      seed: int = 42) -> None:
     model.eval()
+    device = next(model.parameters()).device
 
     # ── Pre-compute item embedding matrix ─────────────────────────────────────
     print("Building game embeddings ...")
     _, all_ids, all_embs = build_game_embeddings(model, fs)
-    # all_embs: (n_items, 105)
 
     # ── Sample val users ──────────────────────────────────────────────────────
     val_users = fs['val_users']
@@ -49,7 +38,7 @@ def run_offline_eval(model: GameRecommender, fs: dict,
 
     # ── Generate rollback examples ────────────────────────────────────────────
     print("Building rollback examples for val users ...")
-    (X_genre, X_history, X_history_weights, target_item_idx,
+    (X_genre, X_tag, X_hist_liked, X_hist_disliked, X_hist_full, target_item_idx,
      *_) = _build_rollback_dataset(
         eval_users, fs,
         max_per_user=MAX_ROLLBACK_EXAMPLES_PER_USER,
@@ -57,7 +46,7 @@ def run_offline_eval(model: GameRecommender, fs: dict,
     )
 
     n_examples = target_item_idx.shape[0]
-    pad_idx    = fs['n_items']   # model.game_pad_idx
+    pad_idx    = fs['n_items']
 
     # ── Accumulators ──────────────────────────────────────────────────────────
     recall   = {k: 0.0 for k in ks}
@@ -73,15 +62,17 @@ def run_offline_eval(model: GameRecommender, fs: dict,
             e = min(s + batch_size, n_examples)
             B = e - s
 
-            hist_t = pad_history_batch(X_history[s:e], pad_idx)   # (B, max_len)
-            wt_t   = pad_weights_batch(X_history_weights[s:e])     # (B, max_len)
+            h_liked    = pad_history_batch(X_hist_liked[s:e], pad_idx).to(device)
+            h_disliked = pad_history_batch(X_hist_disliked[s:e], pad_idx).to(device)
+            h_full     = pad_history_batch(X_hist_full[s:e], pad_idx).to(device)
+            
+            x_genre = X_genre[s:e].to(device)
+            x_tag   = X_tag[s:e].to(device)
 
-            user_emb = model.user_embedding(
-                X_genre[s:e], hist_t, wt_t
-            )  # (B, 105)
+            user_emb = model.user_embedding(x_genre, x_tag, h_liked, h_disliked, h_full)
 
             # scores: (B, n_items)
-            scores = (all_embs @ user_emb.T).T
+            scores = (user_emb @ all_embs.T)
 
             target_idxs = target_item_idx[s:e]  # (B,)
 
@@ -102,41 +93,46 @@ def run_offline_eval(model: GameRecommender, fs: dict,
         print("No examples evaluated.")
         return
 
-    # ── Random baselines (single-target, uniform ranker) ─────────────────────
-    # Recall@K = Hit Rate@K = K/N  (target equally likely at any rank)
-    # NDCG@K   = (1/N) * sum_{r=1}^{K} 1/log2(r+1)
-    # MRR      = (1/N) * H_N  (harmonic number / N)
     n_corpus = len(all_ids)
     rand_recall = {k: k / n_corpus for k in ks}
     rand_ndcg   = {k: sum(1.0 / math.log2(r + 1) for r in range(1, k + 1)) / n_corpus
                    for k in ks}
     rand_mrr    = sum(1.0 / r for r in range(1, n_corpus + 1)) / n_corpus
 
-    # ── Print results ─────────────────────────────────────────────────────────
-    print(f"\n── Offline Evaluation  ({n_eval:,} rollback examples, "
-          f"{len(eval_users):,} val users) " + "─" * 20)
+    lines = []
+    lines.append(f"── Offline Evaluation  ({n_eval:,} rollback examples, "
+                 f"{len(eval_users):,} val users) " + "─" * 20)
     if checkpoint_path:
-        print(f"Checkpoint: {checkpoint_path}")
-    print(f"Corpus: {n_corpus:,} games  |  1 target per example  "
-          f"(Recall@K = Hit Rate@K for single-target eval)\n")
+        lines.append(f"Checkpoint: {checkpoint_path}")
+    lines.append(f"Corpus: {n_corpus:,} games\n")
 
     header = f"{'K':>6}  {'Recall@K':>10}  {'Hit Rate@K':>11}  {'NDCG@K':>8}"
     sep    = "─" * len(header)
     thin   = "·" * len(header)
 
-    print(header)
-    print(sep)
+    lines.append(header)
+    lines.append(sep)
     for k in ks:
-        print(f"{k:>6}  "
-              f"{rand_recall[k]:>10.4f}  "
-              f"{rand_recall[k]:>11.4f}  "
-              f"{rand_ndcg[k]:>8.4f}  ← random")
-    print(thin)
+        lines.append(f"{k:>6}  "
+                     f"{rand_recall[k]:>10.4f}  "
+                     f"{rand_recall[k]:>11.4f}  "
+                     f"{rand_ndcg[k]:>8.4f}  ← random")
+    lines.append(thin)
     for k in ks:
-        print(f"{k:>6}  "
-              f"{recall[k]/n_eval:>10.4f}  "
-              f"{hit_rate[k]/n_eval:>11.4f}  "
-              f"{ndcg[k]/n_eval:>8.4f}  ← model")
-    print(sep)
-    print(f"MRR  random: {rand_mrr:.4f}   model: {mrr_sum/n_eval:.4f}  "
-          f"(+{mrr_sum/n_eval - rand_mrr:.4f})")
+        lines.append(f"{k:>6}  "
+                     f"{recall[k]/n_eval:>10.4f}  "
+                     f"{hit_rate[k]/n_eval:>11.4f}  "
+                     f"{ndcg[k]/n_eval:>8.4f}  ← model")
+    lines.append(sep)
+    lines.append(f"MRR  random: {rand_mrr:.4f}   model: {mrr_sum/n_eval:.4f}  "
+                 f"(+{mrr_sum/n_eval - rand_mrr:.4f})")
+
+    output = "\n".join(lines)
+    print(f"\n{output}")
+
+    os.makedirs('eval_results', exist_ok=True)
+    stem = os.path.splitext(os.path.basename(checkpoint_path))[0] if checkpoint_path else 'unknown'
+    out_path = os.path.join('eval_results', f'{stem}.txt')
+    with open(out_path, 'w') as f:
+        f.write(output + "\n")
+    print(f"\n✓ Saved → {out_path}")

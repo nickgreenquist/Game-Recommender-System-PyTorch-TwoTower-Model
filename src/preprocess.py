@@ -87,7 +87,7 @@ def run_games(data_dir: str = 'data') -> None:
     """
     Build game corpus + vocabulary.
 
-    Pass 1: count per-game interactions from australian_users_items.json.gz.
+    Pass 1: count per-game interactions from australian_users_items.json.gz and collect playtimes.
     Pass 2: read steam_games.json.gz, filter to corpus games, parse metadata.
     Writes base_games.parquet, base_game_tags.parquet, base_vocab.parquet.
     """
@@ -96,18 +96,29 @@ def run_games(data_dir: str = 'data') -> None:
     items_path = os.path.join(data_dir, 'australian_users_items.json.gz')
     games_path = os.path.join(data_dir, 'steam_games.json.gz')
 
-    # ── Pass 1: count per-game user interactions ──
-    print("Pass 1: counting per-game interactions ...")
+    # ── Pass 1: count per-game user interactions and collect playtimes ──
+    print("Pass 1: scanning per-game interactions ...")
     game_user_counts: Counter = Counter()
+    game_playtimes = defaultdict(list)
     total_users = 0
     for user in tqdm(_read_gz(items_path), desc="  users"):
         total_users += 1
         for item in user.get('items', []):
             hours = item.get('playtime_forever', 0) / 60
             if hours >= MIN_HOURS_PER_GAME:
-                game_user_counts[str(item['item_id'])] += 1
+                gid = str(item['item_id'])
+                game_user_counts[gid] += 1
+                game_playtimes[gid].append(hours)
 
     corpus_ids = {gid for gid, cnt in game_user_counts.items() if cnt >= MIN_INTERACTIONS_PER_GAME}
+
+    # Calculate global medians for corpus games
+    print("  Calculating global medians ...")
+    game_medians = {
+        gid: float(pd.Series(game_playtimes[gid]).median())
+        for gid in corpus_ids
+    }
+
     print(f"  Users scanned: {total_users:,}")
     print(f"  Games with any qualifying playtime: {len(game_user_counts):,}")
     print(f"  Corpus games (≥{MIN_INTERACTIONS_PER_GAME} users): {len(corpus_ids):,}")
@@ -134,6 +145,7 @@ def run_games(data_dir: str = 'data') -> None:
             'price':        game.get('price'),
             'price_bucket': _parse_price_bucket(game.get('price')),
             'n_users':      game_user_counts.get(gid, 0),
+            'median_hours': game_medians.get(gid, 0.0),
         })
 
     found_ids = {r['item_id'] for r in rows}
@@ -304,8 +316,6 @@ def run_interactions(data_dir: str = 'data') -> None:
             hours = item.get('playtime_forever', 0) / 60
             if iid in corpus_ids and hours >= MIN_HOURS_PER_GAME:
                 corpus_items.append((iid, round(hours, 4), review_lookup.get((uid, iid))))
-
-        corpus_items.sort(key=lambda x: int(x[0]))  # item_id (Steam app ID) ≈ release date proxy
 
         total_hours = sum(h for _, h, _ in corpus_items)
         if total_hours < MIN_PLAYTIME_PER_USER:

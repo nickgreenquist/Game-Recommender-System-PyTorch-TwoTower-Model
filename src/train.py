@@ -1,5 +1,5 @@
 """
-Training: in-batch negatives softmax (YouTube DNN stage-1 objective).
+Training: Full softmax over the entire corpus.
 
 Usage:
     python main.py train
@@ -12,37 +12,32 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from src.dataset import pad_history_batch, pad_weights_batch
+from src.dataset import pad_history_batch
 from src.model import GameRecommender
 
 
 # ── Hyperparameters ───────────────────────────────────────────────────────────
 
 def get_config() -> dict:
-    # Sub-embedding sizes — intermediate features, not final representations.
-    # Only item_id_embedding_size must match across towers (shared lookup).
-    # user concat: item_pool(128) + user_genre(32) = 160 → proj → 128
-    # item concat: item_genre + tag + item_id + dev + year + price = 8+16+32+12+8+4 = 80
-    # Both project to output_dim via the projection MLP.
     return {
-        'item_id_embedding_size':    32,   # shared: user history pool + item tower
-        'user_genre_embedding_size': 32,   # user only
-        'item_genre_embedding_size': 8,    # item only
-        'tag_embedding_size':        16,   # item only (164 tags → MLP handles compression)
-        'developer_embedding_size':  12,   # item only
-        'item_year_embedding_size':  8,    # item only
-        'price_embedding_size':      4,    # item only (9 buckets)
-        # Projection MLP — learns cross-feature interactions after sub-embedding concat
-        'proj_hidden': 256,
-        'output_dim':  128,
+        'item_id_embedding_size':    32,   # shared across all pools
+        'user_genre_embedding_size': 32,
+        'user_tag_embedding_size':   32,
+        'item_genre_embedding_size': 8,
+        'tag_embedding_size':        32,
+        'developer_embedding_size':  12,
+        'item_year_embedding_size':  8,
+        'price_embedding_size':      4,
+        'proj_hidden':               256,
+        'output_dim':                128,
         # Training
         'lr':               0.001,
         'weight_decay':     1e-5,
         'minibatch_size':   512,
         'temperature':      0.05,
-        'training_steps':   150_000,
-        'log_every':        10_000,
-        'checkpoint_every': 30_000,
+        'training_steps':   50_000,
+        'log_every':        1_000,
+        'checkpoint_every': 10_000,
         'checkpoint_dir':   'saved_models',
     }
 
@@ -59,23 +54,6 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
     pad_row    = np.zeros((1, n_tags), dtype=np.float32)
     game_tag_matrix = torch.from_numpy(np.vstack([tag_matrix, pad_row]))
 
-    # game_dev_idx: (n_games+1,) — last entry = n_developers (padding index)
-    dev_idx_arr  = fs['game_developer_idx']                      # (n_games,) int64
-    game_dev_idx = torch.from_numpy(
-        np.append(dev_idx_arr, n_developers).astype(np.int64)
-    )
-
-    # Non-persistent buffers for user history pool — indexed by game embedding index,
-    # pad row at index n_games.
-    genre_mat      = torch.from_numpy(fs['game_genre_matrix'].astype(np.float32))
-    hist_genre_buf = torch.cat([genre_mat, torch.zeros(1, genre_mat.shape[1])], dim=0)
-
-    year_arr      = torch.from_numpy(fs['game_year_idx'].astype(np.int64))
-    hist_year_buf = torch.cat([year_arr, torch.zeros(1, dtype=torch.long)], dim=0)
-
-    price_arr      = torch.from_numpy(fs['game_price_bucket'].astype(np.int64))
-    hist_price_buf = torch.cat([price_arr, torch.zeros(1, dtype=torch.long)], dim=0)
-
     model = GameRecommender(
         n_genres=fs['n_genres'],
         n_tags=n_tags,
@@ -83,14 +61,9 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
         n_years=fs['n_years'],
         n_developers=n_developers,
         n_price_buckets=fs['n_price_buckets'],
-        user_context_size=2 * fs['n_genres'],    # [debiased_avg_log | play_frac] per genre
-        game_tag_matrix=game_tag_matrix,
-        game_dev_idx=game_dev_idx,
-        hist_genre_buf=hist_genre_buf,
-        hist_year_buf=hist_year_buf,
-        hist_price_buf=hist_price_buf,
         item_id_embedding_size=config['item_id_embedding_size'],
         user_genre_embedding_size=config['user_genre_embedding_size'],
+        user_tag_embedding_size=config['user_tag_embedding_size'],
         item_genre_embedding_size=config['item_genre_embedding_size'],
         tag_embedding_size=config['tag_embedding_size'],
         developer_embedding_size=config['developer_embedding_size'],
@@ -99,32 +72,36 @@ def build_model(config: dict, fs: dict) -> GameRecommender:
         proj_hidden=config['proj_hidden'],
         output_dim=config['output_dim'],
     )
+    # Load tag matrix buffer
+    model.game_tag_matrix.copy_(game_tag_matrix)
     return model
 
 
 def print_model_summary(model: GameRecommender) -> None:
-    history_dim  = model.output_dim
-    genre_dim    = model.user_genre_tower[-2].out_features
-    user_concat  = history_dim + genre_dim
+    # User side components
+    item_id_dim = model.item_embedding_lookup.embedding_dim
+    genre_dim   = model.user_genre_tower[-2].out_features
+    tag_dim     = model.user_tag_tower[-2].out_features
+    user_total  = (3 * item_id_dim) + genre_dim + tag_dim
+    user_desc   = f"liked({item_id_dim}) + disliked({item_id_dim}) + full({item_id_dim}) + genre({genre_dim}) + tag({tag_dim})"
 
-    item_genre_d = model.item_genre_tower[-2].out_features
-    item_tag_d   = model.item_tag_tower[-2].out_features
-    item_game_d  = model.item_embedding_tower[-2].out_features
-    item_dev_d   = model.developer_tower[-2].out_features
-    year_d       = model.year_embedding_tower[-2].out_features
-    price_d      = model.price_embedding_tower[-2].out_features
-    item_concat  = item_genre_d + item_tag_d + item_game_d + item_dev_d + year_d + price_d
+    # Item side components
+    item_genre_dim = model.item_genre_tower[-2].out_features
+    item_tag_dim   = model.item_tag_tower[-2].out_features
+    item_id_tower  = model.item_embedding_tower[0].out_features
+    dev_dim        = model.developer_tower[-2].out_features
+    year_dim       = model.year_embedding_tower[-2].out_features
+    price_dim      = model.price_embedding_tower[-2].out_features
+    item_total     = item_genre_dim + item_tag_dim + item_id_tower + dev_dim + year_dim + price_dim
 
-    proj_hidden  = model.user_projection[0].out_features
-    output_dim   = model.output_dim
-    n_params     = sum(p.nelement() for p in model.parameters() if p.requires_grad)
+    proj_h   = model.user_projection[0].out_features
+    out_dim  = model.output_dim
+    n_params = sum(p.nelement() for p in model.parameters() if p.requires_grad)
 
     print(f"\n── Model dimensions ──")
-    print(f"  User side:  item_proj_pool({history_dim}) + genre({genre_dim})  =  {user_concat}"
-          f"  → proj({proj_hidden})  → {output_dim}")
-    print(f"  Item side:  genre({item_genre_d}) + tag({item_tag_d}) + game({item_game_d})"
-          f" + dev({item_dev_d}) + year({year_d}) + price({price_d})  =  {item_concat}"
-          f"  → proj({proj_hidden})  → {output_dim}")
+    print(f"  User side:  {user_desc}  =  {user_total}")
+    print(f"  Item side:  genre({item_genre_dim}) + tag({item_tag_dim}) + item_id({item_id_tower}) + dev({dev_dim}) + year({year_dim}) + price({price_dim})  =  {item_total}")
+    print(f"  Projection: Linear({proj_h}) → ReLU → Linear({out_dim})  [both towers]")
     print(f"  Parameters: {n_params:,}")
 
 
@@ -133,23 +110,13 @@ def print_model_summary(model: GameRecommender) -> None:
 def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
                   config: dict, fs: dict) -> str:
     """
-    In-batch negatives softmax training.
-
-    train_data / val_data: 8-tuple from dataset.make_softmax_splits()
-      [0] X_genre           (N, 2*n_genres) float32
-      [1] X_history         list[list[int]]
-      [2] X_history_weights list[list[float]]
-      [3] target_item_idx   (N,) int64
-      [4] target_genre      (N, n_genres) float32
-      [5] target_dev_idx    (N,) int64
-      [6] target_year_idx   (N,) int64
-      [7] target_price      (N,) int64
+    Full softmax training.
     """
-    (X_genre_train, X_history_train, X_history_weights_train,
+    (X_genre_train, X_tag_train, X_hist_liked_train, X_hist_disliked_train, X_hist_full_train,
      target_item_idx_train, target_genre_train,
      target_dev_idx_train, target_year_idx_train, target_price_train) = train_data
 
-    (X_genre_val, X_history_val, X_history_weights_val,
+    (X_genre_val, X_tag_val, X_hist_liked_val, X_hist_disliked_val, X_hist_full_val,
      target_item_idx_val, target_genre_val,
      target_dev_idx_val, target_year_idx_val, target_price_val) = val_data
 
@@ -161,20 +128,22 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     print(f"  Device: {device}")
     model = model.to(device)
 
-    # Move pre-built tensors to device
-    X_genre_train          = X_genre_train.to(device)
-    target_item_idx_train  = target_item_idx_train.to(device)
-    target_genre_train     = target_genre_train.to(device)
-    target_dev_idx_train   = target_dev_idx_train.to(device)
-    target_year_idx_train  = target_year_idx_train.to(device)
-    target_price_train     = target_price_train.to(device)
+    # Move tensors to device
+    X_genre_train         = X_genre_train.to(device)
+    X_tag_train           = X_tag_train.to(device)
+    target_item_idx_train = target_item_idx_train.to(device)
 
-    X_genre_val            = X_genre_val.to(device)
-    target_item_idx_val    = target_item_idx_val.to(device)
-    target_genre_val       = target_genre_val.to(device)
-    target_dev_idx_val     = target_dev_idx_val.to(device)
-    target_year_idx_val    = target_year_idx_val.to(device)
-    target_price_val       = target_price_val.to(device)
+    X_genre_val           = X_genre_val.to(device)
+    X_tag_val             = X_tag_val.to(device)
+    target_item_idx_val   = target_item_idx_val.to(device)
+
+    # Pre-compute all item metadata for full softmax
+    print("Preparing full corpus item metadata ...")
+    all_game_idxs = torch.arange(fs['n_items'], device=device)
+    all_genres    = torch.from_numpy(fs['game_genre_matrix']).to(device)
+    all_years     = torch.from_numpy(fs['game_year_idx']).to(device)
+    all_devs      = torch.from_numpy(fs['game_developer_idx']).to(device)
+    all_prices    = torch.from_numpy(fs['game_price_bucket']).to(device)
 
     print_model_summary(model)
 
@@ -183,7 +152,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
                                         weight_decay=config['weight_decay'])
     training_steps   = config['training_steps']
     scheduler        = torch.optim.lr_scheduler.CosineAnnealingLR(
-                           optimizer, T_max=training_steps, eta_min=0)
+                           optimizer, T_max=training_steps, eta_min=1e-4)
     minibatch_size   = config['minibatch_size']
     temperature      = config['temperature']
     log_every        = config['log_every']
@@ -193,53 +162,52 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     n_train = X_genre_train.shape[0]
     n_val   = X_genre_val.shape[0]
 
+    # Fixed val index set — sampled once so val_loss is comparable across steps
+    val_eval_size = min(8_192, n_val)
+    rng_val = torch.Generator()
+    rng_val.manual_seed(0)
+    val_eval_idx = torch.randperm(n_val, generator=rng_val)[:val_eval_size].tolist()
+
     os.makedirs(checkpoint_dir, exist_ok=True)
     run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     best_val_loss = float('inf')
-    arch_tag  = 'ipool_softmax'
+    arch_tag  = 'triple_full_softmax'
     best_path = os.path.join(checkpoint_dir, f'best_{arch_tag}_{run_timestamp}.pth')
 
     loss_train = []
-
-    print(f"\nStarting softmax training ({training_steps:,} steps, "
-          f"batch={minibatch_size}, temp={temperature}) ...")
-    print(f"  Train: {n_train:,} examples  |  Val: {n_val:,} examples")
+    grad_norms = []
     start = time.time()
 
     from tqdm import tqdm
-    pbar = tqdm(range(training_steps), desc="Training (softmax)")
+    pbar = tqdm(range(training_steps), desc="Training (V2 Softmax)")
     for i in pbar:
         is_log = (i % log_every == 0)
 
         if is_log:
             model.eval()
             with torch.no_grad():
-                vidx = torch.randint(0, n_val, (minibatch_size,)).tolist()
-                vhp  = pad_history_batch([X_history_val[j]         for j in vidx], pad_idx).to(device)
-                vwp  = pad_weights_batch([X_history_weights_val[j] for j in vidx]).to(device)
-                U = model.user_embedding(X_genre_val[vidx], vhp, vwp)
-                V = model.item_embedding(target_genre_val[vidx], target_year_idx_val[vidx],
-                                         target_item_idx_val[vidx], target_dev_idx_val[vidx],
-                                         target_price_val[vidx])
-                scores   = (U @ V.T) / temperature
-                labels   = torch.arange(len(vidx), device=device)
-                val_loss = F.cross_entropy(scores, labels).item()
+                V_all = model.item_embedding(all_genres, all_years, all_game_idxs, all_devs, all_prices)
+                val_losses = []
+                for vs in range(0, val_eval_size, minibatch_size):
+                    ve   = min(vs + minibatch_size, val_eval_size)
+                    vidx = val_eval_idx[vs:ve]
 
-                if i == 0:
-                    raw = U @ V.T
-                    print(f"  [init diagnostics] raw dot products — "
-                          f"mean={raw.mean().item():.4f}  std={raw.std().item():.4f}  "
-                          f"min={raw.min().item():.4f}  max={raw.max().item():.4f}")
-                    print(f"  [init diagnostics] after /temp={temperature} — "
-                          f"mean={scores.mean().item():.4f}  std={scores.std().item():.4f}")
-                    print(f"  [init diagnostics] random baseline loss = {np.log(minibatch_size):.4f}")
+                    v_liked    = pad_history_batch([X_hist_liked_val[j]    for j in vidx], pad_idx).to(device)
+                    v_disliked = pad_history_batch([X_hist_disliked_val[j] for j in vidx], pad_idx).to(device)
+                    v_full     = pad_history_batch([X_hist_full_val[j]     for j in vidx], pad_idx).to(device)
 
-            avg_train  = np.mean(loss_train[i - log_every:i]) if i >= log_every else (loss_train[-1] if loss_train else 0.0)
+                    U      = model.user_embedding(X_genre_val[vidx], X_tag_val[vidx], v_liked, v_disliked, v_full)
+                    scores = (U @ V_all.T) / temperature
+                    val_losses.append(F.cross_entropy(scores, target_item_idx_val[vidx]).item())
+                val_loss = float(np.mean(val_losses))
+
+            avg_train     = np.mean(loss_train[i - log_every:i]) if i >= log_every else (loss_train[-1] if loss_train else 0.0)
+            avg_grad_norm = np.mean(grad_norms[i - log_every:i]) if i >= log_every else (grad_norms[-1] if grad_norms else 0.0)
             elapsed    = time.time() - start
             start      = time.time()
             current_lr = scheduler.get_last_lr()[0] if i > 0 else config['lr']
             pbar.set_postfix(train=f"{avg_train:.4f}", val=f"{val_loss:.4f}")
-            print(f"[{i:06d}]  train={avg_train:.4f}  val={val_loss:.4f}  lr={current_lr:.6f}  ({elapsed:.0f}s)")
+            print(f"[{i:06d}]  train_loss={avg_train:.4f}  val_loss={val_loss:.4f}  lr={current_lr:.6f}  grad_norm={avg_grad_norm:.2f}  ({elapsed:.0f}s)")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -247,28 +215,31 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
                 print(f"  → new best {best_val_loss:.4f} → {best_path}")
 
             if i > 0 and i % checkpoint_every == 0:
-                periodic = os.path.join(checkpoint_dir,
-                                        f'{arch_tag}_{run_timestamp}_step_{i:06d}.pth')
+                periodic = os.path.join(checkpoint_dir, f'{arch_tag}_{run_timestamp}_step_{i:06d}.pth')
                 torch.save(model.state_dict(), periodic)
                 print(f"  → periodic checkpoint → {periodic}")
         else:
             model.train()
             ix  = torch.randint(0, n_train, (minibatch_size,)).tolist()
-            hp  = pad_history_batch([X_history_train[j]         for j in ix], pad_idx).to(device)
-            wp  = pad_weights_batch([X_history_weights_train[j] for j in ix]).to(device)
-            U   = model.user_embedding(X_genre_train[ix], hp, wp)
-            V   = model.item_embedding(target_genre_train[ix], target_year_idx_train[ix],
-                                       target_item_idx_train[ix], target_dev_idx_train[ix],
-                                       target_price_train[ix])
-            scores = (U @ V.T) / temperature
-            labels = torch.arange(len(ix), device=device)
-            loss   = F.cross_entropy(scores, labels)
+
+            liked    = pad_history_batch([X_hist_liked_train[j]    for j in ix], pad_idx).to(device)
+            disliked = pad_history_batch([X_hist_disliked_train[j] for j in ix], pad_idx).to(device)
+            full     = pad_history_batch([X_hist_full_train[j]     for j in ix], pad_idx).to(device)
+
+            U = model.user_embedding(X_genre_train[ix], X_tag_train[ix], liked, disliked, full)
+            V_all = model.item_embedding(all_genres, all_years, all_game_idxs, all_devs, all_prices)
+
+            scores = (U @ V_all.T) / temperature
+            loss   = F.cross_entropy(scores, target_item_idx_train[ix])
+
             optimizer.zero_grad()
             loss.backward()
+            raw_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0).item()
             optimizer.step()
             scheduler.step()
             loss_train.append(loss.item())
+            grad_norms.append(raw_norm)
 
-    print(f"\nSoftmax training complete. Best val loss: {best_val_loss:.4f}")
+    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
     print(f"Best checkpoint: {best_path}")
     return best_path

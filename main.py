@@ -77,10 +77,11 @@ def cmd_eval(checkpoint_path=None):
     from src.offline_eval import run_offline_eval
     cp = _resolve_checkpoint(checkpoint_path, 'saved_models')
     if cp is None:
+        print("No checkpoint found.")
         return
-    print("Loading features ...")
+    print(f"Loading features (version {VERSION}) ...")
     fs = load_features(DATA_DIR, VERSION)
-    model, _, _, _, _, _ = _load_model_and_embeddings(cp, fs)
+    model, *_ = _load_model_and_embeddings(cp, fs)
     run_offline_eval(model, fs, checkpoint_path=cp)
 
 

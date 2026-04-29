@@ -64,13 +64,14 @@ def parse_vocab(vocab_df: pd.DataFrame) -> dict:
 def build_game_features(base: dict, vocab: dict) -> pd.DataFrame:
     """
     One row per game:
-      item_id, item_idx, genre_context, tag_context, developer_idx, year_idx, price_bucket
+      item_id, item_idx, genre_context, tag_context, developer_idx, year_idx, price_bucket, median_hours
 
     genre_context — float vector length n_genres, uniform weight across listed genres
     tag_context   — float vector length n_tags, TF-IDF scores from base_game_tags.parquet
     developer_idx — int, vocab index; 0 (__unknown__) if developer not in vocab
     year_idx      — int, vocab index; 0 if year not found
     price_bucket  — int, 0-8 (already computed in preprocess)
+    median_hours  — float, global median playtime for the game
     """
     games_df   = base['games']
     tags_df    = base['game_tags']
@@ -110,6 +111,7 @@ def build_game_features(base: dict, vocab: dict) -> pd.DataFrame:
         developer_idx = developer_to_i.get(grow['developer'], 0)
         year_idx      = year_to_i.get(str(grow['year']), 0)
         price_bucket  = int(grow['price_bucket'])
+        median_hours  = float(grow['median_hours'])
 
         rows.append({
             'item_id':       iid,
@@ -119,6 +121,7 @@ def build_game_features(base: dict, vocab: dict) -> pd.DataFrame:
             'developer_idx': developer_idx,
             'year_idx':      year_idx,
             'price_bucket':  price_bucket,
+            'median_hours':  median_hours,
         })
 
     df = pd.DataFrame(rows)
@@ -131,26 +134,14 @@ def build_game_features(base: dict, vocab: dict) -> pd.DataFrame:
 def build_user_features(base: dict, vocab: dict, item_to_idx: dict) -> pd.DataFrame:
     """
     One row per user:
-      user_id, split, play_history, play_history_weights, genre_context
+      user_id, split, play_history, play_history_weights, avg_log_playtime
 
     split                — 'train' or 'val' (user-level, 90/10 by user)
     play_history         — list[int] item_idx values, capped to MAX_HISTORY_LEN
     play_history_weights — list[float] log(1+h) weights normalized per user
-    genre_context        — float vector length 2*n_genres:
-                           first half  = debiased avg log-playtime per genre
-                           second half = fraction of play history in each genre
+    avg_log_playtime     — float, mean log(1+h) for the user
     """
     interactions_df = base['interactions']
-    games_df        = base['games']
-
-    genre_to_i  = vocab['genre_to_i']
-    genres_ord  = vocab['genres_ordered']
-    n_genres    = len(genre_to_i)
-
-    item_id_to_genres = {
-        r['item_id']: (list(r['genres']) if r['genres'] is not None else [])
-        for _, r in games_df.iterrows()
-    }
 
     # ── User-level train/val split ──
     all_users = interactions_df['user_id'].unique().tolist()
@@ -161,43 +152,10 @@ def build_user_features(base: dict, vocab: dict, item_to_idx: dict) -> pd.DataFr
     train_set = set(all_users[n_val:])
     print(f"  Train users: {len(train_set):,}   Val users: {len(val_set):,}")
 
-    # ── Per-user log-playtime avg (for debiasing genre context) ──
+    # ── Per-user log-playtime avg ──
     interactions_df = interactions_df.copy()
     interactions_df['log_hours'] = np.log1p(interactions_df['hours'].values)
     user_avg_log = interactions_df.groupby('user_id')['log_hours'].mean().to_dict()
-
-    # ── User genre stats (vectorized) ──
-    print("  Computing user genre stats ...")
-    _wg = interactions_df[['user_id', 'item_id', 'log_hours']].copy()
-    _wg['genre'] = _wg['item_id'].map(item_id_to_genres)
-    _wg = _wg.explode('genre').dropna(subset=['genre'])
-    _wg = _wg[_wg['genre'].isin(genre_to_i)]
-
-    _agg = (_wg.groupby(['user_id', 'genre'])
-               .agg(N=('log_hours', 'count'), S=('log_hours', 'sum'))
-               .reset_index())
-
-    total_N  = _agg.groupby('user_id')['N'].sum()
-    all_uids = list(total_N.index)
-    uid_to_row = {uid: i for i, uid in enumerate(all_uids)}
-
-    _ctx = _agg.copy()
-    _ctx['total_N']    = _ctx['user_id'].map(total_N)
-    _ctx['avg_log']    = _ctx['user_id'].map(user_avg_log)
-    _ctx['avg_g']      = _ctx['S'] / _ctx['N']
-    _ctx['val_avg']    = _ctx['avg_g'] - _ctx['avg_log']      # debiased avg log-playtime per genre
-    _ctx['val_frac']   = _ctx['N'] / _ctx['total_N']          # play fraction per genre
-    _ctx['col_avg']    = _ctx['genre'].map({g: i            for i, g in enumerate(genres_ord)})
-    _ctx['col_frac']   = _ctx['genre'].map({g: n_genres + i for i, g in enumerate(genres_ord)})
-    _ctx = _ctx.dropna(subset=['col_avg'])
-    _ctx[['col_avg', 'col_frac', 'row']] = _ctx[['col_avg', 'col_frac']].astype(int).assign(
-        row=_ctx['user_id'].map(uid_to_row).astype(int)
-    )
-
-    print("  Building genre context matrix ...")
-    genre_ctx_matrix = np.zeros((len(all_uids), 2 * n_genres), dtype=np.float32)
-    genre_ctx_matrix[_ctx['row'].values, _ctx['col_avg'].values]  = _ctx['val_avg'].values.astype(np.float32)
-    genre_ctx_matrix[_ctx['row'].values, _ctx['col_frac'].values] = _ctx['val_frac'].values.astype(np.float32)
 
     # ── Per-user play history ──
     history_agg = (interactions_df
@@ -207,7 +165,7 @@ def build_user_features(base: dict, vocab: dict, item_to_idx: dict) -> pd.DataFr
     history_by_user = {r['user_id']: r for _, r in history_agg.iterrows()}
 
     rows = []
-    for uid in tqdm(all_uids, desc="User features"):
+    for uid in tqdm(all_users, desc="User features"):
         split  = 'val' if uid in val_set else 'train'
         hrow   = history_by_user.get(uid)
 
@@ -227,15 +185,12 @@ def build_user_features(base: dict, vocab: dict, item_to_idx: dict) -> pd.DataFr
         total = sum(log_hours) or 1.0
         hist_weights = [lh / total for lh in log_hours]
 
-        genre_ctx = genre_ctx_matrix[uid_to_row[uid]].tolist() if uid in uid_to_row else [0.0] * (2 * n_genres)
-
         rows.append({
             'user_id':              uid,
             'split':                split,
             'avg_log_playtime':     float(user_avg_log.get(uid, 1.0)),
             'play_history':         hist_idx,
             'play_history_weights': hist_weights,
-            'genre_context':        genre_ctx,
         })
 
     df = pd.DataFrame(rows)
@@ -297,22 +252,30 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
     game_developer_idx = np.array(games_sorted['developer_idx'].tolist(), dtype=np.int64)
     game_year_idx      = np.array(games_sorted['year_idx'].tolist(),      dtype=np.int64)
     game_price_bucket  = np.array(games_sorted['price_bucket'].tolist(),  dtype=np.int64)
+    game_median_hours  = np.array(games_sorted['median_hours'].tolist(),  dtype=np.float32)
 
     # User dicts
     train_users = users_df[users_df['split'] == 'train']['user_id'].tolist()
     val_users   = users_df[users_df['split'] == 'val']['user_id'].tolist()
 
-    user_to_play_history    = {}
-    user_to_play_weights    = {}
-    user_to_genre_context   = {}
+    user_to_play_history     = {}
+    user_to_play_weights     = {}
     user_to_avg_log_playtime = {}
+    user_to_recommend_history = {}
+
+    # Need raw interactions for recommend signal
+    interactions_df = pd.read_parquet(os.path.join(data_dir, 'base_interactions.parquet'))
+    rec_agg = (interactions_df
+               .groupby('user_id')['recommend']
+               .apply(list)
+               .to_dict())
 
     for _, row in users_df.iterrows():
         uid = row['user_id']
         user_to_play_history[uid]     = list(row['play_history'])
         user_to_play_weights[uid]     = list(row['play_history_weights'])
-        user_to_genre_context[uid]    = list(row['genre_context'])
         user_to_avg_log_playtime[uid] = float(row['avg_log_playtime'])
+        user_to_recommend_history[uid] = rec_agg.get(uid, [None] * len(row['play_history']))
 
     # item_id → title for canary display
     base_games = pd.read_parquet(os.path.join(data_dir, 'base_games.parquet'))
@@ -344,16 +307,17 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         'game_developer_idx': game_developer_idx,
         'game_year_idx':      game_year_idx,
         'game_price_bucket':  game_price_bucket,
+        'game_median_hours':  game_median_hours,
 
         # User split
         'train_users':        train_users,
         'val_users':          val_users,
 
         # User features
-        'user_to_play_history':     user_to_play_history,
-        'user_to_play_weights':     user_to_play_weights,
-        'user_to_genre_context':    user_to_genre_context,
-        'user_to_avg_log_playtime': user_to_avg_log_playtime,
+        'user_to_play_history':      user_to_play_history,
+        'user_to_play_weights':      user_to_play_weights,
+        'user_to_avg_log_playtime':  user_to_avg_log_playtime,
+        'user_to_recommend_history': user_to_recommend_history,
     }
 
     print(f"\n  FeatureStore: {n_items:,} games | {n_genres} genres | {n_tags} tags | "
