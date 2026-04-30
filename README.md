@@ -7,21 +7,23 @@ This is a sibling project to the [Book Recommender System](https://github.com/ni
 
 ## Introduction
 
-A PyTorch two-tower neural network trained on the [UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) (~5,400 games, ~4.3M training examples).
+A PyTorch two-tower neural network trained on the [UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) (~5,437 games, ~4.3M training examples).
 
 Trained with full softmax cross-entropy over the entire game corpus, following the YouTube DNN retrieval approach (Covington et al., 2016). At inference, a dot product of the user and item embeddings retrieves the most relevant games.
 
 ## Key design choices
 
-- **No user ID embedding** — users are represented entirely by taste signals: four behavior-partitioned play history pools, rolling genre affinity, and rolling tag affinity. Any user can get recommendations from just a few games they've played, with no retraining required.
-- **Playtime as the rating signal** — Steam has no star ratings. `log(1 + hours)` compresses the extreme tail while preserving ordering. Used to classify history into Liked/Disliked pools and build genre context; never a prediction target.
+- **No user ID embedding** — users are represented entirely by taste signals: four behavior-partitioned play history pools, genre affinity, and tag affinity computed from play history. Any user can get recommendations from just a few games they've played, with no retraining required.
+- **Playtime as the rating signal** — Steam has no star ratings. `log(1 + hours)` compresses the extreme tail while preserving ordering. Used to classify history into Liked/Disliked pools and as the per-user avg scalar for genre debiasing; never a prediction target.
 - **Four history pools** — play history is partitioned into Liked (high playtime or explicit recommend), Disliked (bounced off or explicit thumbs-down), Full (all history, equal-weight), and Playtime-weighted Full (same games, weighted by normalized log-playtime). Each pool is a shallow sum of raw 32-dim game ID embeddings + LayerNorm. This gives the model separate signals for positive taste, negative taste, collaborative fingerprint, and engagement intensity.
-- **Full softmax over entire corpus** — cross-entropy over all ~5,400 games every training step, rather than in-batch negatives. Denser gradient signal; all items receive updates every step.
-- **User tag tower** — rolling sum of TF-IDF Steam tag vectors from play history → 32-dim. Captures granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like".
+- **In-model genre/tag context** — genre affinity and tag context are computed inside `user_embedding()` from `game_genre_matrix` and `game_tag_matrix` registered buffers, using the full history window. This avoids pre-computing context per rollback position in the dataset and enables the model to derive context from any history at inference time.
+- **Full softmax over entire corpus** — cross-entropy over all ~5,437 games every training step, rather than in-batch negatives. Denser gradient signal; all items receive updates every step.
+- **Valve title filter** — CS:GO, Garry's Mod, Left 4 Dead 2, Portal, and Counter-Strike are hard-removed from the corpus. These appeared in nearly every user's history, were trivially easy prediction targets, and caused cross-genre recommendation pollution.
+- **User tag tower** — sum of TF-IDF Steam tag vectors from play history → 32-dim. Captures granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like".
 - **Developer embedding tower** — analogous to the author tower in the book model. Clusters games by studio and stylistically similar developers.
 - **Price embedding tower** — free-to-play vs. indie vs. AAA is a meaningful taste dimension; bucketed into 9 price tiers.
 - **Shuffled history protocol** — Steam provides no per-game timestamps. History is shuffled randomly rather than sorted by release date, which would give the model a temporal shortcut (always predicting newer games). Rollback examples simulate "given a random subset of games this user plays, predict another."
-- **Projection MLP in each tower** — each tower concatenates its sub-embeddings and passes them through a 2-layer MLP (→256→ReLU→128). A plain concat fed directly into a dot product can only learn additive combinations; the MLP learns cross-feature interactions (e.g. genre × developer, liked pool × tag cluster). Both towers project to the same 128-dim space.
+- **Projection MLP in each tower** — each tower concatenates its sub-embeddings and passes them through a 2-layer MLP (→256→ReLU→128), then L2-normalizes the output. Both towers project to the same 128-dim space; dot product of normalized outputs is cosine similarity.
 
 ## Model architecture
 
@@ -51,6 +53,8 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 
 **Shared embedding:** `item_embedding_lookup` (32-dim) is shared between all four user history pools and the item tower. The user pools sum it directly (shallow pooling); the item tower additionally passes it through a small linear layer before concatenating with other item features.
 
+**In-model context:** `user_embedding()` takes `X_user_avg_log` (per-user average log-playtime scalar) and pre-padded history tensors — genre and tag context are derived inside the forward pass from `game_genre_matrix` and `game_tag_matrix` registered buffers. `item_embedding()` similarly looks up genre internally rather than taking it as an argument.
+
 ## Training
 
 | Hyperparameter | Value |
@@ -66,7 +70,7 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 | Training examples | ~4.3M (N_SHUFFLES=3 rollback augmentation, 55k train users) |
 | Val eval | Fixed 8,192-example set, sampled once per run |
 
-**Rollback construction:** For each user, rollback positions are drawn across their shuffled play history — given the first N games, predict game N+1. N_SHUFFLES=3 independent shuffles per user produce genuinely different (context, target) pairs. Val users (10% of all users) are held out entirely and never used in training.
+**Rollback construction:** For each user, rollback positions are drawn across their shuffled play history — given the first N games, predict game N+1. N_SHUFFLES=3 independent shuffles per user produce genuinely different (context, target) pairs. Val users (10% of all users) are held out entirely and never used in training. The dataset is a 9-tuple of pre-padded tensors (histories padded to MAX_HISTORY_LEN=50); genre/tag context is not stored in the dataset — computed at forward-pass time in the model.
 
 ## Offline Evaluation
 
