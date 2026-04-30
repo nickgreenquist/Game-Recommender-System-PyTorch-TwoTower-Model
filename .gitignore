@@ -3,5 +3,6 @@ __pycache__/
 *.pth
 !serving/*.pth
 data/
+data_backup*/
 saved_models/
 .DS_Store
