@@ -110,7 +110,13 @@ def run_games(data_dir: str = 'data') -> None:
                 game_user_counts[gid] += 1
                 game_playtimes[gid].append(hours)
 
-    corpus_ids = {gid for gid, cnt in game_user_counts.items() if cnt >= MIN_INTERACTIONS_PER_GAME}
+    # Top 5 Valve/Gravity wells
+    DENYLIST = {'730', '550', '620', '240', '4000'} 
+
+    corpus_ids = {
+        gid for gid, cnt in game_user_counts.items() 
+        if cnt >= MIN_INTERACTIONS_PER_GAME and gid not in DENYLIST
+    }
 
     # Calculate global medians for corpus games
     print("  Calculating global medians ...")

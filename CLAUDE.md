@@ -12,7 +12,7 @@ This is a sibling project to:
 
 The architecture follows the same two-tower design as the book model. The book model is the primary reference — it uses the softmax objective (3× better than MSE), and adds a domain-specific embedding tower (author) not present in the movie model. Here, the analogous addition is a **developer embedding tower**.
 
-**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: three behavior-partitioned play history pools (Liked, Disliked, Full), rolling genre affinity, and rolling tag affinity. Any user can be represented at inference time with just a few games they've played — no retraining required.
+**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: four behavior-partitioned play history pools (Liked, Disliked, Full, Playtime-weighted Full), rolling genre affinity, and rolling tag affinity. Any user can be represented at inference time with just a few games they've played — no retraining required.
 
 **Rating signal: playtime hours.** Steam does not have star ratings. The `playtime_forever` field (total hours played per game, from `australian_user_items.json`) serves as the implicit feedback signal. Playtime is a strong preference proxy — a user who played 500 hours loves that game. Reviews provide a binary `recommend` signal as supplementary explicit feedback. The primary training signal is playtime.
 
@@ -110,16 +110,17 @@ Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-a
 
 ## Model Architecture
 
-Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, shallow sum pooling, ReLU activations, and LayerNorm stabilization.
+Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, shallow sum pooling, ReLU activations, and LayerNorm stabilization. A 4th playtime-weighted pool captures intensity of preference beyond the binary liked/disliked split.
 
 ```
 User Tower:
   liked_pool:    sum(item_id_emb[liked_ids])    → LayerNorm → 32-dim
   disliked_pool: sum(item_id_emb[disliked_ids]) → LayerNorm → 32-dim
   full_pool:     sum(item_id_emb[full_ids])     → LayerNorm → 32-dim
+  playtime_pool: sum(item_id_emb[full_ids] * w) where w=log(1+h)/Σlog(1+h) → LayerNorm → 32-dim
   user_genre_tower([debiased_avg_log | play_frac]) → genre_emb  (32-dim)
   user_tag_tower(LayerNorm(rolling_tag_sum))       → tag_emb    (32-dim)
-  concat → 160-dim
+  concat → 192-dim
   user_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
 Item Tower:
@@ -137,10 +138,11 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 
 **Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. LayerNorm after each pool stabilizes the variable-magnitude sums (a user with 50 games gets a 50× larger raw sum than one with 1 game).
 
-**Triple pool partitioning** (computed per rollback position in `dataset.py`):
+**Four pool partitioning** (computed per rollback position in `dataset.py`):
 - **Liked:** `recommend==True` OR `hours >= game_median` OR `hours >= user_rolling_median × 2`
 - **Disliked:** `recommend==False` OR `(0.1 < hours < 1.0)` OR `hours <= user_rolling_median / 2`
-- **Full:** all context items (most recent MAX_HISTORY_LEN=50)
+- **Full:** all context items (most recent MAX_HISTORY_LEN=50) — equal-weight sum pool
+- **Playtime-weighted Full:** same items as Full; weighted sum where each item's weight is `log(1+hours)` normalized by the context total — captures intensity of engagement beyond the binary liked/disliked split
 
 Items can appear in both Liked and Disliked simultaneously. `game_median` is the global per-game median playtime; `user_rolling_median` is computed at each rollback step from context hours so far.
 
@@ -152,12 +154,12 @@ Items can appear in both Liked and Disliked simultaneously. `game_median` is the
 
 ### Shared embedding
 
-- `item_embedding_lookup` (32-dim) — shared between the item tower and all three user history pools. Only the raw lookup is shared; the user pools sum it directly, while the item tower passes it through `item_embedding_tower` (Linear 32→32 → ReLU).
+- `item_embedding_lookup` (32-dim) — shared between the item tower and all four user history pools. Only the raw lookup is shared; the user pools sum/average it directly, while the item tower passes it through `item_embedding_tower` (Linear 32→32 → ReLU).
 
 ### Embedding sizes
 
 ```python
-item_id_embedding_size      = 32   # shared: all 3 user history pools + item tower
+item_id_embedding_size      = 32   # shared: all 4 user history pools + item tower
 user_genre_embedding_size   = 32   # user only
 user_tag_embedding_size     = 32   # user only
 item_genre_embedding_size   = 8    # item only
@@ -169,7 +171,7 @@ price_embedding_size        = 4    # item only
 proj_hidden  = 256
 output_dim   = 128   # only this must match across towers
 
-# user concat: 32+32+32 (pools) + 32 (genre) + 32 (tag) = 160 → proj → 128
+# user concat: 32+32+32+32 (pools) + 32 (genre) + 32 (tag) = 192 → proj → 128
 # item concat: 8+32+32+12+8+4 = 96 → proj → 128
 ```
 
@@ -208,6 +210,28 @@ Only `item_id_embedding_size` and `output_dim` are constrained across towers.
 - **Steps**: 50,000 (~6 passes through 4.3M examples)
 - **Val eval**: fixed 8,192 val examples sampled once at run start — same indices every log step so val loss is comparable across steps (not a fresh random sample each time)
 - **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
+
+**Popularity logit adjustment — bias/temperature ordering is critical (Menon et al. 2021).**
+
+The training score formula is:
+```python
+scores = (U @ V_all.T) / temperature - popularity_bias   # CORRECT
+# NOT: (U @ V_all.T - popularity_bias) / temperature    # WRONG — different scale at inference
+```
+
+The bias is subtracted **after** dividing by temperature, so it lives in temperature-scaled logit space (magnitudes ~1024 for temperature=0.001). At inference, dot products are in `[-1, 1]` (L2-normalized outputs). Applying the raw `popularity_bias` directly at inference would make it 1000× too large and collapse all users to the same ranking (popularity-sorted only).
+
+**Correct inference formula:**
+```python
+# Multiply through by temperature to convert training formula to dot-product space:
+# training rank: (u·v)/temp - bias  →  inference rank: u·v - temp*bias
+pop_bias_inference = temperature * alpha * sqrt(counts)
+scores = (user_emb @ item_embs.T) - pop_bias_inference
+```
+
+**Use `sqrt(count)` not `log1p(count)`.** `log1p` compresses the popularity range too aggressively — CS:GO (42k interactions) and Civ V (13k interactions) get nearly identical penalties (1.12× apart). `sqrt` gives 1.76× separation between them, letting the model suppress mega-popular games without over-penalizing moderately popular legitimate recommendations. Alpha scales accordingly: `alpha ≈ 0.5` with `sqrt` gives similar CS:GO penalty magnitude as `alpha=10` with `log1p`. Training and inference must always use the same function.
+
+This applies to both `evaluate.py` (canary) and `offline_eval.py`. Temperature must be read from the checkpoint's config sidecar (`_config.json`), not hardcoded, so it matches what the model was trained with.
 
 **Weight decay is required with full softmax.** Full softmax sends dense gradients to all ~6k item embeddings every step via Adam's adaptive rates. Without weight decay, embedding norms grow unconstrained and cause loss explosion (~step 10k). `weight_decay=1e-5` anchors norms.
 

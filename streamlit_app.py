@@ -22,6 +22,7 @@ from src.evaluate import (
     USER_TYPE_TO_TAGS,
     SIMULATED_FAV_LOG_HOURS,
     SIMULATED_ANCHOR_LOG_HOURS,
+    POPULARITY_ALPHA_INFERENCE_MULTIPLE,
 )
 
 from src.model import GameRecommender
@@ -156,73 +157,73 @@ def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
 # ── User embedding builder ────────────────────────────────────────────────────
 
 def _build_user_embedding(model: GameRecommender, fs: dict,
-                          liked_iids: list, anchor_iids: list) -> torch.Tensor:
+                          liked_iids: list, anchor_iids: list,
+                          anchor_in_liked: bool = True) -> torch.Tensor:
     """
     Build a user embedding from liked game IDs + tag anchors.
     Uses V2 triple-pool signature: liked / disliked / full pools + genre + tag context.
-    In Streamlit: all selected games go into liked + full pools; disliked is empty.
+
+    anchor_in_liked=True  (Recommend tab): anchors go into liked + full pools.
+    anchor_in_liked=False (Examples tab):  anchors go into full pool only — matches canary.
     """
-    genre_matrix = fs['game_genre_matrix']
-    if isinstance(genre_matrix, torch.Tensor):
-        genre_matrix = genre_matrix.numpy()
-    tag_matrix = fs['game_tag_matrix']
-    if isinstance(tag_matrix, torch.Tensor):
-        tag_matrix = tag_matrix.numpy()
-    item_to_idx  = fs['item_to_idx']
-    n_genres     = fs['n_genres']
-    n_tags       = fs['n_tags']
-    pad_idx      = model.game_pad_idx
+    item_to_idx = fs['item_to_idx']
+    pad_idx     = model.game_pad_idx
 
     weighted = (
         [(iid, _FAV_WEIGHT)    for iid in liked_iids]  +
         [(iid, _ANCHOR_WEIGHT) for iid in anchor_iids]
     )
     history = [(item_to_idx[iid], w) for iid, w in weighted if iid in item_to_idx]
+    avg_log = sum(w for _, w in history) / max(len(history), 1)
 
-    # 1. Genre context — derived from selected games only
-    avg_log       = sum(w for _, w in history) / max(len(history), 1)
-    running_count = np.zeros(n_genres, dtype=np.float32)
-    running_sum   = np.zeros(n_genres, dtype=np.float32)
-    for item_idx, raw_log in history:
-        for g_idx in np.where(genre_matrix[item_idx] > 0)[0]:
-            running_count[g_idx] += 1
-            running_sum[g_idx]   += raw_log
-    genre_ctx    = np.zeros(2 * n_genres, dtype=np.float32)
-    total_assign = running_count.sum()
-    if total_assign > 0:
-        mask = running_count > 0
-        genre_ctx[:n_genres][mask] = (running_sum[mask] / running_count[mask]) - avg_log
-        genre_ctx[n_genres:]       = running_count / total_assign
-
-    # 2. Tag context — sum TF-IDF vectors of all history games
-    tag_ctx = np.zeros(n_tags, dtype=np.float32)
-    for item_idx, _ in history:
-        tag_ctx += tag_matrix[item_idx]
-
-    # 3. Triple pools — all selected games are "liked"; no disliked signal from Streamlit
-    all_idxs = [item_to_idx[iid] for iid, _ in weighted if iid in item_to_idx]
+    # Triple pools
+    liked_only_idxs  = [item_to_idx[iid] for iid in liked_iids  if iid in item_to_idx]
+    anchor_only_idxs = [item_to_idx[iid] for iid in anchor_iids if iid in item_to_idx]
 
     def to_padded(idxs):
         return torch.tensor([idxs if idxs else [pad_idx]], dtype=torch.long)
 
-    X_genre    = torch.from_numpy(np.array([genre_ctx], dtype=np.float32))
-    X_tag      = torch.from_numpy(np.array([tag_ctx],   dtype=np.float32))
-    X_liked    = to_padded(all_idxs)
     X_disliked = to_padded([])
-    X_full     = to_padded(all_idxs)
 
-    return model.user_embedding(X_genre, X_tag, X_liked, X_disliked, X_full)
+    # Full pool is always liked + anchor; weights correspond positionally
+    full_idxs = liked_only_idxs + anchor_only_idxs
+    raw_pw    = [_FAV_WEIGHT] * len(liked_only_idxs) + [_ANCHOR_WEIGHT] * len(anchor_only_idxs)
+    total_pw  = sum(raw_pw) or 1.0
+    norm_pw   = [w / total_pw for w in raw_pw] if raw_pw else [1.0]
+    X_pw      = torch.tensor([norm_pw], dtype=torch.float32)
+
+    if anchor_in_liked:
+        X_liked = to_padded(liked_only_idxs + anchor_only_idxs)
+        X_full  = to_padded(full_idxs)
+    else:
+        X_liked = to_padded(liked_only_idxs)
+        X_full  = to_padded(full_idxs)
+
+    X_avg_log = torch.tensor([[avg_log]], dtype=torch.float32)
+    return model.user_embedding(X_avg_log, X_liked, X_disliked, X_full, X_pw)
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
                  fs: dict, exclude_iids: set, top_n: int = 20,
                  mark_iids: set = None):
-    """Raw dot-product rank all corpus games; exclude seeds; return top-n DataFrame.
+    """Dot-product rank all corpus games with popularity bias; exclude seeds; return top-n DataFrame.
     mark_iids: item IDs to include but label '  ◀ seed' in the Title column.
     """
     import pandas as pd
     mark_iids  = mark_iids or set()
     raw_scores = (all_embs @ user_emb.T).squeeze(-1)
+
+    # Apply popularity bias — same formula as training and canary inference:
+    # training: (u·v)/temp - bias  →  inference ranking: u·v - temp*bias
+    cfg   = fs.get('model_config', {})
+    alpha = cfg.get('popularity_alpha', 0.0)
+    if alpha > 0 and 'game_interaction_counts' in fs:
+        counts = fs['game_interaction_counts']
+        if isinstance(counts, np.ndarray):
+            counts = torch.from_numpy(counts)
+        temperature = 0.5 / cfg.get('minibatch_size', 512)
+
+        raw_scores  = raw_scores - temperature * (alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts.float())
     rows = []
     for idx in raw_scores.argsort(descending=True).tolist():
         iid = all_ids[idx]
@@ -486,7 +487,7 @@ def tab_examples(model, fs, all_ids, all_embs):
     anchor_iids = _get_tag_anchors(fs, tag_names, exclude=set(fav_titles))
 
     with torch.no_grad():
-        user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
+        user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, anchor_in_liked=False)
 
     df = _score_games(user_emb, all_ids, all_embs, fs,
                       exclude_iids=set(liked_iids),

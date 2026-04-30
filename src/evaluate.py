@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from src.model import GameRecommender
-from src.train import build_model, get_config, print_model_summary
+from src.train import build_model, get_config, load_config_for_checkpoint, print_model_summary
 
 
 # ── Canary user definitions ───────────────────────────────────────────────────
@@ -111,10 +111,11 @@ USER_TYPE_TO_TAGS = {
     'Management Lover':   ['Management']
 }
 
-SIMULATED_FAV_LOG_HOURS    = 10.0   # weight for favorite games
-SIMULATED_ANCHOR_LOG_HOURS =  2.0   # weight for tag-based anchor games
-SIMULATED_DISLIKE_LOG_HOURS = 0.5   # weight for disliked games
-ANCHORS_PER_TAG            =  5
+SIMULATED_FAV_LOG_HOURS             = 10.0   # weight for favorite games
+SIMULATED_ANCHOR_LOG_HOURS          =  2.0   # weight for tag-based anchor games
+SIMULATED_DISLIKE_LOG_HOURS         = 0.5    # weight for disliked games
+ANCHORS_PER_TAG                     =  5
+POPULARITY_ALPHA_INFERENCE_MULTIPLE =  2.0   # apply stronger debias at inference time than we did at training time
 
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
@@ -157,12 +158,12 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
     year_all  = torch.cat(year_embs,   dim=0)
     price_all = torch.cat(price_embs,  dim=0)
 
-    # Re-apply item projection MLP
+    # Re-apply item projection MLP + L2 normalize (matches model.item_embedding())
     concat_all = torch.cat([genre_all, tag_all, game_all, dev_all, year_all, price_all], dim=1)
     combined = []
     with torch.no_grad():
         for s in range(0, n_items, batch_size):
-            combined.append(model.item_projection(concat_all[s:s + batch_size]))
+            combined.append(F.normalize(model.item_projection(concat_all[s:s + batch_size]), dim=-1))
     combined = torch.cat(combined, dim=0)
 
     game_embeddings = {}
@@ -234,72 +235,58 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
     dis_idxs    = titles_to_idxs(dis_titles)
     anchor_idxs = titles_to_idxs(anchor_titles)
 
-    # Triple Pool Construction as per user instruction:
-    # favorite games: liked input and also in full history
-    # anchor games: full history
-    # disliked games: disliked input
+    # Triple Pool Construction:
     liked_ids    = list(fav_idxs)
     disliked_ids = list(dis_idxs)
     full_ids     = list(fav_idxs) + list(anchor_idxs) + list(dis_idxs)
 
-    # ── Context Calculation (Rolling simulation) ──
-    # Mirroring _build_rollback_dataset accumulators on full_ids
-    n_genres = fs['n_genres']
-    n_tags   = fs['n_tags']
-    genre_matrix = fs['game_genre_matrix']
-    tag_matrix   = fs['game_tag_matrix']
-    
-    running_genre_count = np.zeros(n_genres, dtype=np.float32)
-    running_genre_sum   = np.zeros(n_genres, dtype=np.float32)
-    running_tag_sum     = np.zeros(n_tags, dtype=np.float32)
+    # Playtime weights for full pool: fav=10.0, anchor=2.0, disliked=0.5, normalized to sum=1
+    raw_pw = ([SIMULATED_FAV_LOG_HOURS]    * len(fav_idxs) +
+              [SIMULATED_ANCHOR_LOG_HOURS] * len(anchor_idxs) +
+              [SIMULATED_DISLIKE_LOG_HOURS] * len(dis_idxs))
+    total_pw = sum(raw_pw) or 1.0
+    full_playtime_weights = [w / total_pw for w in raw_pw]
 
-    # Simulate weights/logs for context calculation
-    # favorites = 10.0, anchors = 2.0, disliked = 0.5
-    for idx in fav_idxs:
-        for g_idx in np.where(genre_matrix[idx] > 0)[0]:
-            running_genre_count[g_idx] += 1
-            running_genre_sum[g_idx]   += SIMULATED_FAV_LOG_HOURS
-        running_tag_sum += tag_matrix[idx]
-        
-    for idx in anchor_idxs:
-        for g_idx in np.where(genre_matrix[idx] > 0)[0]:
-            running_genre_count[g_idx] += 1
-            running_genre_sum[g_idx]   += SIMULATED_ANCHOR_LOG_HOURS
-        running_tag_sum += tag_matrix[idx]
-
-    for idx in dis_idxs:
-        for g_idx in np.where(genre_matrix[idx] > 0)[0]:
-            running_genre_count[g_idx] += 1
-            running_genre_sum[g_idx]   += SIMULATED_DISLIKE_LOG_HOURS
-        running_tag_sum += tag_matrix[idx]
-
-    # Compute final genre_ctx and tag_ctx (no explicit override)
+    # Compute avg_log for the model to use in debiased affinity calculation
     total_items = len(fav_idxs) + len(anchor_idxs) + len(dis_idxs)
-    avg_log = (len(fav_idxs)*10.0 + len(anchor_idxs)*2.0 + len(dis_idxs)*0.5) / max(total_items, 1)
-    
-    total_assign = running_genre_count.sum()
-    genre_ctx = np.zeros(2 * n_genres, dtype=np.float32)
-    if total_assign > 0:
-        mask = running_genre_count > 0
-        genre_ctx[:n_genres][mask] = (running_genre_sum[mask] / running_genre_count[mask]) - avg_log
-        genre_ctx[n_genres:] = running_genre_count / total_assign
-
-    tag_ctx = running_tag_sum
+    avg_log = (len(fav_idxs)*SIMULATED_FAV_LOG_HOURS + 
+               len(anchor_idxs)*SIMULATED_ANCHOR_LOG_HOURS + 
+               len(dis_idxs)*SIMULATED_DISLIKE_LOG_HOURS) / max(total_items, 1)
 
     device = next(model.parameters()).device
-    X_genre_t = torch.from_numpy(np.array([genre_ctx], dtype=np.float32)).to(device)
-    X_tag_t   = torch.from_numpy(np.array([tag_ctx],   dtype=np.float32)).to(device)
+    X_avg_log_t = torch.tensor([[avg_log]], dtype=torch.float32, device=device)
     
     def to_padded(ids):
         if not ids: ids = [model.game_pad_idx]
         return torch.tensor([ids], dtype=torch.long, device=device)
 
+    # Playtime weight tensor: (1, len(full_ids)); pad to match full_ids length
+    if full_playtime_weights:
+        pw_t = torch.tensor([full_playtime_weights], dtype=torch.float32, device=device)
+    else:
+        pw_t = torch.zeros(1, 1, dtype=torch.float32, device=device)
+
     with torch.no_grad():
-        return model.user_embedding(X_genre_t, X_tag_t, to_padded(liked_ids), to_padded(disliked_ids), to_padded(full_ids))
+        return model.user_embedding(X_avg_log_t, to_padded(liked_ids), to_padded(disliked_ids),
+                                    to_padded(full_ids), pw_t)
 
 
-def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor, all_ids: list, top_n: int = 10) -> None:
+def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor, all_ids: list,
+                    popularity_alpha: float = 0.0, temperature: float = None, top_n: int = 10) -> None:
     model.eval()
+    device = next(model.parameters()).device
+
+    # Scale bias to dot-product space. Training scores are (u·v)/temp - bias;
+    # inference ranking is equivalent to u·v - temp*bias (multiply through by temp).
+    if temperature is None:
+        temperature = 0.5 / 512
+    if popularity_alpha > 0 and 'game_interaction_counts' in fs:
+        counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
+
+        pop_bias = temperature * (popularity_alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts)  # (n_items,)
+    else:
+        pop_bias = None
+
     with torch.no_grad():
         for user_type in USER_TYPE_TO_FAVORITE_GAMES:
             user_emb = _build_user_embedding(model, fs, user_type)
@@ -308,8 +295,10 @@ def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor
             tag_names   = USER_TYPE_TO_TAGS.get(user_type, [])
             anchor_titles = _get_anchor_titles(fs, tag_names, exclude=set(fav_titles) | set(dis_titles))
             exclude_set   = set(fav_titles) | set(anchor_titles)
-            
+
             raw_scores = (all_combined @ user_emb.T).squeeze(-1)
+            if pop_bias is not None:
+                raw_scores = raw_scores - pop_bias
             scores = {all_ids[i]: raw_scores[i].item() for i in range(len(all_ids))}
 
             recs = []
@@ -341,7 +330,8 @@ def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor
 
 # ── Embedding probes ──────────────────────────────────────────────────────────
 
-def probe_genre(model: GameRecommender, genre, game_embeddings: dict, fs: dict, top_n: int = 10) -> None:
+def probe_genre(model: GameRecommender, genre, all_norm_genre: torch.Tensor,
+                all_ids: list, fs: dict, top_n: int = 10) -> None:
     genres = [genre] if isinstance(genre, str) else genre
     ctx = [0.0] * fs['n_genres']
     for g in genres:
@@ -353,62 +343,52 @@ def probe_genre(model: GameRecommender, genre, game_embeddings: dict, fs: dict, 
 
     device = next(model.parameters()).device
     with torch.no_grad():
-        query_emb = model.item_genre_tower(torch.tensor([ctx], dtype=torch.float32, device=device)).view(-1)
-
-    sims = {
-        iid: F.cosine_similarity(
-            query_emb.unsqueeze(0),
-            game_embeddings[iid]['GAME_GENRE_EMBEDDING'].view(-1).unsqueeze(0)
-        ).item()
-        for iid in fs['item_ids']
-    }
+        query = model.item_genre_tower(torch.tensor([ctx], dtype=torch.float32, device=device))
+        query_norm = F.normalize(query, dim=1)
+        sims = (all_norm_genre @ query_norm.T).squeeze(-1)
 
     print(f"\nTop-{top_n} games for genre '{' + '.join(genres)}':")
     seen = set()
-    for iid, sim in sorted(sims.items(), key=lambda x: x[1], reverse=True):
+    for idx in sims.argsort(descending=True).tolist():
         if len(seen) >= top_n: break
-        title = fs['item_id_to_title'][iid]
+        title = fs['item_id_to_title'][all_ids[idx]]
         if title not in seen:
             seen.add(title)
-            print(f"  {sim:.4f}  {title}")
+            print(f"  {sims[idx].item():.4f}  {title}")
 
 
-def probe_tag(model: GameRecommender, tag_names: list, game_embeddings: dict, fs: dict, top_n: int = 10, k_anchors: int = 5) -> None:
+def probe_tag(tag_names: list, all_norm_tag: torch.Tensor, all_ids: list,
+              game_embeddings: dict, fs: dict, top_n: int = 10, k_anchors: int = 5) -> None:
     valid_tags = [t for t in tag_names if t in fs['tag_to_i']]
     if not valid_tags:
         print(f"No tags from {tag_names} found.")
         return
 
     tag_matrix = fs['game_tag_matrix']
-    raw_scores = {}
-    for i, iid in enumerate(fs['item_ids']):
-        raw_scores[iid] = sum(float(tag_matrix[i, fs['tag_to_i'][t]]) for t in valid_tags)
-
+    item_to_idx = fs['item_to_idx']
+    raw_scores = {iid: sum(float(tag_matrix[item_to_idx[iid], fs['tag_to_i'][t]]) for t in valid_tags)
+                  for iid in fs['item_ids']}
     anchors = sorted(raw_scores, key=raw_scores.get, reverse=True)[:k_anchors]
-    query_emb = torch.stack([game_embeddings[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchors]).mean(dim=0)
+
+    query = torch.stack([game_embeddings[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchors]).mean(dim=0)
+    query_norm = F.normalize(query.unsqueeze(0), dim=1)
+    sims = (all_norm_tag @ query_norm.T).squeeze(-1)
 
     print(f"\nTag anchors for {valid_tags}: {[fs['item_id_to_title'][iid] for iid in anchors]}")
-    sims = {
-        iid: F.cosine_similarity(
-            query_emb.unsqueeze(0),
-            game_embeddings[iid]['GAME_TAG_EMBEDDING'].view(-1).unsqueeze(0)
-        ).item()
-        for iid in fs['item_ids']
-    }
-
-    seen = set()
     print(f"Top-{top_n} games:")
     anchor_set = set(anchors)
-    for iid, sim in sorted(sims.items(), key=lambda x: x[1], reverse=True):
+    seen = set()
+    for idx in sims.argsort(descending=True).tolist():
         if len(seen) >= top_n: break
+        iid   = all_ids[idx]
         title = fs['item_id_to_title'][iid]
         if title not in seen:
             seen.add(title)
             marker = ' [seed]' if iid in anchor_set else ''
-            print(f"  {sim:.4f}  {title}{marker}")
+            print(f"  {sims[idx].item():.4f}  {title}{marker}")
 
 
-def probe_similar(game_embeddings: dict, fs: dict, all_ids: list, all_norm: torch.Tensor, titles: list, top_n: int = 5, all_norm_id: torch.Tensor = None) -> None:
+def probe_similar(game_embeddings: dict, fs: dict, all_ids: list, all_norm: torch.Tensor, titles: list, top_n: int = 5, all_norm_id: torch.Tensor = None, all_norm_tag: torch.Tensor = None) -> None:
     title_to_iid = {v: k for k, v in fs['item_id_to_title'].items()}
     TRUNC = 32
 
@@ -449,6 +429,9 @@ def probe_similar(game_embeddings: dict, fs: dict, all_ids: list, all_norm: torc
     if all_norm_id is not None:
         id_rows = [(t, get_top_n(all_norm_id, 'GAME_ID_EMBEDDING', t)) for t in titles]
         print_table('game ID embedding only', id_rows)
+    if all_norm_tag is not None:
+        tag_rows = [(t, get_top_n(all_norm_tag, 'GAME_TAG_EMBEDDING', t)) for t in titles]
+        print_table('tag embedding (32-dim)', tag_rows)
 
 
 # ── Setup helpers ─────────────────────────────────────────────────────────────
@@ -468,8 +451,8 @@ def _load_model_and_embeddings(checkpoint_path: str, fs: dict) -> tuple:
     print(f"Loading checkpoint: {checkpoint_path}")
     device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    
-    config = get_config()
+
+    config = load_config_for_checkpoint(checkpoint_path)
     model = build_model(config, fs).to(device)
     model.load_state_dict(state_dict)
     model.eval()
@@ -478,12 +461,16 @@ def _load_model_and_embeddings(checkpoint_path: str, fs: dict) -> tuple:
     print("\nBuilding game embeddings ...")
     game_embeddings, all_ids, all_combined = build_game_embeddings(model, fs)
     
-    print("Precomputing normalised embedding matrix ...")
+    print("Precomputing normalised embedding matrices ...")
     all_norm = F.normalize(all_combined, dim=1)
-    all_id_embs = torch.cat([game_embeddings[iid]['GAME_ID_EMBEDDING'] for iid in all_ids], dim=0)
-    all_norm_id = F.normalize(all_id_embs, dim=1)
-    
-    return model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id
+    all_id_embs    = torch.cat([game_embeddings[iid]['GAME_ID_EMBEDDING']    for iid in all_ids], dim=0)
+    all_tag_embs   = torch.cat([game_embeddings[iid]['GAME_TAG_EMBEDDING']   for iid in all_ids], dim=0)
+    all_genre_embs = torch.cat([game_embeddings[iid]['GAME_GENRE_EMBEDDING'] for iid in all_ids], dim=0)
+    all_norm_id    = F.normalize(all_id_embs,    dim=1)
+    all_norm_tag   = F.normalize(all_tag_embs,   dim=1)
+    all_norm_genre = F.normalize(all_genre_embs, dim=1)
+
+    return model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id, all_norm_tag, all_norm_genre
 
 
 PROBE_SIMILAR_TITLES = [
@@ -515,9 +502,13 @@ def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str
         print("No checkpoint found.")
         return
     fs = load_features(data_dir, version)
-    model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id = _load_model_and_embeddings(cp, fs)
+    model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id, all_norm_tag, all_norm_genre = _load_model_and_embeddings(cp, fs)
+    cp_config = load_config_for_checkpoint(cp)
+    alpha = cp_config.get('popularity_alpha', 0.0)
+    temperature = 0.5 / cp_config.get('minibatch_size', 512)
     print("\n── Canary user evaluation ──")
-    run_canary_eval(model, fs, all_combined, all_ids)
+    print(f"  popularity_alpha={alpha} ({'applied' if alpha > 0 else 'disabled'})  temperature={temperature:.6f}")
+    run_canary_eval(model, fs, all_combined, all_ids, popularity_alpha=alpha, temperature=temperature)
 
 def run_probes(data_dir: str = 'data', checkpoint_path: str = None, version: str = 'v1') -> None:
     from src.dataset import load_features
@@ -526,23 +517,23 @@ def run_probes(data_dir: str = 'data', checkpoint_path: str = None, version: str
         print("No checkpoint found.")
         return
     fs = load_features(data_dir, version)
-    model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id = _load_model_and_embeddings(cp, fs)
-    
+    model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id, all_norm_tag, all_norm_genre = _load_model_and_embeddings(cp, fs)
+
     print("\n── Genre probes ──")
-    probe_genre(model, 'Action',    game_embeddings, fs)
-    probe_genre(model, 'RPG',       game_embeddings, fs)
-    probe_genre(model, 'Strategy',  game_embeddings, fs)
-    probe_genre(model, 'Simulation', game_embeddings, fs)
-    probe_genre(model, ['Action', 'RPG'], game_embeddings, fs)
+    probe_genre(model, 'Action',         all_norm_genre, all_ids, fs)
+    probe_genre(model, 'RPG',            all_norm_genre, all_ids, fs)
+    probe_genre(model, 'Strategy',       all_norm_genre, all_ids, fs)
+    probe_genre(model, 'Simulation',     all_norm_genre, all_ids, fs)
+    probe_genre(model, ['Action', 'RPG'], all_norm_genre, all_ids, fs)
 
     print("\n── Tag probes ──")
-    probe_tag(model, ['FPS', 'Shooter'],                   game_embeddings, fs)
-    probe_tag(model, ['RPG', 'Open World'],                game_embeddings, fs)
-    probe_tag(model, ['Strategy', 'Turn-Based'],           game_embeddings, fs)
-    probe_tag(model, ['Horror', 'Survival Horror'],        game_embeddings, fs)
-    probe_tag(model, ['Co-op', 'Multiplayer'],             game_embeddings, fs)
-    probe_tag(model, ['Rogue-like', 'Rogue-lite'],         game_embeddings, fs)
-    probe_tag(model, ['Puzzle'],                           game_embeddings, fs)
+    probe_tag(['FPS', 'Shooter'],          all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['RPG', 'Open World'],       all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['Strategy', 'Turn-Based'],  all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['Horror', 'Survival Horror'], all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['Co-op', 'Multiplayer'],    all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['Rogue-like', 'Rogue-lite'], all_norm_tag, all_ids, game_embeddings, fs)
+    probe_tag(['Puzzle'],                  all_norm_tag, all_ids, game_embeddings, fs)
 
     print("\n── Similarity probes ──")
-    probe_similar(game_embeddings, fs, all_ids, all_norm, PROBE_SIMILAR_TITLES, top_n=5, all_norm_id=all_norm_id)
+    probe_similar(game_embeddings, fs, all_ids, all_norm, PROBE_SIMILAR_TITLES, top_n=5, all_norm_id=all_norm_id, all_norm_tag=all_norm_tag)

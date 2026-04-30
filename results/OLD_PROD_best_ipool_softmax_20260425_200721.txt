@@ -1,0 +1,153 @@
+── Canary user evaluation ──
+
+══════════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Genre: RPG  |  Tags: Action RPG
+══════════════════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Numen: Contest of Heroes
+  + Victor Vran ARPG
+  + Grim Dawn
+  + Hazen: The Dark Whispers
+  + BorderZone
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                           Recommendations
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+The Witcher 2: Assassins of Kings Enhanced Edition       DARK SOULS™ III
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Divinity: Original Sin - Enhanced Edition
+DARK SOULS™: Prepare To Die™ Edition                     Dragon's Dogma: Dark Arisen
+Divinity: Original Sin (Classic)                         FINAL FANTASY X/X-2 HD Remaster
+Fallout: New Vegas                                       Fallout 4
+Mass Effect 2                                            Disgaea PC / 魔界戦記ディスガイア PC
+                                                         Phantom Brave PC / ファントム・ブレイブ PC
+                                                         Exanima
+                                                         Controller Companion
+                                                         Warhammer 40,000: Deathwatch - Enhanced Edition
+
+═════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Genre: —  |  Tags: JRPG
+═════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + I am Setsuna
+  + The Legend of Heroes: Trails in the Sky SC
+  + Grandia® II Anniversary Edition
+  + Agarest: Generations of War
+  + FINAL FANTASY III
+─────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                       Recommendations
+─────────────────────────────────────────────────────────────────────────────────────
+Mugen Souls                                          A Wild Catgirl Appears!
+OH! RPG!                                             Fibbage XL
+Ys VI: The Ark of Napishtim                          Megadimension Neptunia VII
+Wild Season                                          Lost Lands: Mahjong
+Disgaea PC / 魔界戦記ディスガイア PC                           SpellKnights
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Lost girl`s [diary]
+FINAL FANTASY® XIII                                  Stories: The Path of Destinies
+                                                     UNDER NIGHT IN-BIRTH Exe:Late
+                                                     Ragnarok Clicker
+                                                     Epic Battle Fantasy 3
+
+═════════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Genre: —  |  Tags: FPS
+═════════════════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + STAR WARS™ - Dark Forces
+  + Singularity™
+  + Quake Live™
+  + Far Cry 3 - Blood Dragon
+  + Painkiller: Resurrection
+─────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                   Recommendations
+─────────────────────────────────────────────────────────────────────────────────────────────────
+QUAKE II                                         Tales of Symphonia
+Unreal Tournament 2004: Editor's Choice Edition  Black Mesa
+Quake IV                                         Angry Video Game Nerd: The Movie
+Final DOOM                                       Ryzom
+                                                 Seasons after Fall
+                                                 Bloodwood Reload
+                                                 MISSING: An Interactive Thriller - Episode One
+                                                 Soccer Manager 2015
+                                                 TDP5 Arena 3D
+                                                 From Earth
+
+══════════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Genre: Strategy  |  Tags: —
+══════════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+──────────────────────────────────────────────────────────────────────────────────
+Sid Meier's Civilization® V                Football Tactics
+Civilization IV®: Warlords                 Original War
+Sid Meier's Civilization IV: Colonization  Cricket Captain 2014
+Total War™: ROME II - Emperor Edition      Space Hulk
+                                           King’s Bounty: Legions
+                                           Mini Metro
+                                           Horizon
+                                           Sid Meier's Starships
+                                           Unity of Command: Stalingrad Campaign
+                                           Galactic Civilizations III
+
+════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Genre: Indie  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Hotline Miami 2: Wrong Number Digital Comic
+  + Typefighters (Steam Edition)
+  + The Art of Playing
+  + Over The Void
+  + Super Game Jam
+  + Rogue's Tale
+  + Rogue Shooter: The FPS Roguelike
+  + Dungeonmans
+  + 99 Levels To Hell
+  + ADOM (Ancient Domains Of Mystery)
+────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                 Recommendations
+────────────────────────────────────────────────────────────────────────────────────
+Terraria                       Super Space Pug
+FTL: Faster Than Light         The Magical Silence
+The Binding of Isaac: Rebirth  SquareCells
+Rogue Legacy                   Super Mega Neo Pug
+Spelunky                       Survival Zombies The Inverted Evolution
+                               Freebie
+                               [the Sequence]
+                               Space Pilgrim Episode II: Epsilon Indi
+                               ROD: Revolt Of Defense
+                               Odd||Even
+
+════════════════════════════════════════════════════════════════
+Racing Lover  |  Genre: Racing  |  Tags: Racing
+════════════════════════════════════════════════════════════════
+Tag anchors (weight=2.0):
+  + Sprint Cars Road to Knoxville
+  + Xpand Rally Xtreme
+  + Ford Street Racing
+  + Truck Racer
+  + Test Drive: Ferrari Racing Legends
+────────────────────────────────────────────────────────────────
+Favorite Games               Recommendations
+────────────────────────────────────────────────────────────────
+F1 2012™                     rFactor 2
+Need For Speed: Hot Pursuit  Tennis Elbow 2013
+Test Drive Unlimited 2       Club Manager 2015
+                             Copa Petrobras de Marcas
+                             RC Simulation 2.0
+                             Airport Madness 4
+                             Trainz: A New Era
+                             Esenthel Engine
+                             Airport Madness: World Edition
+                             Flying Tigers: Shadows Over China
+
+══════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Genre: —  |  Tags: —
+══════════════════════════════════════════════════════════════════════════════
+Favorite Games                             Recommendations
+──────────────────────────────────────────────────────────────────────────────
+Street Fighter X Tekken                    GUILTY GEAR XX ACCENT CORE PLUS R
+Ultra Street Fighter® IV                   Yatagarasu Attack on Cataclysm
+Injustice: Gods Among Us Ultimate Edition  Toukiden: Kiwami
+Divekick                                   Uncraft World
+Street Fighter® IV                         METAL SLUG 2
+DEAD OR ALIVE 5 Last Round: Core Fighters  Legend of Kay Anniversary
+THE KING OF FIGHTERS XIII STEAM EDITION    Coffin Dodgers
+                                           Karate Master 2 Knock Down Blow
+                                           Mighty No. 9
+                                           Tales of Zestiria

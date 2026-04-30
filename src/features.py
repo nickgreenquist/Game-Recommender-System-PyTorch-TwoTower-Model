@@ -281,6 +281,13 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
     base_games = pd.read_parquet(os.path.join(data_dir, 'base_games.parquet'))
     item_id_to_title = dict(zip(base_games['item_id'], base_games['title']))
 
+    # Per-game interaction counts across all users (for popularity debiasing)
+    game_interaction_counts = np.zeros(n_items, dtype=np.float32)
+    for uid, history in user_to_play_history.items():
+        for idx in history:
+            if 0 <= idx < n_items:
+                game_interaction_counts[idx] += 1
+
     fs = {
         # Corpus
         'item_ids':           item_ids,
@@ -307,7 +314,8 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         'game_developer_idx': game_developer_idx,
         'game_year_idx':      game_year_idx,
         'game_price_bucket':  game_price_bucket,
-        'game_median_hours':  game_median_hours,
+        'game_median_hours':         game_median_hours,
+        'game_interaction_counts':   game_interaction_counts,
 
         # User split
         'train_users':        train_users,

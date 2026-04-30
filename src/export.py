@@ -59,7 +59,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
 
     # ── model.pth (buffers excluded) ──────────────────────────────────────────
     model_state = {k: v for k, v in model.state_dict().items()
-                   if k not in ('game_tag_matrix', 'game_dev_idx')}
+                   if k not in ('game_tag_matrix', 'game_genre_matrix', 'game_dev_idx')}
     model_path = os.path.join(SERVING_DIR, 'model.pth')
     torch.save(model_state, model_path)
     print(f"Saved {model_path}  ({os.path.getsize(model_path) / 1e6:.1f} MB)")
@@ -122,11 +122,16 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
     # ── Registered buffers for model reconstruction ───────────────────────────
     n_items      = fs['n_items']
     n_tags       = fs['n_tags']
+    n_genres     = fs['n_genres']
     n_developers = fs['n_developers']
 
     tag_matrix      = fs['game_tag_matrix']          # (n_items, n_tags) numpy float32
-    pad_row         = np.zeros((1, n_tags), dtype=np.float32)
-    game_tag_matrix = torch.from_numpy(np.vstack([tag_matrix, pad_row]))
+    pad_tag         = np.zeros((1, n_tags), dtype=np.float32)
+    game_tag_matrix = torch.from_numpy(np.vstack([tag_matrix, pad_tag]))
+
+    genre_matrix      = fs['game_genre_matrix']        # (n_items, n_genres) numpy float32
+    pad_genre         = np.zeros((1, n_genres), dtype=np.float32)
+    game_genre_matrix = torch.from_numpy(np.vstack([genre_matrix, pad_genre]))
 
     dev_idx_arr  = fs['game_developer_idx']          # (n_items,) int64
     game_dev_idx = torch.from_numpy(np.append(dev_idx_arr, n_developers).astype(np.int64))
@@ -142,7 +147,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         'title_to_item_id': {v: k for k, v in fs['item_id_to_title'].items()},
         'n_items':          n_items,
         # Vocab sizes
-        'n_genres':        fs['n_genres'],
+        'n_genres':        n_genres,
         'n_tags':          n_tags,
         'n_developers':    n_developers,
         'n_years':         fs['n_years'],
@@ -153,7 +158,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         'genres_ordered':  genres_ordered,
         'tags_ordered':    tags_ordered,
         # Game feature matrices
-        'game_genre_matrix':  fs['game_genre_matrix'],   # numpy (n_items, n_genres)
+        'game_genre_matrix':  game_genre_matrix,         # tensor (n_items+1, n_genres) — buffer
         'game_tag_matrix':    game_tag_matrix,           # tensor (n_items+1, n_tags) — buffer
         'game_dev_idx':       game_dev_idx,              # tensor (n_items+1,) — buffer
         'game_year_idx':      fs['game_year_idx'],       # numpy (n_items,) int64 — ipool hist buf
@@ -164,6 +169,8 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         'item_id_to_genres':     item_id_to_genres,
         'item_id_to_top_tags':   item_id_to_top_tags,
         'item_id_to_price_label': item_id_to_price_label,
+        # Popularity debiasing (matches training + canary inference formula)
+        'game_interaction_counts': fs['game_interaction_counts'],  # numpy (n_items,) float32
         # Model config for reconstruction
         'model_config': config,
     }

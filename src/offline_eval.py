@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 from src.dataset import (
     _build_rollback_dataset,
-    pad_history_batch,
     MAX_ROLLBACK_EXAMPLES_PER_USER,
 )
 from src.evaluate import build_game_embeddings
@@ -30,6 +29,18 @@ def run_offline_eval(model: GameRecommender, fs: dict,
     print("Building game embeddings ...")
     _, all_ids, all_embs = build_game_embeddings(model, fs)
 
+    # ── Popularity bias (match training objective) ────────────────────────────
+    from src.train import load_config_for_checkpoint
+    cp_config   = load_config_for_checkpoint(checkpoint_path)
+    alpha       = cp_config.get('popularity_alpha', 0.0)
+    temperature = 0.5 / cp_config.get('minibatch_size', 512)
+    if alpha > 0 and 'game_interaction_counts' in fs:
+        counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
+        # Scale to dot-product space: training used (u·v)/temp - bias → inference: u·v - temp*bias
+        pop_bias = (temperature * alpha * torch.log1p(counts)).unsqueeze(0)  # (1, n_items)
+    else:
+        pop_bias = None
+
     # ── Sample val users ──────────────────────────────────────────────────────
     val_users = fs['val_users']
     rng = random.Random(seed)
@@ -38,7 +49,8 @@ def run_offline_eval(model: GameRecommender, fs: dict,
 
     # ── Generate rollback examples ────────────────────────────────────────────
     print("Building rollback examples for val users ...")
-    (X_genre, X_tag, X_hist_liked, X_hist_disliked, X_hist_full, target_item_idx,
+    (X_avg_log, X_hist_liked, X_hist_disliked, X_hist_full,
+     X_hist_playtime_weights, target_item_idx,
      *_) = _build_rollback_dataset(
         eval_users, fs,
         max_per_user=MAX_ROLLBACK_EXAMPLES_PER_USER,
@@ -46,7 +58,6 @@ def run_offline_eval(model: GameRecommender, fs: dict,
     )
 
     n_examples = target_item_idx.shape[0]
-    pad_idx    = fs['n_items']
 
     # ── Accumulators ──────────────────────────────────────────────────────────
     recall   = {k: 0.0 for k in ks}
@@ -62,17 +73,18 @@ def run_offline_eval(model: GameRecommender, fs: dict,
             e = min(s + batch_size, n_examples)
             B = e - s
 
-            h_liked    = pad_history_batch(X_hist_liked[s:e], pad_idx).to(device)
-            h_disliked = pad_history_batch(X_hist_disliked[s:e], pad_idx).to(device)
-            h_full     = pad_history_batch(X_hist_full[s:e], pad_idx).to(device)
-            
-            x_genre = X_genre[s:e].to(device)
-            x_tag   = X_tag[s:e].to(device)
+            h_liked    = X_hist_liked[s:e].to(device)
+            h_disliked = X_hist_disliked[s:e].to(device)
+            h_full     = X_hist_full[s:e].to(device)
+            h_pw       = X_hist_playtime_weights[s:e].to(device)
+            x_avg_log  = X_avg_log[s:e].to(device)
 
-            user_emb = model.user_embedding(x_genre, x_tag, h_liked, h_disliked, h_full)
+            user_emb = model.user_embedding(x_avg_log, h_liked, h_disliked, h_full, h_pw)
 
             # scores: (B, n_items)
             scores = (user_emb @ all_embs.T)
+            if pop_bias is not None:
+                scores = scores - pop_bias
 
             target_idxs = target_item_idx[s:e]  # (B,)
 
