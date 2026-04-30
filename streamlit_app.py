@@ -527,7 +527,7 @@ def tab_about():
 - Find an existing user who seems similar and use their embedding as a proxy
 """)
         st.markdown("This model takes a different approach. **There is no user ID embedding.**")
-        st.markdown("Instead, every user is represented as a function of their taste signals — play history and genre affinity.")
+        st.markdown("Instead, every user is represented as a function of their taste signals — play history, genre affinity, and tag affinity.")
         st.markdown("The model learns to embed *features of the user*, not the user themselves.")
         st.markdown(
             "This means the model can generate recommendations for **any user** as long as you can provide "
@@ -552,6 +552,12 @@ def tab_about():
 | user_tag_tower | Sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like" |
 """, unsafe_allow_html=True)
 
+        st.markdown(
+            "**In-model context:** Genre and tag affinity are computed inside the model's forward pass from "
+            "`game_genre_matrix` and `game_tag_matrix` registered buffers — not pre-computed in the dataset. "
+            "This means recommendations can be generated for any play history at inference time with no preprocessing."
+        )
+
         st.header("Item Tower")
         st.markdown(
             "Six sub-embeddings are concatenated (96-dim), then passed through a projection MLP → **128-dim**."
@@ -559,7 +565,7 @@ def tab_about():
         st.markdown("""
 | Component | Input | What it learns |
 |---|---|---|
-| item_embedding_tower | Game ID (shared lookup with all three user history pools) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
+| item_embedding_tower | Game ID (shared lookup with all four user history pools) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
 | item_genre_tower | Uniform-weighted genre vector | Broad genre positioning |
 | item_tag_tower | TF-IDF Steam tag scores (164 tags) | Community descriptors — granular signals like "Open World", "Rogue-like", "Dark Souls-like" |
 | developer_tower | Primary developer index | Developer identity — clusters games by studio |
@@ -579,7 +585,7 @@ This lets the model learn cross-feature interactions, such as:
 - Tag cluster × release era (roguelikes from 2012 vs. 2020 are different products)
 
 Both towers project to the same 128-dim output space — only this final dim needs to match.
-The internal concat sizes (160 user, 96 item) are independent of each other.
+The internal concat sizes (192 user, 96 item) are independent of each other.
 """)
 
         st.header("Shared Embeddings")
@@ -597,7 +603,7 @@ learns to align user taste with item identity through training.
         st.markdown("""
 - **Dataset:** UCSD Steam — 88k Australian users, ~5,437 corpus games (≥10 users with ≥6 min playtime; ultra-popular Valve titles excluded)
 - **Corpus filtering:** Games with fewer than 10 qualifying users excluded. Users with fewer than 5 or more than 10,000 total hours excluded. Users with fewer than 2 corpus games excluded.
-- **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools and build genre context. Never a prediction target.
+- **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools. Never a prediction target.
 - **Loss:** Full softmax cross-entropy over the entire ~5,437-game corpus every step
 - **Optimizer:** Adam, lr=0.001, eps=1e-6, CosineAnnealingLR (eta_min=1e-4)
 - **Popularity bias:** alpha=0.4 × log1p(count) at training; 2× multiplier applied at inference
