@@ -277,6 +277,34 @@ Canary users are synthetic — no real play timestamps (timestamp tower omitted 
 
 `python main.py eval [checkpoint_path]` — Recall@K, NDCG@K, Hit Rate@K, MRR at K = 1, 5, 10, 20, 50.
 
+### Current results
+
+**V3 PROD** (5,437-game corpus — ultra-popular Valve titles removed):
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0278 | 0.0278 |
+| 5 | 0.0882 | 0.0581 |
+| 10 | 0.1428 | 0.0756 |
+| 20 | 0.2287 | 0.0971 |
+| 50 | 0.3944 | 0.1299 |
+
+MRR: 0.0706 (random: 0.0017)
+
+**V2 PROD** (5,442-game corpus — Valve titles included):
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0389 | 0.0389 |
+| 5 | 0.1138 | 0.0767 |
+| 10 | 0.1743 | 0.0962 |
+| 20 | 0.2602 | 0.1177 |
+| 50 | 0.4256 | 0.1504 |
+
+MRR: 0.0875 (random: 0.0017)
+
+**Why V3 metrics are lower and not directly comparable:** Ultra-popular Valve titles (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history and were trivially easy prediction targets — any model ranks them top-5 for most users, inflating V2 Recall@K. Removing them makes the eval strictly harder: every target requires genuine taste modeling. V3 canary quality is substantially better — cross-genre Valve pollution eliminated, per-genre coherence improved across all tested user types.
+
 **Protocol:** User-level train/val split. 90% of users are train-only; the remaining 10% are held out entirely and never seen during training.
 
 - **Train users**: all interactions used for rollback training examples — no within-user cut needed, no leakage possible.

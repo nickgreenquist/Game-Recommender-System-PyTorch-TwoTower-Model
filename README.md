@@ -13,9 +13,9 @@ Trained with full softmax cross-entropy over the entire game corpus, following t
 
 ## Key design choices
 
-- **No user ID embedding** — users are represented entirely by taste signals: three behavior-partitioned play history pools, rolling genre affinity, and rolling tag affinity. Any user can get recommendations from just a few games they've played, with no retraining required.
+- **No user ID embedding** — users are represented entirely by taste signals: four behavior-partitioned play history pools, rolling genre affinity, and rolling tag affinity. Any user can get recommendations from just a few games they've played, with no retraining required.
 - **Playtime as the rating signal** — Steam has no star ratings. `log(1 + hours)` compresses the extreme tail while preserving ordering. Used to classify history into Liked/Disliked pools and build genre context; never a prediction target.
-- **Triple history pools** — play history is partitioned into Liked (high playtime or explicit recommend), Disliked (bounced off or explicit thumbs-down), and Full (all history). Each pool is a shallow sum of raw 32-dim game ID embeddings + LayerNorm. This gives the model separate signals for positive taste, negative taste, and the broad collaborative fingerprint.
+- **Four history pools** — play history is partitioned into Liked (high playtime or explicit recommend), Disliked (bounced off or explicit thumbs-down), Full (all history, equal-weight), and Playtime-weighted Full (same games, weighted by normalized log-playtime). Each pool is a shallow sum of raw 32-dim game ID embeddings + LayerNorm. This gives the model separate signals for positive taste, negative taste, collaborative fingerprint, and engagement intensity.
 - **Full softmax over entire corpus** — cross-entropy over all ~5,400 games every training step, rather than in-batch negatives. Denser gradient signal; all items receive updates every step.
 - **User tag tower** — rolling sum of TF-IDF Steam tag vectors from play history → 32-dim. Captures granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like".
 - **Developer embedding tower** — analogous to the author tower in the book model. Clusters games by studio and stylistically similar developers.
@@ -27,13 +27,14 @@ Trained with full softmax cross-entropy over the entire game corpus, following t
 
 ```
 User Tower:
-  liked_pool:    sum(32-dim item ID emb[liked games])   → LayerNorm → 32-dim
-  disliked_pool: sum(32-dim item ID emb[disliked games])→ LayerNorm → 32-dim
-  full_pool:     sum(32-dim item ID emb[all history])   → LayerNorm → 32-dim
-  user_genre_tower([debiased_avg_log_playtime | genre_frac]) →   32-dim
-  user_tag_tower(rolling sum of TF-IDF tag vectors)         →   32-dim
-  concat → 160-dim
-  user_projection(Linear 256 → ReLU → Linear 128)           → 128-dim
+  liked_pool:     sum(32-dim item ID emb[liked games])              → LayerNorm → 32-dim
+  disliked_pool:  sum(32-dim item ID emb[disliked games])           → LayerNorm → 32-dim
+  full_pool:      sum(32-dim item ID emb[all history])              → LayerNorm → 32-dim
+  playtime_pool:  sum(32-dim item ID emb[all history] × log_w)      → LayerNorm → 32-dim
+  user_genre_tower([debiased_avg_log_playtime | genre_frac])        →            32-dim
+  user_tag_tower(sum of TF-IDF tag vectors from history)            →            32-dim
+  concat → 192-dim
+  user_projection(Linear 256 → ReLU → Linear 128)                  →           128-dim
 
 Item Tower:
   item_embedding_tower(game_id)           → 32-dim  ← shared lookup with user history pools
@@ -48,37 +49,54 @@ Item Tower:
 Prediction: dot_product(user_projection_out, item_projection_out)
 ```
 
-**Shared embedding:** `item_embedding_lookup` (32-dim) is shared between all three user history pools and the item tower. The user pools sum it directly (shallow pooling); the item tower additionally passes it through a small linear layer before concatenating with other item features.
+**Shared embedding:** `item_embedding_lookup` (32-dim) is shared between all four user history pools and the item tower. The user pools sum it directly (shallow pooling); the item tower additionally passes it through a small linear layer before concatenating with other item features.
 
 ## Training
 
 | Hyperparameter | Value |
 |---|---|
-| Loss | Full softmax cross-entropy (entire ~5,400-game corpus every step) |
-| Optimizer | Adam, lr=0.001, weight_decay=1e-5 |
+| Loss | Full softmax cross-entropy (entire ~5,437-game corpus every step) |
+| Optimizer | Adam, lr=0.001, eps=1e-6 |
 | Scheduler | CosineAnnealingLR, T_max=50,000, eta_min=1e-4 |
 | Gradient clipping | max_norm=1.0 |
 | Batch size | 512 |
-| Temperature | 0.05 |
+| Temperature | 0.000977 (= 0.5 / 512) |
+| Popularity bias | alpha=0.4 × log1p(count); 2× multiplier at inference |
 | Training steps | 50,000 |
-| Training examples | ~4.3M (N_SHUFFLES=3 rollback augmentation, 57k train users) |
+| Training examples | ~4.3M (N_SHUFFLES=3 rollback augmentation, 55k train users) |
 | Val eval | Fixed 8,192-example set, sampled once per run |
 
 **Rollback construction:** For each user, rollback positions are drawn across their shuffled play history — given the first N games, predict game N+1. N_SHUFFLES=3 independent shuffles per user produce genuinely different (context, target) pairs. Val users (10% of all users) are held out entirely and never used in training.
 
 ## Offline Evaluation
 
-Evaluated on 2,000 held-out val users (never seen during training). Corpus: 5,442 games. Shuffled history protocol — no release-date ordering.
+Evaluated on 2,000 held-out val users (never seen during training). Shuffled history protocol — no release-date ordering. Each example has one target; Recall@K = Hit Rate@K for single-target eval.
 
-| K | Recall@K | NDCG@K | vs. Random |
-|---|---|---|---|
-| 1 | 0.0417 | 0.0417 | 231× |
-| 5 | 0.1202 | 0.0817 | 134× |
-| 10 | 0.1794 | 0.1007 | 99× |
-| 20 | 0.2668 | 0.1227 | 72× |
-| 50 | 0.4309 | 0.1551 | 47× |
+### V3 PROD — corpus: 5,437 games (ultra-popular Valve titles removed)
 
-MRR: **0.0918** (random: 0.0017, +54×)
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0278 | 0.0278 |
+| 5 | 0.0882 | 0.0581 |
+| 10 | 0.1428 | 0.0756 |
+| 20 | 0.2287 | 0.0971 |
+| 50 | 0.3944 | 0.1299 |
+
+MRR: **0.0706** (random: 0.0017, +41×)
+
+### V2 PROD — corpus: 5,442 games (Valve titles included)
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0389 | 0.0389 |
+| 5 | 0.1138 | 0.0767 |
+| 10 | 0.1743 | 0.0962 |
+| 20 | 0.2602 | 0.1177 |
+| 50 | 0.4256 | 0.1504 |
+
+MRR: **0.0875** (random: 0.0017, +51×)
+
+**Why V3 metrics are lower:** These numbers are not directly comparable. Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2, etc.) appeared in the histories of nearly every val user and were trivially easy prediction targets — any model would rank them top-5 for most users, inflating V2's Recall@K. Removing them from the corpus makes the eval strictly harder: every remaining target requires genuine taste modeling. V3 canary results are substantially better — cross-genre Valve recommendations are gone and per-genre coherence improved across all nine user types tested.
 
 ## Usage
 

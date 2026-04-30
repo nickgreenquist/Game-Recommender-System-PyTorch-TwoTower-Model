@@ -8,15 +8,11 @@ Requires: serving/model.pth
 
 Generate serving/ with: python main.py export
 """
-import importlib
-
 import numpy as np
 import streamlit as st
 import torch
 import torch.nn.functional as F
 
-import src.evaluate
-importlib.reload(src.evaluate)
 from src.evaluate import (
     USER_TYPE_TO_FAVORITE_GAMES,
     USER_TYPE_TO_TAGS,
@@ -511,10 +507,10 @@ def tab_about():
         st.markdown(
             "A PyTorch two-tower neural network trained on the "
             "[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) "
-            "(~6,200 games, ~1.9M training examples)."
+            "(~5,437 games, ~4.3M training examples)."
         )
         st.markdown(
-            "Trained with in-batch negatives softmax loss, following the YouTube DNN retrieval "
+            "Trained with full softmax cross-entropy over the entire game corpus, following the YouTube DNN retrieval "
             "approach (Covington et al., 2016)."
         )
         st.markdown(
@@ -543,16 +539,17 @@ def tab_about():
     with col:
         st.header("User Tower")
         st.markdown(
-            "Five sub-embeddings are concatenated (160-dim), then passed through a projection MLP → **128-dim**."
+            "Six sub-embeddings are concatenated (192-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
 |---|---|---|
 | liked_pool | Sum of 32-dim item ID embeddings for games you loved (recommend=True, high playtime) | Positive taste signal — what you actively seek out |
 | disliked_pool | Sum of 32-dim item ID embeddings for games you bounced off (recommend=False, very low playtime) | Negative taste signal — what to avoid |
-| full_pool | Sum of 32-dim item ID embeddings for all history | Broad collaborative fingerprint of your overall library |
-| user_genre_tower | Rolling debiased avg log-playtime per genre + genre play fraction | Genre affinity — how strongly you lean toward each broad category |
-| user_tag_tower | Rolling sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like" |
+| full_pool | Sum of 32-dim item ID embeddings for all history (equal-weight) | Broad collaborative fingerprint of your overall library |
+| playtime_pool | Sum of 32-dim item ID embeddings weighted by normalized log-playtime | Engagement intensity — games you sank hundreds of hours into dominate |
+| user_genre_tower | Debiased avg log-playtime per genre + genre play fraction | Genre affinity — how strongly you lean toward each broad category |
+| user_tag_tower | Sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like" |
 """, unsafe_allow_html=True)
 
         st.header("Item Tower")
@@ -587,7 +584,7 @@ The internal concat sizes (160 user, 96 item) are independent of each other.
 
         st.header("Shared Embeddings")
         st.markdown("""
-**item_embedding_lookup** (32-dim) — shared between all three user history pools and the item tower.
+**item_embedding_lookup** (32-dim) — shared between all four user history pools and the item tower.
 
 The user pools sum raw 32-dim ID embeddings directly (shallow pooling). The item tower additionally
 passes the same embedding through a small linear layer before concatenating with other item features.
@@ -598,44 +595,66 @@ learns to align user taste with item identity through training.
 
         st.header("Training")
         st.markdown("""
-- **Dataset:** UCSD Steam — 88k Australian users, ~5,400 corpus games (≥10 users with ≥6 min playtime)
+- **Dataset:** UCSD Steam — 88k Australian users, ~5,437 corpus games (≥10 users with ≥6 min playtime; ultra-popular Valve titles excluded)
 - **Corpus filtering:** Games with fewer than 10 qualifying users excluded. Users with fewer than 5 or more than 10,000 total hours excluded. Users with fewer than 2 corpus games excluded.
 - **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools and build genre context. Never a prediction target.
-- **Loss:** Full softmax cross-entropy over the entire ~5,400-game corpus every step
-- **Optimizer:** Adam, lr=0.001, weight_decay=1e-5, CosineAnnealingLR (eta_min=1e-4)
-- **Gradient clipping:** max_norm=1.0 (required with temperature=0.05 and full softmax)
-- **Batch size:** 512
+- **Loss:** Full softmax cross-entropy over the entire ~5,437-game corpus every step
+- **Optimizer:** Adam, lr=0.001, eps=1e-6, CosineAnnealingLR (eta_min=1e-4)
+- **Popularity bias:** alpha=0.4 × log1p(count) at training; 2× multiplier applied at inference
+- **Gradient clipping:** max_norm=1.0
+- **Batch size:** 512, temperature=0.000977
 - **Steps:** 50,000
-- **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (57k train users)
+- **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (55k train users)
 """)
 
         st.header("Offline Evaluation")
         st.markdown(
             "Evaluated on **2,000 held-out val users** (never seen during training). "
-            "Corpus: 5,442 games. "
-            "Each example has one target; Recall@K = Hit Rate@K for single-target eval."
+            "Each example has one target; Recall@K = Hit Rate@K for single-target eval. "
+            "Shuffled history — no release-date ordering."
         )
+
+        st.markdown("**V3 PROD** — corpus: 5,437 games (ultra-popular Valve titles removed)")
         st.markdown("""
-| K | Recall@K | NDCG@K | vs. Random |
-|---|---|---|---|
-| 1 | 0.0417 | 0.0417 | 231× |
-| 5 | 0.1202 | 0.0817 | 134× |
-| 10 | 0.1794 | 0.1007 | 99× |
-| 20 | 0.2668 | 0.1227 | 72× |
-| 50 | 0.4309 | 0.1551 | 47× |
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0278 | 0.0278 |
+| 5 | 0.0882 | 0.0581 |
+| 10 | 0.1428 | 0.0756 |
+| 20 | 0.2287 | 0.0971 |
+| 50 | 0.3944 | 0.1299 |
 
-MRR: **0.0918** (random: 0.0017, +54×)
-
-*Eval uses shuffled history (no release-date ordering) — a harder, more honest protocol than V1.*
+MRR: **0.0706** (random: 0.0017, +41×)
 """)
+
+        st.markdown("**V2 PROD** — corpus: 5,442 games (Valve titles included)")
+        st.markdown("""
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0389 | 0.0389 |
+| 5 | 0.1138 | 0.0767 |
+| 10 | 0.1743 | 0.0962 |
+| 20 | 0.2602 | 0.1177 |
+| 50 | 0.4256 | 0.1504 |
+
+MRR: **0.0875** (random: 0.0017, +51×)
+""")
+
+        st.markdown(
+            "**Why V3 metrics are lower:** These numbers are not directly comparable. "
+            "Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history "
+            "and were trivially easy prediction targets — any model ranks them top-5 for most users, inflating V2 Recall@K. "
+            "Removing them from the corpus makes the eval strictly harder: every remaining target requires genuine taste modeling. "
+            "V3 canary quality is substantially better — cross-genre Valve recommendations are eliminated and per-genre coherence "
+            "improved across all nine user types tested."
+        )
 
         st.header("Limitations")
         st.markdown("""
-- ~5,400-game corpus — games with fewer than 10 qualifying users are excluded
+- ~5,437-game corpus — games with fewer than 10 qualifying users are excluded
 - No timestamps — play history is shuffled randomly (no real play sequence in source data)
 - Witcher 3, Dark Souls III, Skyrim, Civilization VI and other major titles are absent from this version of the dataset's metadata
 - Free-to-play games (Dota 2, TF2) are also missing from the metadata file
-- Popularity bias — very popular Valve games (CS:GO, Left 4 Dead 2) may appear across many recommendation lists
 """)
 
 
