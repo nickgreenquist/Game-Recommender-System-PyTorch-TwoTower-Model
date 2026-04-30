@@ -60,6 +60,8 @@ MAX_ROLLBACK_EXAMPLES_PER_USER = 50   # rollback cap per user (see note below)
 
 Games below `MIN_INTERACTIONS_PER_GAME` are filtered out entirely. Users outside the playtime bounds are dropped.
 
+**Valve DENYLIST:** Five ultra-popular titles are hard-filtered from the corpus regardless of interaction count: `{'730', '550', '620', '240', '4000'}` (CS:GO, Left 4 Dead 2, Portal, Counter-Strike, Garry's Mod). These appeared in nearly every user's history and were trivially easy prediction targets that inflated Recall@K metrics and polluted cross-genre recommendations. Removed in `preprocess.py` Pass 1.
+
 **Why MIN_INTERACTIONS_PER_GAME=10 (not 100):** Lowering to 10 nearly triples the recommendation corpus (6,258 games vs 2,509) with almost no cost — rollback examples change by less than 1,000. Games with few interactions have undertrained ID embeddings but their content towers (tags, genres, developer) still give them a reasonable representation.
 
 **Why MAX_ROLLBACK_EXAMPLES_PER_USER=50 (not 10):** This dataset is much smaller than Goodreads — 66k users vs 229k, producing only ~575k rollback examples at cap=10 vs Goodreads' 4.7M. Cap=50 brings us to ~1.4M examples per shuffle pass; with N_SHUFFLES=3 this yields ~4.3M training examples. The YouTube DNN paper caps to prevent power users from dominating — that concern is already handled by the hour ceiling here.
@@ -72,7 +74,7 @@ Games below `MIN_INTERACTIONS_PER_GAME` are filtered out entirely. Users outside
 
 Two separate steps — run `preprocess games` first to inspect corpus size, then `preprocess interactions`.
 
-**Step 1 (`preprocess games`)** — reads `steam_games.json.gz`, filters by interaction count (requires a first pass over user items to count per-game interactions), collects game metadata (genres, tags, developer, publisher, release year, price). Writes `base_games.parquet` and `base_game_tags.parquet`.
+**Step 1 (`preprocess games`)** — reads `steam_games.json.gz`, filters by interaction count (requires a first pass over user items to count per-game interactions), collects game metadata (genres, tags, developer, publisher, release year, price). Also computes **global per-game median playtime** (stored as `median_hours` in `base_games.parquet`) — used by `dataset.py` for Liked/Disliked pool partitioning. Writes `base_games.parquet` and `base_game_tags.parquet`.
 
 **Step 2 (`preprocess interactions`)** — processes `australian_users_items.json.gz`:
 - Only keeps items with `playtime_forever >= MIN_HOURS_PER_GAME * 60` (playtime stored in minutes)
@@ -144,9 +146,26 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 - **Full:** all context items (most recent MAX_HISTORY_LEN=50) — equal-weight sum pool
 - **Playtime-weighted Full:** same items as Full; weighted sum where each item's weight is `log(1+hours)` normalized by the context total — captures intensity of engagement beyond the binary liked/disliked split
 
-Items can appear in both Liked and Disliked simultaneously. `game_median` is the global per-game median playtime; `user_rolling_median` is computed at each rollback step from context hours so far.
+Items can appear in both Liked and Disliked simultaneously. `game_median` is the global per-game median playtime (computed in `preprocess.py` Pass 1 and stored in `base_games.parquet`); `user_rolling_median` is computed at each rollback step from context hours so far.
 
-**Rolling genre/tag context:** Computed left-to-right inside `_build_rollback_dataset` at each rollback position using the full history seen so far. Genre context = debiased avg log playtime + genre fraction. Tag context = sum of TF-IDF tag vectors.
+**In-model genre/tag context (V3):** Genre and tag context are computed inside `user_embedding()` from `game_genre_matrix` and `game_tag_matrix` registered buffers using the `X_hist_full` indices. `dataset.py` no longer computes rolling genre/tag context — it only provides `X_user_avg_log` (per-user average log playtime scalar, used for genre debiasing inside the model). `features.py` similarly no longer builds the per-user genre context matrix.
+
+**`user_embedding()` signature (V3):**
+```python
+def user_embedding(self, X_user_avg_log,   # (B, 1)  per-user avg log-playtime
+                   X_hist_liked,            # (B, MAX_HISTORY_LEN) pre-padded int64
+                   X_hist_disliked,         # (B, MAX_HISTORY_LEN) pre-padded int64
+                   X_hist_full,             # (B, MAX_HISTORY_LEN) pre-padded int64
+                   X_hist_playtime_weights) # (B, MAX_HISTORY_LEN) pre-padded float32
+```
+
+**`item_embedding()` signature (V3):**
+```python
+def item_embedding(self, target_year_idx, target_game_idx, target_dev_idx, target_price)
+# genre looked up internally: self.game_genre_matrix[target_game_idx]
+```
+
+**Registered buffers on model:** `game_tag_matrix` (n_games+1, n_tags) and `game_genre_matrix` (n_games+1, n_genres). Both excluded from `model.pth` and stored in `feature_store.pt`.
 
 **Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations. Nonlinearity is needed to model interactions (e.g. "RPGs from Japanese developers", "price sensitivity varies by history depth"). Each tower passes its concat through a 2-layer MLP. Only `output_dim=128` must match across towers.
 
@@ -194,22 +213,22 @@ Only `item_id_embedding_size` and `output_dim` are constrained across towers.
 
 **What the model predicts:** "Given a random subset of this user's play history, which game do they also play?" — a ranking problem, not a regression. Playtime is never a prediction target.
 
-**Playtime role in V2:** Playtime is used to partition history into Liked/Disliked pools and to build rolling genre context (log playtime weighting). It is NOT used as a per-item weight in the history pools — all items in a pool contribute equally via sum pooling. Playtime does not appear in the loss or item tower.
+**Playtime role in V3:** Playtime is used to partition history into Liked/Disliked pools and to build the playtime-weighted Full pool. It is also used as the per-user avg_log scalar passed to `user_embedding()` for in-model genre debiasing. Playtime does not appear in the loss or item tower.
 
 **Note on YouTube DNN:** The YouTube paper predicts watch time, but that is their *ranking* model (stage 2), not the two-tower candidate generation model (stage 1) that we are replicating. Our corpus is ~5,400 games — small enough to score all items exactly at inference time with no ANN needed. A separate ranking stage is unnecessary.
 
 **Full softmax over entire corpus:**
 
-- **Loss**: cross-entropy over all ~5,442 items. Every step scores the full corpus.
-- **Dataset**: rollback examples with N_SHUFFLES=3 → ~4.3M training examples.
-- **Optimizer**: Adam, `lr=0.001`, `weight_decay=1e-5`
+- **Loss**: cross-entropy over all ~5,437 items (Valve DENYLIST applied). Every step scores the full corpus.
+- **Dataset**: rollback examples with N_SHUFFLES=3 → ~4.3M training examples. 9-tuple of pre-padded tensors (no variable-length lists).
+- **Optimizer**: Adam, `lr=0.001`, `weight_decay=0.0`, `eps=1e-6`
 - **Scheduler**: CosineAnnealingLR, `T_max=50_000`, `eta_min=1e-4` (floor prevents LR going to zero)
 - **Gradient clipping**: `clip_grad_norm_(max_norm=1.0)` before each optimizer step
 - **Batch size**: 512
-- **Temperature**: 0.05
-- **Steps**: 50,000 (~6 passes through 4.3M examples)
+- **Temperature**: `0.5 / minibatch_size = 0.000977`
+- **Steps**: 50,000
 - **Val eval**: fixed 8,192 val examples sampled once at run start — same indices every log step so val loss is comparable across steps (not a fresh random sample each time)
-- **`F.normalize` must NOT be used in training.** Raw dot products throughout — matches YouTube DNN paper. See book model CLAUDE.md for details on why cosine similarity causes train/inference mismatch.
+- **Both towers use `F.normalize`** at the end of their projection MLPs — training and inference use cosine similarity consistently. The train/inference mismatch concern (from book model) does not apply here because normalization is applied in both settings.
 
 **Popularity logit adjustment — bias/temperature ordering is critical (Menon et al. 2021).**
 
@@ -225,53 +244,30 @@ The bias is subtracted **after** dividing by temperature, so it lives in tempera
 ```python
 # Multiply through by temperature to convert training formula to dot-product space:
 # training rank: (u·v)/temp - bias  →  inference rank: u·v - temp*bias
-pop_bias_inference = temperature * alpha * sqrt(counts)
+pop_bias_inference = temperature * alpha * torch.log1p(counts)
 scores = (user_emb @ item_embs.T) - pop_bias_inference
 ```
 
-**Use `sqrt(count)` not `log1p(count)`.** `log1p` compresses the popularity range too aggressively — CS:GO (42k interactions) and Civ V (13k interactions) get nearly identical penalties (1.12× apart). `sqrt` gives 1.76× separation between them, letting the model suppress mega-popular games without over-penalizing moderately popular legitimate recommendations. Alpha scales accordingly: `alpha ≈ 0.5` with `sqrt` gives similar CS:GO penalty magnitude as `alpha=10` with `log1p`. Training and inference must always use the same function.
+**Current implementation uses `log1p(count)` with alpha=0.4.** Valve mega-popular titles (CS:GO, Garry's Mod, L4D2) are hard-filtered from the corpus via DENYLIST in `preprocess.py` (`{'730', '550', '620', '240', '4000'}`), so the popularity bias is only needed to suppress moderately popular games, not mega-popular ones.
 
-This applies to both `evaluate.py` (canary) and `offline_eval.py`. Temperature must be read from the checkpoint's config sidecar (`_config.json`), not hardcoded, so it matches what the model was trained with.
+**Inference multiplier:** `evaluate.py` and `streamlit_app.py` apply `POPULARITY_ALPHA_INFERENCE_MULTIPLE = 2.0` at serving time, making the effective inference bias `temperature * alpha * 2.0 * log1p(counts)`. `offline_eval.py` uses 1× (matches training) to keep metrics comparable across checkpoints.
 
-**Weight decay is required with full softmax.** Full softmax sends dense gradients to all ~6k item embeddings every step via Adam's adaptive rates. Without weight decay, embedding norms grow unconstrained and cause loss explosion (~step 10k). `weight_decay=1e-5` anchors norms.
-
-**Gradient clipping is required with temperature=0.05.** Temperature amplifies gradients by 20×. Clipping at max_norm=1.0 prevents early explosion. Note: with Adam, clipping alone is insufficient — weight decay is also needed.
+Temperature and alpha must be read from the checkpoint's config sidecar (`_config.json`) via `load_config_for_checkpoint()`, not hardcoded.
 
 **Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. Timestamp tower omitted. The review `posted` date is available but only for reviewed games — too sparse.
 
 ## Canary Users for Eval
 
-All titles verified against corpus. Genres/tags verified against base_vocab.parquet.
+Nine synthetic user types defined in `src/evaluate.py`. All titles verified against corpus. Note that Valve titles (CS:GO, L4D2, etc.) are excluded from the corpus and therefore absent from favorite game lists.
 
-```python
-USER_TYPE_TO_FAVORITE_GENRES = {
-    'RPG Lover':      ['RPG'],
-    'FPS Lover':      ['Action'],
-    'Strategy Lover': ['Strategy'],
-    'Indie Lover':    ['Indie'],
-}
-USER_TYPE_TO_FAVORITE_GAMES = {
-    'RPG Lover':      ['The Witcher 2: Assassins of Kings Enhanced Edition',
-                       'DARK SOULS™: Prepare To Die™ Edition',
-                       'Divinity: Original Sin (Classic)',
-                       'Fallout: New Vegas', 'Mass Effect 2'],
-    'FPS Lover':      ['Counter-Strike: Global Offensive', 'DOOM', 'Left 4 Dead 2',
-                       'PAYDAY 2', 'BioShock Infinite'],
-    'Strategy Lover': ["Sid Meier's Civilization® V", 'XCOM: Enemy Unknown',
-                       'Total War™: ROME II - Emperor Edition',
-                       'Crusader Kings II', 'Company of Heroes 2'],
-    'Indie Lover':    ['Terraria', 'FTL: Faster Than Light',
-                       'The Binding of Isaac: Rebirth', 'Rogue Legacy', 'Spelunky'],
-}
-USER_TYPE_TO_TAGS = {
-    'RPG Lover':      ['RPG', 'Open World', 'Story Rich', 'Character Customization'],
-    'FPS Lover':      ['FPS', 'Shooter', 'Action', 'Multiplayer'],
-    'Strategy Lover': ['Strategy', 'Turn-Based', '4X', 'Tactical'],
-    'Indie Lover':    ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
-}
-```
+User types: Western RPG Lover, JRPG Lover, FPS Lover, Civ Lover, Indie Lover, Racing Lover, Fighting Lover, Survival Lover, Management Lover.
 
-Canary users are synthetic — no real play timestamps (timestamp tower omitted in this model).
+Each user type has:
+- `USER_TYPE_TO_FAVORITE_GAMES` — seed games (high simulated playtime weight = 10.0)
+- `USER_TYPE_TO_TAGS` — tags used to find 5 anchor games per tag (anchor weight = 2.0)
+- `USER_TYPE_TO_DISLIKED_GAMES` — currently empty dict (all entries commented out)
+
+`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 2.0` is applied during canary scoring. Canary users are synthetic — no real play timestamps.
 
 ## Offline Evaluation
 
@@ -320,14 +316,14 @@ At eval time, val user rollback examples are generated fresh (not from the saved
 
 | File            | Status                                                                              |
 |-----------------|-------------------------------------------------------------------------------------|
-| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline, global game medians  |
-| `features.py`   | Adapted — game column names, developer feature, recommend history, game medians     |
-| `dataset.py`    | Heavily extended — triple pools, rolling genre/tag context, N_SHUFFLES, quality filter |
-| `model.py`      | Extended — triple pools, shallow sum pooling, user tag tower, ReLU, LayerNorm      |
-| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, fixed val eval        |
-| `evaluate.py`   | Adapted — canary dicts use game titles and Steam tags; V2 user_embedding signature |
-| `offline_eval.py` | Adapted — V2 triple-pool inputs; writes results to `eval_results/`              |
-| `export.py`     | Adapted — exclude large buffers from model.pth                                     |
+| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline, global game medians, Valve DENYLIST |
+| `features.py`   | Adapted — game column names, developer feature, avg_log_playtime per user (genre context removed) |
+| `dataset.py`    | Rewritten (V3) — pre-allocated numpy arrays, pre-padded tensors, 9-tuple output, genre/tag moved to model |
+| `model.py`      | Extended (V3) — 4 pools, in-model genre/tag context, game_genre_matrix buffer, F.normalize on both towers |
+| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, checkpoint config sidecar |
+| `evaluate.py`   | Adapted — 9 canary user types, POPULARITY_ALPHA_INFERENCE_MULTIPLE, new signatures |
+| `offline_eval.py` | Adapted — V3 9-tuple inputs, pre-padded tensors, 1× popularity bias              |
+| `export.py`     | Adapted — exclude game_tag_matrix and game_genre_matrix buffers from model.pth     |
 
 ## Serving / Export Notes
 
