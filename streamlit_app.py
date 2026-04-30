@@ -620,7 +620,20 @@ learns to align user taste with item identity through training.
             "Shuffled history — no release-date ordering."
         )
 
-        st.markdown("**V3 PROD** — corpus: 5,437 games (ultra-popular Valve titles removed)")
+        st.markdown("**V4 PROD** — corpus: 5,437 games (Valve titles removed, no LayerNorm after pools)")
+        st.markdown("""
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0286 | 0.0286 |
+| 5 | 0.0888 | 0.0586 |
+| 10 | 0.1422 | 0.0757 |
+| 20 | 0.2293 | 0.0976 |
+| 50 | 0.3949 | 0.1303 |
+
+MRR: **0.0710** (random: 0.0017, +42×)
+""")
+
+        st.markdown("**V3 PROD** — corpus: 5,437 games (Valve titles removed, with LayerNorm after pools)")
         st.markdown("""
 | K | Recall@K | NDCG@K |
 |---|---|---|
@@ -647,12 +660,11 @@ MRR: **0.0875** (random: 0.0017, +51×)
 """)
 
         st.markdown(
-            "**Why V3 metrics are lower:** These numbers are not directly comparable. "
-            "Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history "
-            "and were trivially easy prediction targets — any model ranks them top-5 for most users, inflating V2 Recall@K. "
-            "Removing them from the corpus makes the eval strictly harder: every remaining target requires genuine taste modeling. "
-            "V3 canary quality is substantially better — cross-genre Valve recommendations are eliminated and per-genre coherence "
-            "improved across all nine user types tested."
+            "**Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) "
+            "appeared in nearly every val user's history and were trivially easy prediction targets — any model ranks them "
+            "top-5 for most users, inflating V2 Recall@K. Removing them makes the eval strictly harder: every remaining "
+            "target requires genuine taste modeling. V4 improves on V3 by removing non-standard LayerNorm after sum-pooling, "
+            "consistent with YouTube DNN and industry practice."
         )
 
         st.header("Limitations")

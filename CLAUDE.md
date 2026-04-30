@@ -112,16 +112,16 @@ Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-a
 
 ## Model Architecture
 
-Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, shallow sum pooling, ReLU activations, and LayerNorm stabilization. A 4th playtime-weighted pool captures intensity of preference beyond the binary liked/disliked split.
+Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, and shallow sum pooling. A 4th playtime-weighted pool captures intensity of preference beyond the binary liked/disliked split.
 
 ```
 User Tower:
-  liked_pool:    sum(item_id_emb[liked_ids])    → LayerNorm → 32-dim
-  disliked_pool: sum(item_id_emb[disliked_ids]) → LayerNorm → 32-dim
-  full_pool:     sum(item_id_emb[full_ids])     → LayerNorm → 32-dim
-  playtime_pool: sum(item_id_emb[full_ids] * w) where w=log(1+h)/Σlog(1+h) → LayerNorm → 32-dim
-  user_genre_tower([debiased_avg_log | play_frac]) → genre_emb  (32-dim)
-  user_tag_tower(LayerNorm(rolling_tag_sum))       → tag_emb    (32-dim)
+  liked_pool:    sum(item_id_emb[liked_ids])                              → 32-dim
+  disliked_pool: sum(item_id_emb[disliked_ids])                          → 32-dim
+  full_pool:     sum(item_id_emb[full_ids])                              → 32-dim
+  playtime_pool: sum(item_id_emb[full_ids] * w) where w=log(1+h)/Σlog(1+h) → 32-dim
+  user_genre_tower([debiased_avg_log | play_frac]) → genre_emb           (32-dim)
+  user_tag_tower(rolling_tag_sum)                  → tag_emb             (32-dim)
   concat → 192-dim
   user_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
@@ -138,7 +138,7 @@ Item Tower:
 Prediction: dot_product(user_projection_out, item_projection_out)
 ```
 
-**Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. LayerNorm after each pool stabilizes the variable-magnitude sums (a user with 50 games gets a 50× larger raw sum than one with 1 game).
+**Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. No LayerNorm after pooling — industry standard (YouTube DNN, TikTok); the projection MLP learns the right scale.
 
 **Four pool partitioning** (computed per rollback position in `dataset.py`):
 - **Liked:** `recommend==True` OR `hours >= game_median` OR `hours >= user_rolling_median × 2`
@@ -275,7 +275,19 @@ Each user type has:
 
 ### Current results
 
-**V3 PROD** (5,437-game corpus — ultra-popular Valve titles removed):
+**V4 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm after pools):
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0286 | 0.0286 |
+| 5 | 0.0888 | 0.0586 |
+| 10 | 0.1422 | 0.0757 |
+| 20 | 0.2293 | 0.0976 |
+| 50 | 0.3949 | 0.1303 |
+
+MRR: 0.0710 (random: 0.0017)
+
+**V3 PROD** (5,437-game corpus — Valve titles removed, with LayerNorm after pools):
 
 | K | Recall@K | NDCG@K |
 |---|---|---|

@@ -15,7 +15,7 @@ Trained with full softmax cross-entropy over the entire game corpus, following t
 
 - **No user ID embedding** — users are represented entirely by taste signals: four behavior-partitioned play history pools, genre affinity, and tag affinity computed from play history. Any user can get recommendations from just a few games they've played, with no retraining required.
 - **Playtime as the rating signal** — Steam has no star ratings. `log(1 + hours)` compresses the extreme tail while preserving ordering. Used to classify history into Liked/Disliked pools and as the per-user avg scalar for genre debiasing; never a prediction target.
-- **Four history pools** — play history is partitioned into Liked (high playtime or explicit recommend), Disliked (bounced off or explicit thumbs-down), Full (all history, equal-weight), and Playtime-weighted Full (same games, weighted by normalized log-playtime). Each pool is a shallow sum of raw 32-dim game ID embeddings + LayerNorm. This gives the model separate signals for positive taste, negative taste, collaborative fingerprint, and engagement intensity.
+- **Four history pools** — play history is partitioned into Liked (high playtime or explicit recommend), Disliked (bounced off or explicit thumbs-down), Full (all history, equal-weight), and Playtime-weighted Full (same games, weighted by normalized log-playtime). Each pool is a raw sum of 32-dim game ID embeddings — no LayerNorm (industry standard; the projection MLP learns the right scale). This gives the model separate signals for positive taste, negative taste, collaborative fingerprint, and engagement intensity.
 - **In-model genre/tag context** — genre affinity and tag context are computed inside `user_embedding()` from `game_genre_matrix` and `game_tag_matrix` registered buffers, using the full history window. This avoids pre-computing context per rollback position in the dataset and enables the model to derive context from any history at inference time.
 - **Full softmax over entire corpus** — cross-entropy over all ~5,437 games every training step, rather than in-batch negatives. Denser gradient signal; all items receive updates every step.
 - **Valve title filter** — CS:GO, Garry's Mod, Left 4 Dead 2, Portal, and Counter-Strike are hard-removed from the corpus. These appeared in nearly every user's history, were trivially easy prediction targets, and caused cross-genre recommendation pollution.
@@ -29,10 +29,10 @@ Trained with full softmax cross-entropy over the entire game corpus, following t
 
 ```
 User Tower:
-  liked_pool:     sum(32-dim item ID emb[liked games])              → LayerNorm → 32-dim
-  disliked_pool:  sum(32-dim item ID emb[disliked games])           → LayerNorm → 32-dim
-  full_pool:      sum(32-dim item ID emb[all history])              → LayerNorm → 32-dim
-  playtime_pool:  sum(32-dim item ID emb[all history] × log_w)      → LayerNorm → 32-dim
+  liked_pool:     sum(32-dim item ID emb[liked games])              → 32-dim
+  disliked_pool:  sum(32-dim item ID emb[disliked games])           → 32-dim
+  full_pool:      sum(32-dim item ID emb[all history])              → 32-dim
+  playtime_pool:  sum(32-dim item ID emb[all history] × log_w)      → 32-dim
   user_genre_tower([debiased_avg_log_playtime | genre_frac])        →            32-dim
   user_tag_tower(sum of TF-IDF tag vectors from history)            →            32-dim
   concat → 192-dim
@@ -76,7 +76,19 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 
 Evaluated on 2,000 held-out val users (never seen during training). Shuffled history protocol — no release-date ordering. Each example has one target; Recall@K = Hit Rate@K for single-target eval.
 
-### V3 PROD — corpus: 5,437 games (ultra-popular Valve titles removed)
+### V4 PROD — corpus: 5,437 games (Valve titles removed, no LayerNorm after pools)
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0286 | 0.0286 |
+| 5 | 0.0888 | 0.0586 |
+| 10 | 0.1422 | 0.0757 |
+| 20 | 0.2293 | 0.0976 |
+| 50 | 0.3949 | 0.1303 |
+
+MRR: **0.0710** (random: 0.0017, +42×)
+
+### V3 PROD — corpus: 5,437 games (Valve titles removed, with LayerNorm after pools)
 
 | K | Recall@K | NDCG@K |
 |---|---|---|
@@ -100,7 +112,7 @@ MRR: **0.0706** (random: 0.0017, +41×)
 
 MRR: **0.0875** (random: 0.0017, +51×)
 
-**Why V3 metrics are lower:** These numbers are not directly comparable. Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2, etc.) appeared in the histories of nearly every val user and were trivially easy prediction targets — any model would rank them top-5 for most users, inflating V2's Recall@K. Removing them from the corpus makes the eval strictly harder: every remaining target requires genuine taste modeling. V3 canary results are substantially better — cross-genre Valve recommendations are gone and per-genre coherence improved across all nine user types tested.
+**Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history and were trivially easy prediction targets — any model would rank them top-5 for most users, inflating V2's Recall@K. Removing them makes the eval strictly harder: every remaining target requires genuine taste modeling. V4 improves on V3 by removing non-standard LayerNorm after sum-pooling, consistent with YouTube DNN and industry practice.
 
 ## Usage
 
