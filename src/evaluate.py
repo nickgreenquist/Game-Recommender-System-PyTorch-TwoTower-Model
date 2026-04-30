@@ -1,5 +1,5 @@
 """
-Embedding probes and canary user evaluation V2.
+Embedding probes and canary user evaluation V2 (V3: in-model genre/tag context).
 """
 import glob
 import os
