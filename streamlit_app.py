@@ -66,6 +66,12 @@ def load_artifacts():
     if not isinstance(tag_mat, torch.Tensor):
         tag_mat = torch.from_numpy(np.array(tag_mat, dtype=np.float32))
     model.game_tag_matrix.copy_(tag_mat)
+
+    genre_mat = fs['game_genre_matrix']  # (n_items+1, n_genres) tensor from export
+    if not isinstance(genre_mat, torch.Tensor):
+        genre_mat = torch.from_numpy(np.array(genre_mat, dtype=np.float32))
+    model.game_genre_matrix.copy_(genre_mat)
+
     model.load_state_dict(state_dict, strict=False)
     model.eval()
 
