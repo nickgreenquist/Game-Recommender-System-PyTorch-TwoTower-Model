@@ -38,15 +38,10 @@ class GameRecommender(nn.Module):
         self.dev_pad_idx  = n_developers
         self.output_dim   = output_dim
 
-        # ── Shared item embedding lookup (used by item tower and all 3 user history pools) ──
+        # ── Shared item embedding lookup (used by item tower and all 4 user history pools) ──
         self.item_embedding_lookup = nn.Embedding(
             n_games + 1, item_id_embedding_size, padding_idx=n_games
         )
-
-        # ── Normalization for Sum Pooling ──
-        self.history_norm      = nn.LayerNorm(item_id_embedding_size)
-        self.playtime_pool_norm = nn.LayerNorm(item_id_embedding_size)
-        self.tag_norm          = nn.LayerNorm(n_tags)
 
         # ── Item Tower sub-networks ──────────────────────────────────────────
         self.item_embedding_tower = nn.Sequential(
@@ -156,7 +151,7 @@ class GameRecommender(nn.Module):
         """
         # Shallow equal-weight sum pooling (padding_idx zeros out pad entries)
         def pool_ids(ids):
-            return self.history_norm(self.item_embedding_lookup(ids).sum(dim=1))
+            return self.item_embedding_lookup(ids).sum(dim=1)
 
         liked_emb    = pool_ids(X_hist_liked)
         disliked_emb = pool_ids(X_hist_disliked)
@@ -166,7 +161,7 @@ class GameRecommender(nn.Module):
         # Weights are pre-normalized in dataset.py; padding positions have weight=0
         item_embs = self.item_embedding_lookup(X_hist_full)          # (B, F, D)
         w = X_hist_playtime_weights.unsqueeze(-1)                     # (B, F, 1)
-        playtime_emb = self.playtime_pool_norm((item_embs * w).sum(dim=1))  # (B, D)
+        playtime_emb = (item_embs * w).sum(dim=1)                           # (B, D)
 
         # ── Dynamic Genre Context (In-Model Contextual Pooling) ───────────
         # Gather genre rows for history: (B, F, n_genres)
@@ -218,7 +213,7 @@ class GameRecommender(nn.Module):
         # ── Dynamic Tag Context ───────────────────────────────────────────
         # Simple sum of tag vectors in history
         X_tag = (self.game_tag_matrix[X_hist_full]).sum(dim=1) # (B, n_tags)
-        tag_emb   = self.user_tag_tower(self.tag_norm(X_tag))
+        tag_emb   = self.user_tag_tower(X_tag)
 
         concat = torch.cat([liked_emb, disliked_emb, full_emb, playtime_emb, genre_emb, tag_emb], dim=1)
         return F.normalize(self.user_projection(concat), dim=-1)
