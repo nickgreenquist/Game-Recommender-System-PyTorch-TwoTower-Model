@@ -21,7 +21,7 @@ import torch
 
 from src.dataset import load_features
 from src.evaluate import build_game_embeddings
-from src.train import build_model, get_config
+from src.train import build_model, get_config, load_config_for_checkpoint
 
 SERVING_DIR = 'serving'
 
@@ -47,7 +47,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
     fs = load_features(data_dir, version)
 
     state_dict = torch.load(checkpoint_path, weights_only=True)
-    config = get_config()
+    config = load_config_for_checkpoint(checkpoint_path)
     model = build_model(config, fs)
     model.load_state_dict(state_dict)
     model.eval()
