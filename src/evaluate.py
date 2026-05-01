@@ -115,7 +115,7 @@ SIMULATED_FAV_LOG_HOURS             = 10.0   # weight for favorite games
 SIMULATED_ANCHOR_LOG_HOURS          =  2.0   # weight for tag-based anchor games
 SIMULATED_DISLIKE_LOG_HOURS         = 0.5    # weight for disliked games
 ANCHORS_PER_TAG                     =  5
-POPULARITY_ALPHA_INFERENCE_MULTIPLE =  1.5   # apply stronger debias at inference time than we did at training time
+POPULARITY_ALPHA_INFERENCE_MULTIPLE =  2.0   # apply stronger debias at inference time than we did at training time
 
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
