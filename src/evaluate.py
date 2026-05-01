@@ -73,10 +73,10 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'THE KING OF FIGHTERS XIII STEAM EDITION',
     ],
     'Survival Lover': [
-        'Unturned',
-        'Terraria',
         'Rust',
-        'ARK: Survival Evolved'
+        'ARK: Survival Evolved',
+        "Don't Starve Together",
+        'The Forest',
     ],
     'Management Lover': [
         'Cities: Skylines',
@@ -115,7 +115,7 @@ SIMULATED_FAV_LOG_HOURS             = 10.0   # weight for favorite games
 SIMULATED_ANCHOR_LOG_HOURS          =  2.0   # weight for tag-based anchor games
 SIMULATED_DISLIKE_LOG_HOURS         = 0.5    # weight for disliked games
 ANCHORS_PER_TAG                     =  5
-POPULARITY_ALPHA_INFERENCE_MULTIPLE =  2.0   # apply stronger debias at inference time than we did at training time
+POPULARITY_ALPHA_INFERENCE_MULTIPLE =  1.5   # apply stronger debias at inference time than we did at training time
 
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
@@ -279,7 +279,7 @@ def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor
     # Scale bias to dot-product space. Training scores are (u·v)/temp - bias;
     # inference ranking is equivalent to u·v - temp*bias (multiply through by temp).
     if temperature is None:
-        temperature = 0.5 / 512
+        temperature = 0.1
     if popularity_alpha > 0 and 'game_interaction_counts' in fs:
         counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
 
@@ -505,7 +505,7 @@ def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str
     model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id, all_norm_tag, all_norm_genre = _load_model_and_embeddings(cp, fs)
     cp_config = load_config_for_checkpoint(cp)
     alpha = cp_config.get('popularity_alpha', 0.0)
-    temperature = 0.5 / cp_config.get('minibatch_size', 512)
+    temperature = cp_config.get('temperature', 0.1)
     print("\n── Canary user evaluation ──")
     print(f"  popularity_alpha={alpha} ({'applied' if alpha > 0 else 'disabled'})  temperature={temperature:.6f}")
     run_canary_eval(model, fs, all_combined, all_ids, popularity_alpha=alpha, temperature=temperature)

@@ -36,6 +36,9 @@ def get_config() -> dict:
         'weight_decay':     0.0,
         'adam_eps':         1e-6,
         'minibatch_size':   512,
+        # Temperature is a pure hyperparameter for full softmax — do NOT compute from batch size.
+        # (0.5 / minibatch_size = 0.000977 was used in PROD V4; lower = sharper distribution)
+        'temperature':      0.1,
         'popularity_alpha': 0.4,    # logit-space adjustment; 0=off. Uses log1p(count)
         'training_steps':   50_000,
         'log_every':        1_000,
@@ -187,7 +190,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     scheduler        = torch.optim.lr_scheduler.CosineAnnealingLR(
                            optimizer, T_max=training_steps, eta_min=1e-4)
     minibatch_size   = config['minibatch_size']
-    temperature      = 0.5 / minibatch_size
+    temperature     = config['temperature']
     log_every        = config['log_every']
     checkpoint_every = config['checkpoint_every']
     checkpoint_dir   = config['checkpoint_dir']

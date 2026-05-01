@@ -33,7 +33,7 @@ def run_offline_eval(model: GameRecommender, fs: dict,
     from src.train import load_config_for_checkpoint
     cp_config   = load_config_for_checkpoint(checkpoint_path)
     alpha       = cp_config.get('popularity_alpha', 0.0)
-    temperature = 0.5 / cp_config.get('minibatch_size', 512)
+    temperature = cp_config.get('temperature', 0.1)
     if alpha > 0 and 'game_interaction_counts' in fs:
         counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
         # Scale to dot-product space: training used (u·v)/temp - bias → inference: u·v - temp*bias

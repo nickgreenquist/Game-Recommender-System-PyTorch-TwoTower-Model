@@ -223,7 +223,7 @@ def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
         counts = fs['game_interaction_counts']
         if isinstance(counts, np.ndarray):
             counts = torch.from_numpy(counts)
-        temperature = 0.5 / cfg.get('minibatch_size', 512)
+        temperature = cfg.get('temperature', 0.1)
 
         raw_scores  = raw_scores - temperature * (alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts.float())
     rows = []
@@ -614,7 +614,7 @@ learns to align user taste with item identity through training.
 - **Optimizer:** Adam, lr=0.001, eps=1e-6, CosineAnnealingLR (eta_min=1e-4)
 - **Popularity bias:** alpha=0.4 × log1p(count) at training; 2× multiplier applied at inference
 - **Gradient clipping:** max_norm=1.0
-- **Batch size:** 512, temperature=0.000977
+- **Batch size:** 512, temperature=0.1 (pure hyperparameter for full softmax; PROD V4 used 0.000977 = 0.5/512)
 - **Steps:** 50,000
 - **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (55k train users)
 """)
