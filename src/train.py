@@ -235,8 +235,10 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
                     v_pw       = X_hist_playtime_weights_val[vidx].to(device)
 
                     U      = model.user_embedding(X_avg_log_val[vidx], v_liked, v_disliked, v_full, v_pw)
-                    scores = (U @ V_all.T) / temperature + popularity_bias
-                    val_losses.append(F.cross_entropy(scores, target_item_idx_val[vidx]).item())
+
+                    # CORRECT (Raw dot product for validation - no Monen popularity adjustment)
+                    logits = (U @ V_all.T) / temperature
+                    val_losses.append(F.cross_entropy(logits, target_item_idx_val[vidx]).item())
                 val_loss = float(np.mean(val_losses))
 
             avg_train     = np.mean(loss_train[i - log_every:i]) if i >= log_every else (loss_train[-1] if loss_train else 0.0)
