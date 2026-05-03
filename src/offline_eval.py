@@ -29,18 +29,6 @@ def run_offline_eval(model: GameRecommender, fs: dict,
     print("Building game embeddings ...")
     _, all_ids, all_embs = build_game_embeddings(model, fs)
 
-    # ── Popularity bias (match training objective) ────────────────────────────
-    from src.train import load_config_for_checkpoint
-    cp_config   = load_config_for_checkpoint(checkpoint_path)
-    alpha       = cp_config.get('popularity_alpha', 0.0)
-    temperature = cp_config.get('temperature', 0.1)
-    if alpha > 0 and 'game_interaction_counts' in fs:
-        counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
-        # Scale to dot-product space: training used (u·v)/temp - bias → inference: u·v - temp*bias
-        pop_bias = (temperature * alpha * torch.log1p(counts)).unsqueeze(0)  # (1, n_items)
-    else:
-        pop_bias = None
-
     # ── Sample val users ──────────────────────────────────────────────────────
     val_users = fs['val_users']
     rng = random.Random(seed)
@@ -81,10 +69,8 @@ def run_offline_eval(model: GameRecommender, fs: dict,
 
             user_emb = model.user_embedding(x_avg_log, h_liked, h_disliked, h_full, h_pw)
 
-            # scores: (B, n_items)
+            # scores: (B, n_items) — raw dot products (Menon Path 2: no inference correction)
             scores = (user_emb @ all_embs.T)
-            if pop_bias is not None:
-                scores = scores - pop_bias
 
             target_idxs = target_item_idx[s:e]  # (B,)
 

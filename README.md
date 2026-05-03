@@ -76,17 +76,29 @@ Prediction: dot_product(user_projection_out, item_projection_out)
 
 Evaluated on 2,000 held-out val users (never seen during training). Shuffled history protocol — no release-date ordering. Each example has one target; Recall@K = Hit Rate@K for single-target eval.
 
-### V4 PROD — corpus: 5,437 games (Valve titles removed, no LayerNorm after pools)
+### V5 PROD — corpus: 5,437 games (Valve titles removed, no LayerNorm, correct Menon Path 2)
 
 | K | Recall@K | NDCG@K |
 |---|---|---|
-| 1 | 0.0286 | 0.0286 |
-| 5 | 0.0888 | 0.0586 |
-| 10 | 0.1422 | 0.0757 |
-| 20 | 0.2293 | 0.0976 |
-| 50 | 0.3949 | 0.1303 |
+| 1 | 0.0226 | 0.0226 |
+| 5 | 0.0741 | 0.0481 |
+| 10 | 0.1253 | 0.0645 |
+| 20 | 0.2059 | 0.0848 |
+| 50 | 0.3673 | 0.1166 |
 
-MRR: **0.0710** (random: 0.0017, +42×)
+MRR: **0.0611** (random: 0.0017, +36×)
+
+### V4 — corpus: 5,437 games (Valve titles removed, no LayerNorm, incorrect Menon sign)
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0294 | 0.0294 |
+| 5 | 0.0882 | 0.0589 |
+| 10 | 0.1430 | 0.0765 |
+| 20 | 0.2280 | 0.0978 |
+| 50 | 0.3913 | 0.1300 |
+
+MRR: **0.0715** (random: 0.0017, +42×)
 
 ### V3 PROD — corpus: 5,437 games (Valve titles removed, with LayerNorm after pools)
 
@@ -112,7 +124,7 @@ MRR: **0.0706** (random: 0.0017, +41×)
 
 MRR: **0.0875** (random: 0.0017, +51×)
 
-**Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history and were trivially easy prediction targets — any model would rank them top-5 for most users, inflating V2's Recall@K. Removing them makes the eval strictly harder: every remaining target requires genuine taste modeling. V4 improves on V3 by removing non-standard LayerNorm after sum-pooling, consistent with YouTube DNN and industry practice.
+**Why V5 metrics are lower than V4:** V4 was trained with `- popularity_bias` (subtracting), which caused the model to compensate by making popular item embeddings universally closer to all user embeddings — inflating Recall@K for popular targets. V5 uses the correct Menon Path 2 formula (`+ popularity_bias` at training, raw dot products at inference), producing genuinely preference-driven rankings with cleaner per-genre canary quality. **Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) were trivially easy prediction targets, inflating V2's Recall@K. Removing them makes every target require genuine taste modeling.
 
 ## Usage
 

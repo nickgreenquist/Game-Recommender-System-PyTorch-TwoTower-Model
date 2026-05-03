@@ -1,0 +1,164 @@
+── Canary user evaluation ──
+  popularity_alpha=0.4 (applied)  temperature=0.100000
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Tags: Action RPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Numen: Contest of Heroes, Victor Vran ARPG, Grim Dawn, Hazen: The Dark Whispers, BorderZone
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+The Witcher 2: Assassins of Kings Enhanced Edition  Pillars of Eternity
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Baldur's Gate II: Enhanced Edition
+DARK SOULS™: Prepare To Die™ Edition                Dragon Age: Origins - Ultimate Edition
+Divinity: Original Sin (Classic)                    The Witcher: Enhanced Edition Director's Cut
+Fallout: New Vegas                                  Mass Effect
+Mass Effect 2                                       King's Bounty: Crossworlds
+                                                    Dragon Age: Origins
+                                                    Kingdoms of Amalur: Reckoning™
+                                                    Jade Empire™: Special Edition
+                                                    Baldur's Gate: Enhanced Edition
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Tags: JRPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: I am Setsuna, The Legend of Heroes: Trails in the Sky SC, Grandia® II Anniversary Edition, Agarest: Generations of War, FINAL FANTASY III
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Mugen Souls                                         Fairy Fencer F
+OH! RPG!                                            Hyperdimension Neptunia Re;Birth3 V Generation / 神次次元ゲイム ネプテューヌRe;Birth3 V CENTURY
+Ys VI: The Ark of Napishtim                         Megadimension Neptunia VII
+Wild Season                                         Agarest: Generations of War Zero
+Disgaea PC / 魔界戦記ディスガイア PC                          Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテューヌRe;Birth1 / 超次次元遊戲戰機少女重生1
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Fortune Summoners
+FINAL FANTASY® XIII                                 Hyperdimension Neptunia Re;Birth2: Sisters Generation / 超次次元ゲイム ネプテューヌRe;Birth2
+                                                    FINAL FANTASY TYPE-0™ HD
+                                                    The Legend of Heroes: Trails in the Sky
+                                                    FINAL FANTASY IX
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Tags: FPS
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: STAR WARS™ - Dark Forces, Singularity™, Quake Live™, Far Cry 3 - Blood Dragon, Painkiller: Resurrection
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+QUAKE II                                            DOOM 3 Resurrection of Evil
+Unreal Tournament 2004: Editor's Choice Edition     QUAKE
+Quake IV                                            Master Levels for Doom II
+Final DOOM                                          QUAKE Mission Pack 2: Dissolution of Eternity
+Serious Sam HD: The First Encounter                 QUAKE Mission Pack 1: Scourge of Armagon
+Quake III Arena                                     DOOM 3
+Doom 3: BFG Edition                                 QUAKE III: Team Arena
+                                                    Unreal 2: The Awakening
+                                                    HeXen II
+                                                    Unreal Tournament: Game of the Year Edition
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Tags: 4X
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Galactic Civilizations® II: Ultimate Edition, StarDrive, Star Ruler 2, Galactic Civilizations® I: Ultimate Edition, Space Empires IV Deluxe
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Sid Meier's Civilization® V                         East India Company
+Civilization IV®: Warlords                          Civilization IV: Beyond the Sword
+Sid Meier's Civilization IV: Colonization           Empire: Total War™
+Total War™: ROME II - Emperor Edition               Dawn of Discovery™
+                                                    Sid Meier's Civilization® IV
+                                                    Sid Meier's Civilization®: Beyond Earth™
+                                                    Endless Space® - Collection
+                                                    Napoleon: Total War™
+                                                    Galactic Civilizations III
+                                                    Europa Universalis IV
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Hotline Miami 2: Wrong Number Digital Comic, Typefighters (Steam Edition), The Art of Playing, Over The Void, Super Game Jam
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Terraria                                            Dungeon Souls
+FTL: Faster Than Light                              Flamebreak
+The Binding of Isaac: Rebirth                       Deathstate: Abyssal Edition
+Rogue Legacy                                        Vagante
+Spelunky                                            Nuclear Throne
+                                                    Caveblazers
+                                                    Runers
+                                                    Armed with Wings: Rearmed
+                                                    Moon Hunters
+                                                    Darkest Dungeon®
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Racing Lover  |  Tags: Racing
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Sprint Cars Road to Knoxville, Xpand Rally Xtreme, Truck Racer, Ignite, RACE - The WTCC Game
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+F1 2012™                                            rFactor 2
+Need For Speed: Hot Pursuit                         RACE 07
+Test Drive Unlimited 2                              Assetto Corsa
+Ford Street Racing                                  RaceRoom Racing Experience
+Test Drive: Ferrari Racing Legends                  WRC 4 FIA World Rally Championship
+                                                    F1 2014
+                                                    Stock Car Extreme
+                                                    GT Legends
+                                                    F1 RACE STARS™
+                                                    Need for Speed: Shift
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Tags: Fighting
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Mortal Kombat: Legacy, THE KING OF FIGHTERS 2002 UNLIMITED MATCH, THE KING OF FIGHTERS '98 ULTIMATE MATCH FINAL EDITION, Guilty Gear Isuka, GUILTY GEAR XX ACCENT CORE PLUS R
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Street Fighter X Tekken                             Street Fighter V
+Ultra Street Fighter® IV                            GUILTY GEAR Xrd -SIGN-
+Injustice: Gods Among Us Ultimate Edition           BlazBlue: Continuum Shift Extend
+Divekick                                            Melty Blood Actress Again Current Code
+Street Fighter® IV                                  Yatagarasu Attack on Cataclysm
+DEAD OR ALIVE 5 Last Round: Core Fighters           UNDER NIGHT IN-BIRTH Exe:Late
+THE KING OF FIGHTERS XIII STEAM EDITION             BlazBlue: Calamity Trigger
+                                                    Devil May Cry® 4 Special Edition
+                                                    SAMURAI WARRIORS 4-II
+                                                    DYNASTY WARRIORS 8: Xtreme Legends Complete Edition / 真・三國無双７ with 猛将伝
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Survival Lover  |  Tags: Survival
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Vortex: The Gateway, Project Explore, Miasmata, FarSky, UnReal World
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Rust                                                Terraria
+ARK: Survival Evolved                               Unturned
+Don't Starve Together                               DayZ
+The Forest                                          Fallout 4
+                                                    Starbound
+                                                    Subnautica
+                                                    SPORE™
+                                                    Arma 3
+                                                    Borderlands 2
+                                                    Arma 2: Operation Arrowhead
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Management Lover  |  Tags: Management
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Mad Games Tycoon, Big Pharma, Ride! Carnival Tycoon, Hotel Giant 2, Game Corp DX
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Cities: Skylines                                    Train Simulator
+Kerbal Space Program                                Train Fever
+Prison Architect                                    Cities in Motion
+Game Dev Tycoon                                     Project AURA
+Euro Truck Simulator 2                              Farming Simulator 15
+                                                    Airline Tycoon 2
+                                                    Anno 2205™
+                                                    Software Inc.
+                                                    RollerCoaster Tycoon® 3: Platinum
+                                                    Tropico 5

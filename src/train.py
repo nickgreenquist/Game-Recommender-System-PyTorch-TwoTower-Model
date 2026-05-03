@@ -176,7 +176,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     print_model_summary(model)
 
     # ── Popularity logit adjustment (Menon et al. 2021) ───────────────────────
-    # Subtract alpha * log1p(count_i) from item i's logit before softmax.
+    # Add alpha * log1p(count_i) to item i's logit before softmax (Menon Eq. 4).
     item_counts    = torch.from_numpy(fs['game_interaction_counts'])
     popularity_bias = (config['popularity_alpha'] * torch.log1p(item_counts)).to(device)
     print(f"  Popularity bias: alpha={config['popularity_alpha']}  "
@@ -235,7 +235,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
                     v_pw       = X_hist_playtime_weights_val[vidx].to(device)
 
                     U      = model.user_embedding(X_avg_log_val[vidx], v_liked, v_disliked, v_full, v_pw)
-                    scores = (U @ V_all.T) / temperature - popularity_bias
+                    scores = (U @ V_all.T) / temperature + popularity_bias
                     val_losses.append(F.cross_entropy(scores, target_item_idx_val[vidx]).item())
                 val_loss = float(np.mean(val_losses))
 
@@ -274,7 +274,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
             # item_embedding(years, game_idxs, devs, prices)
             V_all = model.item_embedding(all_years, all_game_idxs, all_devs, all_prices)
 
-            scores = (U @ V_all.T) / temperature - popularity_bias
+            scores = (U @ V_all.T) / temperature + popularity_bias
             loss   = F.cross_entropy(scores, target_item_idx_train[ix].to(device))
 
             optimizer.zero_grad()

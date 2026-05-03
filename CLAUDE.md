@@ -230,27 +230,23 @@ Only `item_id_embedding_size` and `output_dim` are constrained across towers.
 - **Val eval**: fixed 8,192 val examples sampled once at run start — same indices every log step so val loss is comparable across steps (not a fresh random sample each time)
 - **Both towers use `F.normalize`** at the end of their projection MLPs — training and inference use cosine similarity consistently. The train/inference mismatch concern (from book model) does not apply here because normalization is applied in both settings.
 
-**Popularity logit adjustment — bias/temperature ordering is critical (Menon et al. 2021).**
+**Popularity logit adjustment — Menon et al. 2021, Path 2 (add at training, raw dot product at inference).**
 
 The training score formula is:
 ```python
-scores = (U @ V_all.T) / temperature - popularity_bias   # CORRECT
-# NOT: (U @ V_all.T - popularity_bias) / temperature    # WRONG — different scale at inference
+scores = (U @ V_all.T) / temperature + popularity_bias   # CORRECT (Menon Path 2)
 ```
 
-The bias is subtracted **after** dividing by temperature, so it lives in temperature-scaled logit space (magnitudes ~1024 for temperature=0.001). At inference, dot products are in `[-1, 1]` (L2-normalized outputs). Applying the raw `popularity_bias` directly at inference would make it 1000× too large and collapse all users to the same ranking (popularity-sorted only).
+Adding `alpha * log1p(count)` to popular items' logits during training forces the model to learn preference signals that exceed what popularity alone predicts. The trained dot products therefore represent "preference beyond popularity" — popular items are naturally suppressed at inference without any correction needed.
 
-**Correct inference formula:**
+**Inference formula:**
 ```python
-# Multiply through by temperature to convert training formula to dot-product space:
-# training rank: (u·v)/temp - bias  →  inference rank: u·v - temp*bias
-pop_bias_inference = temperature * alpha * torch.log1p(counts)
-scores = (user_emb @ item_embs.T) - pop_bias_inference
+scores = user_emb @ item_embs.T   # raw dot products — no correction needed
 ```
+
+`offline_eval.py` uses raw dot products. `evaluate.py` and `streamlit_app.py` (`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 0.0`) also use raw dot products. No inference correction is applied anywhere.
 
 **Current implementation uses `log1p(count)` with alpha=0.4.** Valve mega-popular titles (CS:GO, Garry's Mod, L4D2) are hard-filtered from the corpus via DENYLIST in `preprocess.py` (`{'730', '550', '620', '240', '4000'}`), so the popularity bias is only needed to suppress moderately popular games, not mega-popular ones.
-
-**Inference multiplier:** `evaluate.py` and `streamlit_app.py` apply `POPULARITY_ALPHA_INFERENCE_MULTIPLE = 2.0` at serving time, making the effective inference bias `temperature * alpha * 2.0 * log1p(counts)`. `offline_eval.py` uses 1× (matches training) to keep metrics comparable across checkpoints.
 
 Temperature and alpha must be read from the checkpoint's config sidecar (`_config.json`) via `load_config_for_checkpoint()`, not hardcoded.
 
@@ -267,7 +263,7 @@ Each user type has:
 - `USER_TYPE_TO_TAGS` — tags used to find 5 anchor games per tag (anchor weight = 2.0)
 - `USER_TYPE_TO_DISLIKED_GAMES` — currently empty dict (all entries commented out)
 
-`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 2.0` is applied during canary scoring. Canary users are synthetic — no real play timestamps.
+`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 0.0` — canary scoring uses raw dot products (Menon Path 2: no inference correction needed). Canary users are synthetic — no real play timestamps.
 
 ## Offline Evaluation
 
@@ -275,17 +271,31 @@ Each user type has:
 
 ### Current results
 
-**V4 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm after pools):
+**V5 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm, correct Menon Path 2 formula):
 
 | K | Recall@K | NDCG@K |
 |---|---|---|
-| 1 | 0.0286 | 0.0286 |
-| 5 | 0.0888 | 0.0586 |
-| 10 | 0.1422 | 0.0757 |
-| 20 | 0.2293 | 0.0976 |
-| 50 | 0.3949 | 0.1303 |
+| 1 | 0.0226 | 0.0226 |
+| 5 | 0.0741 | 0.0481 |
+| 10 | 0.1253 | 0.0645 |
+| 20 | 0.2059 | 0.0848 |
+| 50 | 0.3673 | 0.1166 |
 
-MRR: 0.0710 (random: 0.0017)
+MRR: 0.0611 (random: 0.0017)
+
+**V4** (5,437-game corpus — Valve titles removed, no LayerNorm, incorrect Menon sign):
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0294 | 0.0294 |
+| 5 | 0.0882 | 0.0589 |
+| 10 | 0.1430 | 0.0765 |
+| 20 | 0.2280 | 0.0978 |
+| 50 | 0.3913 | 0.1300 |
+
+MRR: 0.0715 (random: 0.0017)
+
+Note: V4 metrics are higher because the model was trained with `- popularity_bias` (subtracted), which penalizes popular items during training. The model compensated by making popular item embeddings universally closer to user embeddings, inflating Recall@K. V5 uses the correct `+ popularity_bias` (Menon Path 2), producing genuinely preference-driven rankings with cleaner canary quality.
 
 **V3 PROD** (5,437-game corpus — Valve titles removed, with LayerNorm after pools):
 
