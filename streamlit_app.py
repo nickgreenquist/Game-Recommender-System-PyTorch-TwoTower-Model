@@ -208,7 +208,7 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
                  fs: dict, exclude_iids: set, top_n: int = 20,
                  mark_iids: set = None):
-    """Dot-product rank all corpus games with popularity bias; exclude seeds; return top-n DataFrame.
+    """Rank all corpus games by raw dot product (Menon Path 2: no inference correction).
     mark_iids: item IDs to include but label '  ◀ seed' in the Title column.
     """
     import pandas as pd
@@ -612,9 +612,9 @@ learns to align user taste with item identity through training.
 - **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools. Never a prediction target.
 - **Loss:** Full softmax cross-entropy over the entire ~5,437-game corpus every step
 - **Optimizer:** Adam, lr=0.001, eps=1e-6, CosineAnnealingLR (eta_min=1e-4)
-- **Popularity bias:** alpha=0.4 × log1p(count) at training; 2× multiplier applied at inference
+- **Popularity bias:** alpha=0.4 × log1p(count) **added** at training (Menon et al. 2021, Path 2); raw dot products at inference — no correction needed
 - **Gradient clipping:** max_norm=1.0
-- **Batch size:** 512, temperature=0.1 (pure hyperparameter for full softmax; PROD V4 used 0.000977 = 0.5/512)
+- **Batch size:** 512, temperature=0.1 (pure hyperparameter for full softmax)
 - **Steps:** 50,000
 - **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (55k train users)
 """)
@@ -626,20 +626,33 @@ learns to align user taste with item identity through training.
             "Shuffled history — no release-date ordering."
         )
 
-        st.markdown("**V4 PROD** — corpus: 5,437 games (Valve titles removed, no LayerNorm after pools)")
+        st.markdown("**V5 PROD** — corpus: 5,437 games (Valve titles removed, no LayerNorm, correct Menon Path 2)")
         st.markdown("""
 | K | Recall@K | NDCG@K |
 |---|---|---|
-| 1 | 0.0286 | 0.0286 |
-| 5 | 0.0888 | 0.0586 |
-| 10 | 0.1422 | 0.0757 |
-| 20 | 0.2293 | 0.0976 |
-| 50 | 0.3949 | 0.1303 |
+| 1 | 0.0226 | 0.0226 |
+| 5 | 0.0741 | 0.0481 |
+| 10 | 0.1253 | 0.0645 |
+| 20 | 0.2059 | 0.0848 |
+| 50 | 0.3673 | 0.1166 |
 
-MRR: **0.0710** (random: 0.0017, +42×)
+MRR: **0.0611** (random: 0.0017, +36×)
 """)
 
-        st.markdown("**V3 PROD** — corpus: 5,437 games (Valve titles removed, with LayerNorm after pools)")
+        st.markdown("**V4** — corpus: 5,437 games (Valve titles removed, no LayerNorm, incorrect Menon sign)")
+        st.markdown("""
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0294 | 0.0294 |
+| 5 | 0.0882 | 0.0589 |
+| 10 | 0.1430 | 0.0765 |
+| 20 | 0.2280 | 0.0978 |
+| 50 | 0.3913 | 0.1300 |
+
+MRR: **0.0715** (random: 0.0017, +42×)
+""")
+
+        st.markdown("**V3** — corpus: 5,437 games (Valve titles removed, with LayerNorm after pools)")
         st.markdown("""
 | K | Recall@K | NDCG@K |
 |---|---|---|
@@ -652,7 +665,7 @@ MRR: **0.0710** (random: 0.0017, +42×)
 MRR: **0.0706** (random: 0.0017, +41×)
 """)
 
-        st.markdown("**V2 PROD** — corpus: 5,442 games (Valve titles included)")
+        st.markdown("**V2** — corpus: 5,442 games (Valve titles included)")
         st.markdown("""
 | K | Recall@K | NDCG@K |
 |---|---|---|
@@ -666,11 +679,12 @@ MRR: **0.0875** (random: 0.0017, +51×)
 """)
 
         st.markdown(
+            "**Why V5 metrics are lower than V4:** V4 was trained with the popularity bias *subtracted*, which caused "
+            "the model to compensate by pushing popular item embeddings closer to all user embeddings — inflating Recall@K "
+            "for popular targets. V5 uses the correct Menon Path 2 formula (bias *added* at training, raw dot products at "
+            "inference), producing genuinely preference-driven rankings with cleaner per-genre quality. "
             "**Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) "
-            "appeared in nearly every val user's history and were trivially easy prediction targets — any model ranks them "
-            "top-5 for most users, inflating V2 Recall@K. Removing them makes the eval strictly harder: every remaining "
-            "target requires genuine taste modeling. V4 improves on V3 by removing non-standard LayerNorm after sum-pooling, "
-            "consistent with YouTube DNN and industry practice."
+            "were trivially easy prediction targets — removing them makes every target require genuine taste modeling."
         )
 
         st.header("Limitations")
