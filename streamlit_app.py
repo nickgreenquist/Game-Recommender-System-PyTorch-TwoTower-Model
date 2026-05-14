@@ -26,7 +26,9 @@ from src.model import GameRecommender
 _FAV_WEIGHT      = 10.0   # simulated log-hours weight for explicitly liked games
 _ANCHOR_WEIGHT   =  2.0   # simulated log-hours weight for tag-anchor games
 _ANCHORS_PER_TAG =  5
-_COVER_ROW_HEIGHT = 160   # px — Steam header.jpg is landscape (460×215)
+_COVER_COLS      =  5     # columns in the Steam cover grid
+_PAGE_SIZE       = 20     # games per page
+_TOTAL_RESULTS   = 60     # total games to fetch (3 pages)
 
 _NON_GAME_GENRES = {
     'Utilities', 'Design & Illustration', 'Animation & Modeling',
@@ -107,20 +109,52 @@ def _game_meta(item_id: str, fs: dict) -> dict:
     }
 
 
-def _render_results(df, extra_col: str = None) -> None:
-    cols = ['Cover', 'Title', 'Developer', 'Year', 'Genres', 'Top Tags']
-    if extra_col and extra_col in df.columns:
-        cols.append(extra_col)
-    st.dataframe(
-        df[cols],
-        use_container_width=True,
-        hide_index=True,
-        row_height=_COVER_ROW_HEIGHT,
-        height=_COVER_ROW_HEIGHT * min(len(df), 20) + 38,
-        column_config={
-            'Cover': st.column_config.ImageColumn('Cover', width='large'),
-        },
-    )
+# ── Paginated results grid ────────────────────────────────────────────────────
+
+def _store_results(df, result_key: str) -> None:
+    """Save a results DataFrame to session state and reset to page 0."""
+    st.session_state[f'{result_key}_df']   = df
+    st.session_state[f'{result_key}_page'] = 0
+
+
+def _show_results(result_key: str) -> None:
+    """Render the current page of stored results with Prev / Next navigation."""
+    df = st.session_state.get(f'{result_key}_df')
+    if df is None or df.empty:
+        return
+
+    page        = st.session_state.get(f'{result_key}_page', 0)
+    total_pages = max(1, (len(df) + _PAGE_SIZE - 1) // _PAGE_SIZE)
+    page_df     = df.iloc[page * _PAGE_SIZE:(page + 1) * _PAGE_SIZE]
+
+    titles = page_df['Title'].tolist()
+    covers = page_df['Cover'].tolist()
+    devs   = page_df['Developer'].tolist() if 'Developer' in page_df.columns else [''] * len(titles)
+    years  = page_df['Year'].tolist()      if 'Year'      in page_df.columns else [''] * len(titles)
+
+    for row_start in range(0, len(titles), _COVER_COLS):
+        s = slice(row_start, row_start + _COVER_COLS)
+        cols = st.columns(_COVER_COLS)
+        for col, title, cover_url, dev, year in zip(cols, titles[s], covers[s], devs[s], years[s]):
+            with col:
+                st.image(cover_url, use_container_width=True)
+                st.caption(title)
+                meta = ' · '.join(str(x) for x in [dev, year] if x)
+                if meta:
+                    st.caption(meta)
+
+    if total_pages > 1:
+        _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
+        if prev_col.button('← Prev', disabled=(page == 0), key=f'{result_key}_prev'):
+            st.session_state[f'{result_key}_page'] = page - 1
+            st.rerun()
+        info_col.markdown(
+            f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+        if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{result_key}_next'):
+            st.session_state[f'{result_key}_page'] = page + 1
+            st.rerun()
 
 
 # ── Tag anchor helpers ────────────────────────────────────────────────────────
@@ -206,7 +240,7 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
 
 
 def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
-                 fs: dict, exclude_iids: set, top_n: int = 20,
+                 fs: dict, exclude_iids: set, top_n: int = _TOTAL_RESULTS,
                  mark_iids: set = None):
     """Rank all corpus games by raw dot product (Menon Path 2: no inference correction).
     mark_iids: item IDs to include but label '  ◀ seed' in the Title column.
@@ -215,8 +249,6 @@ def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
     mark_iids  = mark_iids or set()
     raw_scores = (all_embs @ user_emb.T).squeeze(-1)
 
-    # Apply popularity bias — same formula as training and canary inference:
-    # training: (u·v)/temp - bias  →  inference ranking: u·v - temp*bias
     cfg   = fs.get('model_config', {})
     alpha = cfg.get('popularity_alpha', 0.0)
     if alpha > 0 and 'game_interaction_counts' in fs:
@@ -224,8 +256,8 @@ def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
         if isinstance(counts, np.ndarray):
             counts = torch.from_numpy(counts)
         temperature = cfg.get('temperature', 0.1)
-
         raw_scores  = raw_scores - temperature * (alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts.float())
+
     rows = []
     for idx in raw_scores.argsort(descending=True).tolist():
         iid = all_ids[idx]
@@ -251,6 +283,8 @@ def tab_recommend(model, fs, all_ids, all_embs):
     if st.session_state.pop('_clear_rec', False):
         for key in ('rec_liked', 'rec_tags'):
             st.session_state[key] = []
+        for key in ('rec_df', 'rec_page', 'rec_anchor_caption'):
+            st.session_state.pop(key, None)
 
     all_titles = fs['popularity_ordered_titles']
     liked_titles = st.multiselect(
@@ -279,20 +313,26 @@ def tab_recommend(model, fs, all_ids, all_embs):
         anchor_iids = []
         if selected_tags:
             anchor_iids = _get_tag_anchors(fs, selected_tags, exclude=set(liked_titles))
-            if anchor_iids:
-                anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
-                st.caption("Tag anchors: " + " · ".join(anchor_names[:12]))
 
         if not liked_iids and not anchor_iids:
             st.warning("Select at least one game or tag.")
-            return
+        else:
+            with torch.no_grad():
+                user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
+            exclude_iids = set(liked_iids) | set(anchor_iids)
+            df = _score_games(user_emb, all_ids, all_embs, fs, exclude_iids)
+            _store_results(df, 'rec')
+            if anchor_iids:
+                anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
+                st.session_state['rec_anchor_caption'] = "Tag anchors: " + " · ".join(anchor_names[:12])
+            else:
+                st.session_state.pop('rec_anchor_caption', None)
 
-        with torch.no_grad():
-            user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
-
-        exclude_iids = set(liked_iids) | set(anchor_iids)
-        df = _score_games(user_emb, all_ids, all_embs, fs, exclude_iids)
-        _render_results(df)
+    if 'rec_df' in st.session_state:
+        caption = st.session_state.get('rec_anchor_caption')
+        if caption:
+            st.caption(caption)
+    _show_results('rec')
 
 
 # ── Tab: Similar ──────────────────────────────────────────────────────────────
@@ -304,8 +344,9 @@ def tab_similar(be, fs, all_ids, all_norm):
         "its genre, tag, game-ID, developer, year, and price towers. "
         "This tab ranks all games by cosine similarity to your selected seed."
     )
-    all_titles  = fs['popularity_ordered_titles']
-    selections  = st.multiselect(
+    all_titles   = fs['popularity_ordered_titles']
+    title_to_iid = fs['title_to_item_id']
+    selections   = st.multiselect(
         "Game(s) to find similar titles for",
         all_titles, key='sim_title', max_selections=10,
     )
@@ -313,32 +354,35 @@ def tab_similar(be, fs, all_ids, all_norm):
     if st.button("Find Similar Games"):
         if not selections:
             st.warning("Select at least one game.")
-            return
-
-        title_to_iid = fs['title_to_item_id']
-        for title in selections:
-            iid = title_to_iid.get(title)
-            if iid not in be:
-                st.error(f"'{title}' not in corpus.")
-                continue
-
-            with torch.no_grad():
-                seed_norm = F.normalize(be[iid]['GAME_EMBEDDING_COMBINED'], dim=1)
-                sims      = (all_norm @ seed_norm.T).squeeze(-1)
-
-            rows = []
-            for idx in sims.argsort(descending=True).tolist():
-                candidate = all_ids[idx]
-                if candidate == iid:
+        else:
+            for old_title in st.session_state.get('sim_active_titles', []):
+                st.session_state.pop(f'sim_{old_title}_df', None)
+                st.session_state.pop(f'sim_{old_title}_page', None)
+            active_titles = []
+            for title in selections:
+                iid = title_to_iid.get(title)
+                if iid not in be:
+                    st.error(f"'{title}' not in corpus.")
                     continue
-                row = _game_meta(candidate, fs)
-                row['Score'] = f"{sims[idx].item():.3f}"
-                rows.append(row)
-                if len(rows) >= 20:
-                    break
+                with torch.no_grad():
+                    seed_norm = F.normalize(be[iid]['GAME_EMBEDDING_COMBINED'], dim=1)
+                    sims      = (all_norm @ seed_norm.T).squeeze(-1)
+                rows = []
+                for idx in sims.argsort(descending=True).tolist():
+                    candidate = all_ids[idx]
+                    if candidate == iid:
+                        continue
+                    rows.append(_game_meta(candidate, fs))
+                    if len(rows) >= _TOTAL_RESULTS:
+                        break
+                _store_results(pd.DataFrame(rows), f'sim_{title}')
+                active_titles.append(title)
+            st.session_state['sim_active_titles'] = active_titles
 
+    for title in selections:
+        if f'sim_{title}_df' in st.session_state:
             st.subheader(f"Similar to: {title}")
-            _render_results(pd.DataFrame(rows), extra_col='Score')
+            _show_results(f'sim_{title}')
 
 
 # ── Tab: Explore Genres ───────────────────────────────────────────────────────
@@ -358,27 +402,23 @@ def tab_explore_genres(model, be, fs, all_ids, all_norm_genre):
     if st.button("Explore", key='btn_genre'):
         if not selected_genres:
             st.warning("Select at least one genre.")
-            return
+        else:
+            ctx = [0.0] * fs['n_genres']
+            for g in selected_genres:
+                ctx[fs['genre_to_i'][g]] = 1.0
+            with torch.no_grad():
+                query = model.item_genre_tower(torch.tensor([ctx])).view(-1)
+                query_norm = F.normalize(query.unsqueeze(0), dim=1)
+                sims = (all_norm_genre @ query_norm.T).squeeze(-1)
+            rows = []
+            for idx in sims.argsort(descending=True).tolist():
+                iid = all_ids[idx]
+                rows.append(_game_meta(iid, fs))
+                if len(rows) >= _TOTAL_RESULTS:
+                    break
+            _store_results(pd.DataFrame(rows), 'genres')
 
-        ctx = [0.0] * fs['n_genres']
-        for g in selected_genres:
-            ctx[fs['genre_to_i'][g]] = 1.0
-
-        with torch.no_grad():
-            query = model.item_genre_tower(torch.tensor([ctx])).view(-1)
-            query_norm = F.normalize(query.unsqueeze(0), dim=1)
-            sims = (all_norm_genre @ query_norm.T).squeeze(-1)
-
-        rows = []
-        for idx in sims.argsort(descending=True).tolist():
-            iid = all_ids[idx]
-            row = _game_meta(iid, fs)
-            row['Score'] = f"{sims[idx].item():.4f}"
-            rows.append(row)
-            if len(rows) >= 20:
-                break
-
-        _render_results(pd.DataFrame(rows), extra_col='Score')
+    _show_results('genres')
 
 
 # ── Tab: Explore Tags ─────────────────────────────────────────────────────────
@@ -399,65 +439,65 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
     if st.button("Explore", key='btn_tag'):
         if not selected_tags:
             st.warning("Select at least one tag.")
-            return
+        else:
+            tag_mat  = fs['game_tag_matrix'][:fs['n_items']]
+            tag_to_i = fs['tag_to_i']
+            item_ids = fs['item_ids']
+            item_to_idx = fs['item_to_idx']
 
-        tag_mat  = fs['game_tag_matrix'][:fs['n_items']]
-        tag_to_i = fs['tag_to_i']
-        item_ids = fs['item_ids']
-        item_to_idx = fs['item_to_idx']
+            anchor_tag_triples = []   # (tag, iid, title)
+            seen_titles = set()
+            for tag in selected_tags:
+                if tag not in tag_to_i:
+                    continue
+                tag_idx = tag_to_i[tag]
+                sorted_iids = sorted(
+                    item_ids,
+                    key=lambda iid: float(tag_mat[item_to_idx[iid], tag_idx]),
+                    reverse=True,
+                )
+                count = 0
+                for iid in sorted_iids:
+                    if count >= _ANCHORS_PER_TAG:
+                        break
+                    title = fs['item_id_to_title'][iid]
+                    if title not in seen_titles:
+                        anchor_tag_triples.append((tag, iid, title))
+                        seen_titles.add(title)
+                        count += 1
 
-        anchor_tag_triples = []   # (tag, iid, title)
-        seen_titles = set()
-        for tag in selected_tags:
-            if tag not in tag_to_i:
-                continue
-            tag_idx = tag_to_i[tag]
-            sorted_iids = sorted(
-                item_ids,
-                key=lambda iid: float(tag_mat[item_to_idx[iid], tag_idx]),
-                reverse=True,
-            )
-            count = 0
-            for iid in sorted_iids:
-                if count >= _ANCHORS_PER_TAG:
-                    break
-                title = fs['item_id_to_title'][iid]
-                if title not in seen_titles:
-                    anchor_tag_triples.append((tag, iid, title))
-                    seen_titles.add(title)
-                    count += 1
+            if not anchor_tag_triples:
+                st.warning("No tags matched the vocabulary.")
+            else:
+                anchor_iids = [iid for _, iid, _ in anchor_tag_triples]
+                anchor_set  = set(anchor_iids)
+                with torch.no_grad():
+                    query_emb  = torch.stack([
+                        be[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchor_iids
+                    ]).mean(dim=0)
+                    query_norm = F.normalize(query_emb.unsqueeze(0), dim=1)
+                    sims       = (all_norm_tag @ query_norm.T).squeeze(-1)
 
-        if not anchor_tag_triples:
-            st.warning("No tags matched the vocabulary.")
-            return
+                rows = []
+                for idx in sims.argsort(descending=True).tolist():
+                    iid = all_ids[idx]
+                    row = _game_meta(iid, fs)
+                    if iid in anchor_set:
+                        row['Title'] = row['Title'] + '  ◀ anchor'
+                    rows.append(row)
+                    if len(rows) >= _TOTAL_RESULTS:
+                        break
+                _store_results(pd.DataFrame(rows), 'tags')
+                st.session_state['tags_anchor_caption'] = (
+                    "Tag anchors — "
+                    + " · ".join(f"{tag}: {title}" for tag, _, title in anchor_tag_triples)
+                )
 
-        anchor_iids = [iid for _, iid, _ in anchor_tag_triples]
-        anchor_set  = set(anchor_iids)
-
-        with torch.no_grad():
-            query_emb  = torch.stack([
-                be[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchor_iids
-            ]).mean(dim=0)
-            query_norm = F.normalize(query_emb.unsqueeze(0), dim=1)
-            sims       = (all_norm_tag @ query_norm.T).squeeze(-1)
-
-        st.caption(
-            "Tag anchors — "
-            + " · ".join(f"{tag}: {title}" for tag, _, title in anchor_tag_triples)
-        )
-
-        rows = []
-        for idx in sims.argsort(descending=True).tolist():
-            iid = all_ids[idx]
-            row = _game_meta(iid, fs)
-            if iid in anchor_set:
-                row['Title'] = row['Title'] + '  ◀ anchor'
-            row['Score'] = f"{sims[idx].item():.4f}"
-            rows.append(row)
-            if len(rows) >= 20:
-                break
-
-        _render_results(pd.DataFrame(rows), extra_col='Score')
+    if 'tags_df' in st.session_state:
+        caption = st.session_state.get('tags_anchor_caption')
+        if caption:
+            st.caption(caption)
+    _show_results('tags')
 
 
 # ── Tab: Examples (canary profiles) ──────────────────────────────────────────
@@ -474,11 +514,11 @@ def tab_examples(model, fs, all_ids, all_embs):
     )
 
     if not selected:
+        st.session_state.pop('examples_profile', None)
         return
 
-    fav_titles = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
-    tag_names  = USER_TYPE_TO_TAGS.get(selected, [])
-
+    fav_titles   = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
+    tag_names    = USER_TYPE_TO_TAGS.get(selected, [])
     title_to_iid = fs['title_to_item_id']
 
     missing = [t for t in fav_titles if t not in title_to_iid]
@@ -488,12 +528,14 @@ def tab_examples(model, fs, all_ids, all_embs):
     liked_iids  = [title_to_iid[t] for t in fav_titles if t in title_to_iid]
     anchor_iids = _get_tag_anchors(fs, tag_names, exclude=set(fav_titles))
 
-    with torch.no_grad():
-        user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, anchor_in_liked=False)
-
-    df = _score_games(user_emb, all_ids, all_embs, fs,
-                      exclude_iids=set(liked_iids),
-                      mark_iids=set(anchor_iids))
+    if st.session_state.get('examples_profile') != selected:
+        with torch.no_grad():
+            user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, anchor_in_liked=False)
+        df = _score_games(user_emb, all_ids, all_embs, fs,
+                          exclude_iids=set(liked_iids),
+                          mark_iids=set(anchor_iids))
+        _store_results(df, 'examples')
+        st.session_state['examples_profile'] = selected
 
     st.subheader(f"Recommendations for: {selected}")
     if fav_titles:
@@ -501,7 +543,7 @@ def tab_examples(model, fs, all_ids, all_embs):
     if anchor_iids:
         anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
         st.caption("Tag anchors: " + ", ".join(anchor_names))
-    _render_results(df)
+    _show_results('examples')
 
 
 # ── Tab: About ───────────────────────────────────────────────────────────────
