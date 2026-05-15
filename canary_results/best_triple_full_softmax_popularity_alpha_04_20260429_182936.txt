@@ -1,0 +1,164 @@
+── Canary user evaluation ──
+  popularity_alpha=0.4 (applied)  temperature=0.000977
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Tags: Action RPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Numen: Contest of Heroes, Victor Vran ARPG, Grim Dawn, Hazen: The Dark Whispers, BorderZone
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+The Witcher 2: Assassins of Kings Enhanced Edition  Counter-Strike: Global Offensive
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Pillars of Eternity
+DARK SOULS™: Prepare To Die™ Edition                Left 4 Dead 2
+Divinity: Original Sin (Classic)                    Baldur's Gate: Enhanced Edition
+Fallout: New Vegas                                  The Witcher: Enhanced Edition Director's Cut
+Mass Effect 2                                       Fallout 4
+                                                    Baldur's Gate II: Enhanced Edition
+                                                    Wasteland 2: Director's Cut
+                                                    XCOM: Enemy Unknown
+                                                    Borderlands 2
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Tags: JRPG
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: I am Setsuna, The Legend of Heroes: Trails in the Sky SC, Grandia® II Anniversary Edition, Agarest: Generations of War, FINAL FANTASY III
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Mugen Souls                                         Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテューヌRe;Birth1 / 超次次元遊戲戰機少女重生1
+OH! RPG!                                            Left 4 Dead 2
+Ys VI: The Ark of Napishtim                         Hyperdimension Neptunia Re;Birth2: Sisters Generation / 超次次元ゲイム ネプテューヌRe;Birth2
+Wild Season                                         Fairy Fencer F
+Disgaea PC / 魔界戦記ディスガイア PC                          Terraria
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Hyperdimension Neptunia Re;Birth3 V Generation / 神次次元ゲイム ネプテューヌRe;Birth3 V CENTURY
+FINAL FANTASY® XIII                                 Valkyria Chronicles™
+                                                    Hyperdimension Neptunia U: Action Unleashed
+                                                    Portal 2
+                                                    Garry's Mod
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Tags: FPS
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: STAR WARS™ - Dark Forces, Singularity™, Quake Live™, Far Cry 3 - Blood Dragon, Painkiller: Resurrection
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+QUAKE II                                            Left 4 Dead 2
+Unreal Tournament 2004: Editor's Choice Edition     Counter-Strike: Global Offensive
+Quake IV                                            QUAKE Mission Pack 2: Dissolution of Eternity
+Final DOOM                                          DOOM 3 Resurrection of Evil
+Serious Sam HD: The First Encounter                 HeXen II
+Quake III Arena                                     Counter-Strike: Source
+Doom 3: BFG Edition                                 Unreal Tournament 3 Black
+                                                    Unreal Gold
+                                                    Left 4 Dead
+                                                    Half-Life 2: Episode Two
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Tags: 4X
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Galactic Civilizations® II: Ultimate Edition, StarDrive, Star Ruler 2, Galactic Civilizations® I: Ultimate Edition, Space Empires IV Deluxe
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Sid Meier's Civilization® V                         Civilization IV: Beyond the Sword
+Civilization IV®: Warlords                          Hearts of Iron III
+Sid Meier's Civilization IV: Colonization           Sid Meier's Civilization® IV
+Total War™: ROME II - Emperor Edition               Empire: Total War™
+                                                    Europa Universalis IV
+                                                    Victoria II
+                                                    Left 4 Dead 2
+                                                    Crusader Kings II
+                                                    Napoleon: Total War™
+                                                    Medieval II: Total War™
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Hotline Miami 2: Wrong Number Digital Comic, Typefighters (Steam Edition), The Art of Playing, Over The Void, Super Game Jam
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Terraria                                            Unturned
+FTL: Faster Than Light                              Nuclear Throne
+The Binding of Isaac: Rebirth                       Crypt of the NecroDancer
+Rogue Legacy                                        The Binding of Isaac
+Spelunky                                            Undertale
+                                                    Enter the Gungeon
+                                                    Starbound
+                                                    Risk of Rain
+                                                    Super Meat Boy
+                                                    Left 4 Dead 2
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Racing Lover  |  Tags: Racing
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Sprint Cars Road to Knoxville, Xpand Rally Xtreme, Truck Racer, Ignite, RACE - The WTCC Game
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+F1 2012™                                            Counter-Strike: Global Offensive
+Need For Speed: Hot Pursuit                         Left 4 Dead 2
+Test Drive Unlimited 2                              Crash Time 3
+Ford Street Racing                                  RACE 07
+Test Drive: Ferrari Racing Legends                  Counter-Strike: Source
+                                                    Counter-Strike
+                                                    Terraria
+                                                    Portal 2
+                                                    Portal
+                                                    FlatOut: Ultimate Carnage
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Tags: Fighting
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Mortal Kombat: Legacy, THE KING OF FIGHTERS 2002 UNLIMITED MATCH, THE KING OF FIGHTERS '98 ULTIMATE MATCH FINAL EDITION, Guilty Gear Isuka, GUILTY GEAR XX ACCENT CORE PLUS R
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Street Fighter X Tekken                             Counter-Strike: Global Offensive
+Ultra Street Fighter® IV                            Left 4 Dead 2
+Injustice: Gods Among Us Ultimate Edition           Street Fighter V
+Divekick                                            METAL SLUG 3
+Street Fighter® IV                                  GUILTY GEAR Xrd -SIGN-
+DEAD OR ALIVE 5 Last Round: Core Fighters           BlazBlue: Continuum Shift Extend
+THE KING OF FIGHTERS XIII STEAM EDITION             Yatagarasu Attack on Cataclysm
+                                                    Skullgirls
+                                                    METAL SLUG X
+                                                    METAL SLUG
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Survival Lover  |  Tags: Survival
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Vortex: The Gateway, Project Explore, Miasmata, FarSky, UnReal World
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Unturned                                            Counter-Strike: Global Offensive
+Terraria                                            Garry's Mod
+Rust                                                DayZ
+ARK: Survival Evolved                               Starbound
+                                                    Robocraft
+                                                    Don't Starve Together
+                                                    Arma 3
+                                                    Arma 2: Operation Arrowhead
+                                                    The Forest
+                                                    Hurtworld
+
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Management Lover  |  Tags: Management
+════════════════════════════════════════════════════════════════════════════════════════════════════
+Anchors: Mad Games Tycoon, Big Pharma, Ride! Carnival Tycoon, Hotel Giant 2, Game Corp DX
+────────────────────────────────────────────────────────────────────────────────────────────────────
+Favorite Games                                      Recommendations
+----------------------------------------------------------------------------------------------------
+Cities: Skylines                                    Train Simulator
+Kerbal Space Program                                RollerCoaster Tycoon® 3: Platinum
+Prison Architect                                    Left 4 Dead 2
+Game Dev Tycoon                                     Cities in Motion
+Euro Truck Simulator 2                              SimCity™ 4 Deluxe Edition
+                                                    Train Fever
+                                                    Tropico 5
+                                                    Banished
+                                                    Counter-Strike: Global Offensive
+                                                    Farming Simulator 15

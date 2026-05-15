@@ -1,0 +1,19 @@
+── Offline Evaluation  (50,044 rollback examples, 2,000 val users) ────────────────────
+Checkpoint: saved_models/best_triple_full_softmax_popularity_alpha_4_20260429_190113.pth
+Corpus: 5,442 games
+
+     K    Recall@K   Hit Rate@K    NDCG@K
+─────────────────────────────────────────
+     1      0.0002       0.0002    0.0002  ← random
+     5      0.0009       0.0009    0.0005  ← random
+    10      0.0018       0.0018    0.0008  ← random
+    20      0.0037       0.0037    0.0013  ← random
+    50      0.0092       0.0092    0.0024  ← random
+·········································
+     1      0.0403       0.0403    0.0403  ← model
+     5      0.1178       0.1178    0.0797  ← model
+    10      0.1767       0.1767    0.0986  ← model
+    20      0.2633       0.2633    0.1203  ← model
+    50      0.4270       0.4270    0.1527  ← model
+─────────────────────────────────────────
+MRR  random: 0.0017   model: 0.0899  (+0.0882)
