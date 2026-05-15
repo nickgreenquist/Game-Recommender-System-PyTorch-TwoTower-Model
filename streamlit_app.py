@@ -18,7 +18,6 @@ from src.evaluate import (
     USER_TYPE_TO_TAGS,
     SIMULATED_FAV_LOG_HOURS,
     SIMULATED_ANCHOR_LOG_HOURS,
-    POPULARITY_ALPHA_INFERENCE_MULTIPLE,
 )
 
 from src.model import GameRecommender
@@ -248,15 +247,6 @@ def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
     import pandas as pd
     mark_iids  = mark_iids or set()
     raw_scores = (all_embs @ user_emb.T).squeeze(-1)
-
-    cfg   = fs.get('model_config', {})
-    alpha = cfg.get('popularity_alpha', 0.0)
-    if alpha > 0 and 'game_interaction_counts' in fs:
-        counts = fs['game_interaction_counts']
-        if isinstance(counts, np.ndarray):
-            counts = torch.from_numpy(counts)
-        temperature = cfg.get('temperature', 0.1)
-        raw_scores  = raw_scores - temperature * (alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts.float())
 
     rows = []
     for idx in raw_scores.argsort(descending=True).tolist():

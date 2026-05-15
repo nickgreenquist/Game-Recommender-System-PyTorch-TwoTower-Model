@@ -115,7 +115,6 @@ SIMULATED_FAV_LOG_HOURS             = 10.0   # weight for favorite games
 SIMULATED_ANCHOR_LOG_HOURS          =  2.0   # weight for tag-based anchor games
 SIMULATED_DISLIKE_LOG_HOURS         = 0.5    # weight for disliked games
 ANCHORS_PER_TAG                     =  5
-POPULARITY_ALPHA_INFERENCE_MULTIPLE =  0.0   # Menon Path 2: training adds bias, inference uses raw scores — no correction needed
 
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
@@ -272,20 +271,9 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
 
 
 def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor, all_ids: list,
-                    popularity_alpha: float = 0.0, temperature: float = None, top_n: int = 10) -> None:
+                    top_n: int = 10) -> None:
     model.eval()
     device = next(model.parameters()).device
-
-    # Scale bias to dot-product space. Training scores are (u·v)/temp - bias;
-    # inference ranking is equivalent to u·v - temp*bias (multiply through by temp).
-    if temperature is None:
-        temperature = 0.1
-    if popularity_alpha > 0 and 'game_interaction_counts' in fs:
-        counts = torch.from_numpy(fs['game_interaction_counts']).to(device)
-
-        pop_bias = temperature * (popularity_alpha * POPULARITY_ALPHA_INFERENCE_MULTIPLE) * torch.log1p(counts)  # (n_items,)
-    else:
-        pop_bias = None
 
     with torch.no_grad():
         for user_type in USER_TYPE_TO_FAVORITE_GAMES:
@@ -297,8 +285,6 @@ def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor
             exclude_set   = set(fav_titles) | set(anchor_titles)
 
             raw_scores = (all_combined @ user_emb.T).squeeze(-1)
-            if pop_bias is not None:
-                raw_scores = raw_scores - pop_bias
             scores = {all_ids[i]: raw_scores[i].item() for i in range(len(all_ids))}
 
             recs = []
@@ -504,9 +490,6 @@ def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str
         return
     fs = load_features(data_dir, version)
     model, game_embeddings, all_ids, all_combined, all_norm, all_norm_id, all_norm_tag, all_norm_genre = _load_model_and_embeddings(cp, fs)
-    cp_config = load_config_for_checkpoint(cp)
-    alpha = cp_config.get('popularity_alpha', 0.0)
-    temperature = cp_config.get('temperature', 0.1)
 
     real_stdout = sys.stdout
     buf = io.StringIO()
@@ -517,9 +500,8 @@ def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str
 
     print()  # terminal-only separator before the tee starts capturing
     with contextlib.redirect_stdout(_Tee()):
-        print("── Canary user evaluation ──")
-        print(f"  popularity_alpha={alpha} ({'applied' if alpha > 0 else 'disabled'})  temperature={temperature:.6f}")
-        run_canary_eval(model, fs, all_combined, all_ids, popularity_alpha=alpha, temperature=temperature)
+        print(f"── Canary user evaluation ──  (checkpoint: {os.path.basename(cp)})")
+        run_canary_eval(model, fs, all_combined, all_ids)
 
     os.makedirs('canary_results', exist_ok=True)
     stem     = os.path.splitext(os.path.basename(cp))[0]
