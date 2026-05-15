@@ -40,7 +40,7 @@ Unlike CG (separate user/item towers + late F.normalize'd dot product), the rank
 
 ### No CG coupling at runtime
 
-The ranker owns its own copies of every parameter (its own `item_embedding_lookup`, developer tower, tag tower, etc.). It just *replicates the architecture* of each CG sub-tower. **Warm-starting weights from CG at init is encouraged** — it's a one-time copy at construction; the tensors then live entirely in the ranker `state_dict` and train freely. What is NOT allowed: shared `nn.Module` objects, frozen CG tensors referenced at runtime, cross-graph references after construction. The ranker's only runtime connection to CG is (1) the candidate indices from precompute, (2) precomputed features in the parquet, (3) static feature data both models read from disk.
+The ranker owns its own copies of every parameter (its own `item_id_lookup`, `developer_lookup`, `developer_tower`, `item_tag_tower`, etc. — see §3 warm-start map for the full list). It just *replicates the architecture* of each CG sub-tower. **Warm-starting weights from CG at init is encouraged** — it's a one-time copy at construction; the tensors then live entirely in the ranker `state_dict` and train freely. What is NOT allowed: shared `nn.Module` objects, frozen CG tensors referenced at runtime, cross-graph references after construction. The ranker's only runtime connection to CG is (1) the candidate indices from precompute, (2) precomputed features in the parquet, (3) static feature data both models read from disk.
 
 ### Fair-α comparison (READ THIS)
 
@@ -68,32 +68,51 @@ Do not conflate the two. The throwaway α=0 CG is *not* a deployment candidate �
 
 ## 3. Architecture
 
+All dims and tower shapes below match the current `src/model.py` (V5) and `src/train.get_config()`. Confirmed values: `tag_embedding_size=32`, `user_genre_embedding_size=32`, `user_tag_embedding_size=32`, `item_genre_embedding_size=8`, `developer_embedding_size=12`, `item_year_embedding_size=8`, `price_embedding_size=4`, `item_id_embedding_size=32`. Tower hidden dims (hardcoded inside `src/model.py`): `tag_hidden=128` for `item_tag_tower`, `tag_ctx_hidden=256` for `user_tag_tower`, `genre_hidden=128` for `user_genre_tower`.
+
+### Per-game static buffers (registered on the ranker)
+
+The ranker owns its own buffers built from `FeatureStore` at construction (same pattern as movies' `year_buffer`). All non-persistent — rebuilt on load from `feature_store.pt`. Indexing by `cand_idx` is how `item_embedding()` gets per-game metadata at score time, so the call signature is simply `item_embedding(cand_idx)` (no separate `target_year_idx` / `target_dev_idx` / `target_price` args — matches movies' ranker idiom):
+
+```python
+self.register_buffer('game_year_idx',     year_idx,     persistent=False)  # (n_games+1,) int64
+self.register_buffer('game_dev_idx',      dev_idx,      persistent=False)  # (n_games+1,) int64
+self.register_buffer('game_price_idx',    price_idx,    persistent=False)  # (n_games+1,) int64
+self.register_buffer('game_tag_matrix',   tag_matrix,   persistent=False)  # (n_games+1, n_tags)   float32 — TF-IDF
+self.register_buffer('game_genre_matrix', genre_matrix, persistent=False)  # (n_games+1, n_genres) float32 — one-hot
+```
+
+CG already registers `game_tag_matrix` and `game_genre_matrix` on the model — the ranker mirrors these exactly (same names, same dtypes) so the towers consuming them stay semantically valid after warm-start. The padding row (index `n_games`) is appended to each buffer.
+
 ### Deep concat layout (mirrors v5 CG towers)
 
 ```
-USER SIDE — mirrors v5 CG user tower:
-  pool_liked        : 32   sum(item_emb_lookup[liked_history])              [LayerNorm if CG has it; v5 does NOT — match CG]
-  pool_disliked     : 32   sum(item_emb_lookup[disliked_history])
-  pool_full         : 32   sum(item_emb_lookup[full_history])
-  pool_playtime     : 32   playtime-weighted sum(item_emb_lookup[full])
-  user_genre_emb    : 32   Linear(2 × n_genres → 32) from in-model genre context
-                            (game_genre_matrix lookup over X_hist_full)
-  user_tag_emb      : 32   Linear(n_tags → 32) from in-model tag context
-                            (game_tag_matrix lookup over X_hist_full)
-  X_user_avg_log    :  1   per-user avg log-playtime scalar (genre-debiasing input)
+USER SIDE — mirrors v5 CG user tower (no LayerNorm; v5 removed it):
+  pool_liked        : 32   sum(item_id_lookup[liked_ids])                         ← shared lookup
+  pool_disliked     : 32   sum(item_id_lookup[disliked_ids])
+  pool_full         : 32   sum(item_id_lookup[full_ids])
+  pool_playtime     : 32   playtime-weighted sum (weights pre-normalized in dataset)
+  user_genre_emb    : 32   2-layer: Linear(2*n_genres → 128) → ReLU → Linear(128 → 32) → ReLU
+                            input = in-model genre debiasing — uses game_genre_matrix[X_hist_full],
+                            X_hist_playtime_weights, X_user_avg_log (same code path as CG)
+  user_tag_emb      : 32   2-layer: Linear(n_tags → 256) → ReLU → Linear(256 → 32) → ReLU
+                            input = sum of game_tag_matrix[X_hist_full] (in-model)
+  X_user_avg_log    :  1   raw per-user avg-log-playtime scalar — see invariant 8 (parity+1)
 
 ITEM SIDE — mirrors v5 CG item tower:
-  item_id_emb       : 32   item_emb_lookup → Linear+ReLU(32 → 32)
-  item_genre_emb    :  8   Linear(n_genres → 8) from genre_onehot
-  item_tag_emb      : 32   Linear(n_tags → 32) from IDF-weighted tag vector
-  item_dev_emb      : 12   Embedding(n_developers + 1, 12)
-  year_emb          :  8   Embedding(N_year_bins, 8)
-  price_emb         :  4   Embedding(n_price_buckets, 4)
+  item_id_emb       : 32   item_id_lookup(cand_idx) → Linear(32 → 32) → ReLU       ← shared lookup
+  item_genre_emb    :  8   Linear(n_genres → 8) → ReLU
+                            input = game_genre_matrix[cand_idx]
+  item_tag_emb      : 32   2-layer: Linear(n_tags → 128) → ReLU → Linear(128 → 32) → ReLU
+                            input = game_tag_matrix[cand_idx]
+  item_dev_emb      : 12   dev_lookup(game_dev_idx[cand_idx]) → Linear(12 → 12) → ReLU
+  year_emb          :  8   year_lookup(game_year_idx[cand_idx]) → Linear(8 → 8) → ReLU
+  price_emb         :  4   price_lookup(game_price_idx[cand_idx]) → Linear(4 → 4) → ReLU
 
 TOTAL deep concat:
-  user side  = 4 × 32 + 32 + 32 + 1 = 193
+  user side  = 4×32 + 32 + 32 + 1 = 193
   item side  = 32 + 8 + 32 + 12 + 8 + 4 = 96
-  total      = 289 dims (small number — finalize after reading model.py)
+  total      = 289
 
 Deep MLP:  Linear(289 → 256) → ReLU → Linear(256 → 128) → ReLU → Linear(128 → 64) → ReLU
            → deep_out (64)
@@ -101,37 +120,86 @@ Wide:      cat(cross_features)  — bypasses MLP, direct to head
 Head:      Linear(64 + |wide| → 1) → raw logit
 ```
 
-> **Verify before coding.** Read `src/model.py` for exact dims (e.g. tag_embedding_size, developer_embedding_size, price n_buckets) and reproduce them in the ranker. The numbers above are based on CLAUDE.md and may have drifted.
+### Tower architectures (match CG exactly)
+
+CG has a mix of single-layer and 2-layer towers. Using single-Linear ranker towers where CG has 2 would silently drop the second-layer warm-start to random init — losing the bulk of CG's content-tower learning. Mirror these exact shapes:
+
+**2-layer towers** (hidden dims hardcoded in `src/model.py`):
+
+| Tower | Architecture |
+|---|---|
+| `item_tag_tower` | `Linear(n_tags → 128) → ReLU → Linear(128 → 32) → ReLU` |
+| `user_tag_tower` | `Linear(n_tags → 256) → ReLU → Linear(256 → 32) → ReLU` |
+| `user_genre_tower` | `Linear(2*n_genres → 128) → ReLU → Linear(128 → 32) → ReLU` |
+
+**1-layer towers** (`Linear → ReLU`):
+
+| Tower | Architecture |
+|---|---|
+| `item_id_tower` | `Linear(32 → 32) → ReLU` |
+| `item_genre_tower` | `Linear(n_genres → 8) → ReLU` |
+| `developer_tower` | `Linear(12 → 12) → ReLU` |
+| `year_tower` | `Linear(8 → 8) → ReLU` |
+| `price_tower` | `Linear(4 → 4) → ReLU` |
+
+Every lookup-fronted feature (id, dev, year, price) is `Embedding → Linear+ReLU` as **two separate `nn.Module`s**, not a single fused Embedding. That's how CG names them and what the warm-start map below copies.
 
 ### Implementation invariants
 
-1. **Ranker owns its own `item_embedding_lookup`** (32-dim, `nn.Embedding(n_games+1, 32)`). Shared across all 4 user pools and the item-side `item_id_emb`.
-2. **Match CG's pooling treatment exactly.** V5 CG removed LayerNorm after pools (CLAUDE.md note). The ranker must do the same — partial parity invalidates ablations.
-3. **Sub-tower init:** Xavier uniform `gain=0.1` on per-feature linears; `gain=1.0` on deep MLP + head. Embedding tables `gain=0.01`. (Same recipe as CG.)
-4. **Year is bucketed and embedded.** Bucket bins match CG.
-5. **Price is bucketed and embedded.** Bucket bins match CG (Free, <$5, $5–10, $10–20, $20–30, $30–40, $40–60, >$60, Unknown).
-6. **Developer is embedded** (single primary developer per game, index 0 = `__unknown__`).
-7. **No timestamp tower** — Steam interactions have no timestamps. Do not add one in the ranker.
+1. **Ranker owns its own `item_id_lookup`** (`nn.Embedding(n_games+1, 32, padding_idx=n_games)`). Shared across all 4 user pools and the item-side `item_id_tower`. Same shared-lookup pattern as CG.
+2. **No LayerNorm on pools.** V5 CG removed LayerNorm after pools — the ranker must do the same. Partial parity invalidates ablations.
+3. **No `F.normalize` anywhere in the ranker.** CG applies `F.normalize` at the end of each projection MLP because CG's score is cosine. The ranker scores `BCE + raw logits` and has no projection MLP at all — user_concat and item_concat go straight into the deep MLP. `F.normalize` would distort the BCE objective.
+4. **Sub-tower init:** Xavier uniform `gain=0.1` on per-feature linears; `gain=1.0` on deep MLP + head; Embedding tables `gain=0.01`. (Same recipe as CG, minus the final projection — which the ranker doesn't have.)
+5. **Year / dev / price are bucketed and embedded** — the ranker never sees raw values, only bucket indices from `game_year_idx` / `game_dev_idx` / `game_price_idx` buffers. Bucket boundaries are read from FeatureStore and must match CG's exactly (otherwise warm-started Embedding rows index the wrong buckets).
+6. **No timestamp tower.** Steam interactions have no timestamps. Do not add one in the ranker.
+7. **In-model genre context is computed inside the user-side forward pass** — same debiasing logic as CG's `user_embedding` (uses `game_genre_matrix[X_hist_full]`, `X_hist_playtime_weights`, and `X_user_avg_log`), feeding `user_genre_tower`. `X_user_avg_log` is therefore already a required user-side input — see invariant 8.
+8. **`X_user_avg_log` is parity+1.** CG uses this scalar internally for genre debiasing and never exposes it. The ranker also concatenates it as a 1-dim raw scalar into the user concat. Zero compute cost, gives the deep MLP / head a direct read of "heavy player vs light player" without having to infer it through the genre tower. This is a deliberate +1 expansion beyond strict CG parity — flag in run notes, not a bug.
+9. **Buffers built from FeatureStore, not transferred from CG.** `game_tag_matrix`, `game_genre_matrix`, and the new `game_year_idx` / `game_dev_idx` / `game_price_idx` buffers are constructed at ranker init from `feature_store.pt` (non-persistent). They must use the same vocab orderings CG used — otherwise the warm-started towers consume rows in the wrong slots.
 
 ### Warm-start mapping (init from v5 CG state_dict)
 
-| Ranker tower | CG source |
-|---|---|
-| `item_emb_lookup` (32, n_games+1) | `item_embedding_lookup.weight` |
-| `item_id_emb` Linear+ReLU(32→32) | `item_embedding_tower.*` |
-| `item_genre_emb` (n_genres→8) | `item_genre_tower.*` |
-| `item_tag_emb` (n_tags→32) | `item_tag_tower.*` |
-| `item_dev_emb` Embedding | `developer_tower.*` |
-| `year_emb` Embedding | `year_embedding_tower.*` |
-| `price_emb` Embedding | `price_embedding_tower.*` |
-| `user_genre_emb` Linear | `user_genre_tower.*` |
-| `user_tag_emb` Linear | `user_tag_tower.*` |
+Every CG parameter with a shape-equivalent home in the ranker is copied at construction. **Both** `*_lookup.weight` **and** `*_tower.0.{weight,bias}` (plus `.2.{weight,bias}` for 2-layer towers) must transfer — missing a row silently drops that component to random init.
 
-Deep MLP, head, and cross-feature weights stay random-init — no CG counterpart. Pool LayerNorms exist only if CG has them.
+**Lookups** (Embedding tables):
+
+| CG key | Ranker key |
+|---|---|
+| `item_embedding_lookup.weight` | `item_id_lookup.weight` |
+| `developer_embedding_lookup.weight` | `developer_lookup.weight` |
+| `year_embedding_lookup.weight` | `year_lookup.weight` |
+| `price_embedding_lookup.weight` | `price_lookup.weight` |
+
+**1-layer towers** (one Linear+ReLU):
+
+| CG keys | Ranker keys |
+|---|---|
+| `item_embedding_tower.0.{weight,bias}` | `item_id_tower.0.{weight,bias}` |
+| `item_genre_tower.0.{weight,bias}` | `item_genre_tower.0.{weight,bias}` |
+| `developer_tower.0.{weight,bias}` | `developer_tower.0.{weight,bias}` |
+| `year_embedding_tower.0.{weight,bias}` | `year_tower.0.{weight,bias}` |
+| `price_embedding_tower.0.{weight,bias}` | `price_tower.0.{weight,bias}` |
+
+**2-layer towers** (two Linears — copy both):
+
+| CG keys | Ranker keys |
+|---|---|
+| `item_tag_tower.0.{weight,bias}` | `item_tag_tower.0.{weight,bias}` |
+| `item_tag_tower.2.{weight,bias}` | `item_tag_tower.2.{weight,bias}` |
+| `user_tag_tower.0.{weight,bias}` | `user_tag_tower.0.{weight,bias}` |
+| `user_tag_tower.2.{weight,bias}` | `user_tag_tower.2.{weight,bias}` |
+| `user_genre_tower.0.{weight,bias}` | `user_genre_tower.0.{weight,bias}` |
+| `user_genre_tower.2.{weight,bias}` | `user_genre_tower.2.{weight,bias}` |
+
+**Not transferred** (random init in ranker):
+- Deep MLP, head, cross-feature weights — no CG counterpart.
+- `user_projection.*` and `item_projection.*` from CG — the ranker has no projection MLP (the deep MLP takes its place, and is structurally different: different input dim, no normalization, no cosine score).
+- All buffers (`game_tag_matrix`, `game_genre_matrix`, `game_year_idx`, `game_dev_idx`, `game_price_idx`) — built fresh from FeatureStore.
+
+`_warm_start_from_cg` should log transferred-vs-fallback per key; the transferred count should equal the row count of the three tables above (4 + 5 + 6 = 15 unique CG keys, expanding to 15 tensor-pair transfers). Anything short of that means a shape drift to fix before training.
 
 ### Why Wide & Deep
 
-Cross-feature scalars (genre Jaccard, developer match, etc.) get a single learned weight in the head — a direct gradient path. Without the wide bypass, those signals must compete against ~290 dims for attention in the first hidden layer and get washed out during backprop.
+Cross-feature scalars (tag cosine, genre Jaccard, developer match, etc.) get a single learned weight in the head — a direct gradient path. Without the wide bypass, those signals would have to compete against ~290 dims for attention in the first hidden layer and get washed out during backprop. Each cross feature is essentially a hand-crafted interaction the deep MLP would otherwise have to learn from scratch.
 
 ---
 
@@ -197,7 +265,18 @@ Do not modify anything in `src/` — the CG code is read-only.
 | `X_hist_full` | list[int] | padded indices, MAX_HISTORY_LEN |
 | `X_hist_playtime_weights` | list[float] | normalized weights for playtime pool, MAX_HISTORY_LEN |
 
-**Tag cosine choice:** Games tags are positional/IDF-weighted (not dense genome scores like movies). The tag tower output is a 32-dim vector — `tag_cosine = cosine(user_tag_pool_vec, item_tag_vec)` computed off the tag tower outputs, *not* off the raw tag indicator vectors. This matches CG's tag tower role.
+**Tag cosine choice:** Compute over the **raw TF-IDF tag vectors** stored in `game_tag_matrix` (the registered buffer CG already uses) — *not* off the tag tower outputs.
+
+This is the direct analog of movies' `genome_cosine`. Movies' genome scores are already dense, per-tag scores in [0, 1] — cosine over the raw vector is meaningful. Games' `game_tag_matrix` rows are TF-IDF-weighted tag vectors (`positional_weight * log(N / df)`, per `preprocess.py`) — same shape of signal: dense per-game weighted scores. Using raw TF-IDF gives a model-independent precompute (the parquet column doesn't break if the tag tower's hidden dims change) and matches the precompute idiom in `ranker/precompute.py` from movies.
+
+```
+user_tag_pool_tfidf  = playtime-weighted sum of game_tag_matrix[X_hist_full] rows
+                       (or rating-weighted to mirror movies' genome pool more directly)
+tag_cosine_label     = cosine(user_tag_pool_tfidf, game_tag_matrix[label_idx])
+tag_cosine_negs[i]   = cosine(user_tag_pool_tfidf, game_tag_matrix[neg_idxs[i]])
+```
+
+The tag tower output is still used in the deep concat (`user_tag_emb`, `item_tag_emb`) — but the wide-bypass cross feature reads from the raw matrix.
 
 **Stability concern:** seed the CG model load + rollback shuffle. Steam's no-timestamp dataset means rollback order is shuffle-determined — different shuffles produce different parquets. Use the seed CG eval uses (or fix one in `precompute.py` and document it).
 
@@ -345,4 +424,4 @@ Initialize new wide-feature weights at 0.1 — small non-zero signal without swa
 6. **`BCEWithLogitsLoss` only.** Never `BCELoss`. Never sigmoid in `forward()`.
 7. **Batch sampling is across all tuples** — not within rollback groups (avoids K-1:1 imbalance dominating gradients).
 8. **E2E ceiling always enforced** in both ranker eval and CG baseline.
-9. **Verify code against this plan before assuming it's accurate.** Dims and embedding sizes in §3 may have drifted from `src/model.py` — re-read before implementing.
+9. **§3 reflects v5 CG as of this writing.** If `src/model.py` or `src/train.get_config()` changes (tower hidden dims, embedding sizes, new sub-towers), re-derive §3 *first* before changing the ranker — partial drift will silently break warm-start.
