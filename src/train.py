@@ -39,7 +39,7 @@ def get_config() -> dict:
         # Temperature is a pure hyperparameter for full softmax — do NOT compute from batch size.
         # (0.5 / minibatch_size = 0.000977 was used in PROD V4; lower = sharper distribution)
         'temperature':      0.1,
-        'popularity_alpha': 0.4,    # logit-space adjustment; 0=off. Uses log1p(count)
+        'popularity_alpha': 0.0,    # logit-space adjustment; 0=off. Uses log1p(count)
         'training_steps':   50_000,
         'log_every':        1_000,
         'checkpoint_every': 10_000,
@@ -207,7 +207,9 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     os.makedirs(checkpoint_dir, exist_ok=True)
     run_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     best_val_loss = float('inf')
-    arch_tag  = 'triple_full_softmax_popularity_alpha'
+    alpha       = config['popularity_alpha']
+    alpha_tag   = str(alpha).replace('.', '') if alpha != int(alpha) else str(int(alpha))
+    arch_tag    = f'triple_full_softmax_popularity_alpha_{alpha_tag}'
     best_path = os.path.join(checkpoint_dir, f'best_{arch_tag}_{run_timestamp}.pth')
 
     loss_train = []

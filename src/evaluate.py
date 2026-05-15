@@ -496,6 +496,7 @@ PROBE_SIMILAR_TITLES = [
 ]
 
 def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str = 'v1') -> None:
+    import contextlib, io, sys
     from src.dataset import load_features
     cp = _resolve_checkpoint(checkpoint_path, 'saved_models')
     if cp is None:
@@ -506,9 +507,26 @@ def run_canary(data_dir: str = 'data', checkpoint_path: str = None, version: str
     cp_config = load_config_for_checkpoint(cp)
     alpha = cp_config.get('popularity_alpha', 0.0)
     temperature = cp_config.get('temperature', 0.1)
-    print("\n── Canary user evaluation ──")
-    print(f"  popularity_alpha={alpha} ({'applied' if alpha > 0 else 'disabled'})  temperature={temperature:.6f}")
-    run_canary_eval(model, fs, all_combined, all_ids, popularity_alpha=alpha, temperature=temperature)
+
+    real_stdout = sys.stdout
+    buf = io.StringIO()
+
+    class _Tee:
+        def write(self, data): real_stdout.write(data); buf.write(data)
+        def flush(self):       real_stdout.flush();     buf.flush()
+
+    print()  # terminal-only separator before the tee starts capturing
+    with contextlib.redirect_stdout(_Tee()):
+        print("── Canary user evaluation ──")
+        print(f"  popularity_alpha={alpha} ({'applied' if alpha > 0 else 'disabled'})  temperature={temperature:.6f}")
+        run_canary_eval(model, fs, all_combined, all_ids, popularity_alpha=alpha, temperature=temperature)
+
+    os.makedirs('canary_results', exist_ok=True)
+    stem     = os.path.splitext(os.path.basename(cp))[0]
+    out_path = os.path.join('canary_results', f'{stem}.txt')
+    with open(out_path, 'w') as f:
+        f.write(buf.getvalue())
+    print(f"\n  → canary saved to {out_path}")
 
 def run_probes(data_dir: str = 'data', checkpoint_path: str = None, version: str = 'v1') -> None:
     from src.dataset import load_features
