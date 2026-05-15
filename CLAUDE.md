@@ -248,6 +248,8 @@ scores = user_emb @ item_embs.T   # raw dot products — no correction needed
 
 **Current implementation uses `log1p(count)` with alpha=0.4.** Valve mega-popular titles (CS:GO, Garry's Mod, L4D2) are hard-filtered from the corpus via DENYLIST in `preprocess.py` (`{'730', '550', '620', '240', '4000'}`), so the popularity bias is only needed to suppress moderately popular games, not mega-popular ones.
 
+**Alpha trade-off — α=0 wins offline, α=0.4 wins canary.** A CG checkpoint trained with `alpha=0.0` produces materially better offline metrics (+25% Recall@1, +15% MRR vs α=0.4 — see Offline Evaluation) but materially worse canary quality on niche tastes: popular cross-genre titles leak into specialized lists (Half-Life series invading an arena-FPS canary, popular Paradox strategy invading a 4X-Civ canary, popular shooters invading a Survival canary). This is the popularity correction working as designed — α=0.4 deliberately suppresses globally popular items at training time to force the model onto preference signals, and pays for that with offline metrics that reward retrieving easy popular hits. Prod uses α=0.4 because canary quality on niche tastes is what users notice; an α=0 throwaway exists only as the offline-metrics baseline for ranker comparisons (see `ranker_implementation_plan.md`, §2 "Fair-α comparison"). The throwaway is never exported and never promoted to streamlit.
+
 Temperature and alpha must be read from the checkpoint's config sidecar (`_config.json`) via `load_config_for_checkpoint()`, not hardcoded.
 
 **Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. Timestamp tower omitted. The review `posted` date is available but only for reviewed games — too sparse.
@@ -271,7 +273,7 @@ Each user type has:
 
 ### Current results
 
-**V5 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm, correct Menon Path 2 formula):
+**V5 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm, correct Menon Path 2 formula, α=0.4):
 
 | K | Recall@K | NDCG@K |
 |---|---|---|
@@ -282,6 +284,20 @@ Each user type has:
 | 50 | 0.3673 | 0.1166 |
 
 MRR: 0.0611 (random: 0.0017)
+
+**V5 α=0 throwaway** (same architecture as V5 PROD, trained with `popularity_alpha=0.0`). Offline-only baseline for ranker comparisons — *not a deployment candidate*. Canary quality is materially worse on niche tastes (popular cross-genre titles leak in); see Training Details > "Alpha trade-off."
+
+| K | Recall@K | NDCG@K | Δ vs PROD |
+|---|---|---|---|
+| 1 | 0.0283 | 0.0283 | +25.2% |
+| 5 | 0.0867 | 0.0574 | +17.0% |
+| 10 | 0.1435 | 0.0755 | +14.5% |
+| 20 | 0.2301 | 0.0973 | +11.8% |
+| 50 | 0.3952 | 0.1299 | +7.6% |
+
+MRR: 0.0704 (+15.2% vs PROD)
+
+Lift concentrated at low K — exactly where the popularity tax hurts most. Use this row (not V5 PROD) as the offline yardstick when comparing the ranker on Recall/NDCG/MRR.
 
 **V4** (5,437-game corpus — Valve titles removed, no LayerNorm, incorrect Menon sign):
 
