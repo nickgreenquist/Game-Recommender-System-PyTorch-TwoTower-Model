@@ -1,0 +1,39 @@
+Checkpoint: saved_models/ranker/ranker_wd_alpha_0_20260516_212815.pth
+Val rows: 149,083  |  Pool size: 100
+Ranker α: 0.0  |  CG comparator: saved_models/best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth
+
+══ Production-realistic metrics (E2E ceiling applied to both) ═════════
+Metric                 CG     Ranker        Delta
+──────────────────────────────────────────────────
+Hit@1              0.0278     0.0276      -0.0002
+Hit@5              0.0868     0.0857      -0.0010
+Hit@10             0.1430     0.1408      -0.0022
+Hit@20             0.2288     0.2258      -0.0030
+Hit@50             0.3969     0.3952      -0.0017
+Hit@100            0.5525     0.5525      +0.0000
+
+NDCG@1             0.0278     0.0276      -0.0002
+NDCG@5             0.0572     0.0565      -0.0007
+NDCG@10            0.0752     0.0741      -0.0011
+NDCG@20            0.0968     0.0954      -0.0013
+NDCG@50            0.1300     0.1289      -0.0011
+NDCG@100           0.1552     0.1544      -0.0008
+
+MRR                0.0726     0.0719      -0.0007
+──────────────────────────────────────────────────
+Recall@100         0.5525  (ceiling)   ← max ranker Hit@K in production
+
+══ Pure reranking quality (CG-retrieved subset, n=82,364) ═════
+Metric                 CG     Ranker        Delta
+──────────────────────────────────────────────────
+Hit@1              0.0503     0.0499      -0.0004
+Hit@5              0.1571     0.1552      -0.0019
+Hit@10             0.2588     0.2548      -0.0040
+Hit@20             0.4141     0.4086      -0.0055
+Hit@50             0.7185     0.7153      -0.0032
+Hit@100            1.0000     1.0000      +0.0000
+
+NDCG@10            0.1361     0.1342      -0.0020
+MRR                0.1235     0.1221      -0.0013
+──────────────────────────────────────────────────
+(E2E ceiling not applied — both CG and ranker scored on labels CG retrieved)

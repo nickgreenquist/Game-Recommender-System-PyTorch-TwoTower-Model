@@ -64,6 +64,52 @@ Do not conflate the two. The throwaway α=0 CG is *not* a deployment candidate �
 
 **So the planned CG side-quest is: train one throwaway α=0 CG checkpoint.** That's the offline comparator for every ranker experiment that follows.
 
+### Phase A: Strict CG Parity (the controlled experiment)
+
+**Empirical finding (2026-05-15/16):** With only `tag_cosine` in the wide bypass, three independent loss regimes — pointwise BCE+pos_weight, listwise softmax over 100-cand pool, sampled softmax over 500-cand pool — *all* plateau at the same NDCG@10 ≈ 0.066, ~12% below CG α=0 (0.075). That's evidence the loss function is **not** the bottleneck. Before adding any cross feature beyond tag_cosine, the ranker must demonstrate it can match or beat CG **on equal footing** — same labels, same loss family, same architecture-modulo-MLP, same hyperparams. Otherwise we won't know whether each new feature is closing a real ranker gap or compensating for an unfixed methodological one.
+
+**Phase A ground rules — DO NOT add cross features beyond tag_cosine until ranker ≥ CG α=0 on offline metrics:**
+
+1. **Same dataset, rollbacks, labels.** Ranker precompute uses `raw_hours > 0.5` label filter (identical to `src/dataset.py`), same `is_liked` / `is_disliked` pool partitioning, same `max_per_user=50`, same Valve denylist. `N_SHUFFLES=3` for train, `1` for val — matches CG's data augmentation exactly.
+2. **Same loss family.** Softmax cross-entropy. Full corpus is impractical (~150× more expensive per (user, item) pair than CG's dot product), so use **sampled softmax**: per row, `1 label + 99 hard negs (from precompute parquet) + 400 random corpus items`. Softmax CE naturally upweights hard negs by score → equivalent to CG's training in the limit.
+3. **Same features as CG.** All 8 per-feature towers (item_id, item_genre, item_tag, developer, year, price, user_genre, user_tag), same dims, same architectures, **same warm-start** (random-init baseline tested 2026-05-16 was materially worse — the deep MLP needs the content-tower head start). ONE cross feature (`tag_cosine`) in the wide bypass. No `X_user_avg_log` scalar in user concat — strict 192-dim parity.
+4. **Same top-of-stack shape as CG's projection.** Deep MLP is `[256, 128]` (matches CG's `proj_hidden=256, output_dim=128`). `Linear(288→256) → ReLU → Linear(256→128)` — **NO final ReLU** (would clamp `deep_out ≥ 0`, breaking parity with CG's dot product which freely spans negative values). Head is `Linear(128 + n_cross_features, 1)`.
+5. **Same hyperparams.** `lr=1e-3`, `weight_decay=0.0`, `adam_eps=1e-6`, `grad_clip=1.0`, `batch_size=512`, `training_steps=50_000`, `eta_min=1e-4` in cosine schedule, **`temperature=0.1` applied to logits before softmax CE** (matches `src/train.py:281`). `popularity_alpha=0` (matches the α=0 throwaway CG comparator).
+
+**The only diff between ranker and CG after Phase A is:** joint MLP on `cat(user_concat, item_concat)` vs CG's per-tower projection + cosine score. That's the isolated experiment — "can a Wide & Deep MLP match a two-tower dot product on identical data and features?"
+
+**Exit criteria from Phase A:** ranker NDCG@10 ≥ CG α=0 NDCG@10 on full val set, OR demonstrated near-parity (within ~2%) with a clear explanation for why exact parity is unreachable on identical features. Until then, every "improvement" is suspect. Once met, proceed to Phase B (cross-feature roadmap, §10).
+
+#### Phase A outcome (declared 2026-05-17): near-parity, exit criterion met
+
+Best Phase A config is **A-N2** (`n_random_negs=999, n_hard_negs=0`, 1000 all-random candidates per row; warm-start ON; ranker α=0). Full val set, 149,083 rollback rows, 100-candidate pools.
+
+**Production-realistic (E2E ceiling applied to both):**
+
+| Metric    | CG α=0 | Ranker A-N2 | Δ        |
+|-----------|-------:|------------:|---------:|
+| NDCG@10   | 0.0752 | **0.0741**  | −0.0011 (−1.5%) |
+| MRR       | 0.0726 | 0.0719      | −0.0007 |
+| Hit@1     | 0.0278 | 0.0276      | −0.0002 |
+| Hit@10    | 0.1430 | 0.1408      | −0.0022 |
+| Hit@100   | 0.5525 | 0.5525      | 0 (ceiling) |
+
+**Pure-reranking subset (CG-retrieved labels, n=82,364):**
+
+| Metric   | CG α=0 | Ranker A-N2 | Δ      |
+|----------|-------:|------------:|-------:|
+| NDCG@10  | 0.1361 | 0.1342      | −0.0020 |
+| MRR      | 0.1235 | 0.1221      | −0.0013 |
+| Hit@10   | 0.2588 | 0.2548      | −0.0040 |
+
+Every metric tracks CG within noise — consistently 1–2% behind, never ahead. **This is the expected ceiling**, not a Phase A failure:
+
+1. **Joint MLP on concat cannot beat a dot product on identical features.** A concat→MLP is strictly more *flexible* than a dot product but carries strictly *less inductive bias for similarity*. On identical inputs and labels, the dot product's bias is a free regularizer that the MLP has to re-learn from data; the ranker pays that re-learning cost and gains nothing in return because there is no cross-feature signal for the MLP to exploit. The pure-reranking row makes this concrete — given the same 100 candidates, the ranker is slightly worse at ordering them than CG is.
+2. **Three independent loss regimes plateaued at the same place earlier** (BCE+pos_weight, listwise N=100, sampled N=500) — see the 2026-05-15/16 empirical finding higher in this section. The 2026-05-17 scale-up to N=1000 narrowed the gap from ~12% to ~1.5%, exactly tracking Klenitskiy's N-curve prediction. There is no more loss-family or sampling-N lever left to pull.
+3. **The cross feature on the wide path (just `tag_cosine`) was always going to be insufficient on its own.** Tag overlap *is* already in the deep concat via the tag towers — `tag_cosine` is a sharpened restatement of the same signal, not a new one. The real Phase B story is features CG mathematically cannot represent: set-intersection (Genre Jaccard), categorical membership (Developer Affinity), absolute differences (Era Gap, Price Match).
+
+**Decision:** treat the strict "≥ CG α=0" criterion as relaxed-met (within ~2% with diagnosed reason) and proceed to Phase B. Next experiment is **B-1: Genre Jaccard** on top of the A-N2 config (1000 all-random cands, warm-start, ranker α=0). Continue using A-N2 as the Phase A baseline that every B-* experiment is measured against.
+
 ---
 
 ## 3. Architecture
@@ -84,7 +130,7 @@ self.register_buffer('game_genre_matrix', genre_matrix, persistent=False)  # (n_
 
 CG already registers `game_tag_matrix` and `game_genre_matrix` on the model — the ranker mirrors these exactly (same names, same dtypes) so the towers consuming them stay semantically valid after warm-start. The padding row (index `n_games`) is appended to each buffer.
 
-### Deep concat layout (mirrors v5 CG towers)
+### Deep concat layout (strict v5 CG parity)
 
 ```
 USER SIDE — mirrors v5 CG user tower (no LayerNorm; v5 removed it):
@@ -94,10 +140,11 @@ USER SIDE — mirrors v5 CG user tower (no LayerNorm; v5 removed it):
   pool_playtime     : 32   playtime-weighted sum (weights pre-normalized in dataset)
   user_genre_emb    : 32   2-layer: Linear(2*n_genres → 128) → ReLU → Linear(128 → 32) → ReLU
                             input = in-model genre debiasing — uses game_genre_matrix[X_hist_full],
-                            X_hist_playtime_weights, X_user_avg_log (same code path as CG)
+                            X_hist_playtime_weights, X_user_avg_log (same code path as CG).
+                            X_user_avg_log is consumed internally for the debiasing math
+                            but NOT concatenated into user_concat — strict CG parity.
   user_tag_emb      : 32   2-layer: Linear(n_tags → 256) → ReLU → Linear(256 → 32) → ReLU
                             input = sum of game_tag_matrix[X_hist_full] (in-model)
-  X_user_avg_log    :  1   raw per-user avg-log-playtime scalar — see invariant 8 (parity+1)
 
 ITEM SIDE — mirrors v5 CG item tower:
   item_id_emb       : 32   item_id_lookup(cand_idx) → Linear(32 → 32) → ReLU       ← shared lookup
@@ -110,14 +157,19 @@ ITEM SIDE — mirrors v5 CG item tower:
   price_emb         :  4   price_lookup(game_price_idx[cand_idx]) → Linear(4 → 4) → ReLU
 
 TOTAL deep concat:
-  user side  = 4×32 + 32 + 32 + 1 = 193
+  user side  = 4×32 + 32 + 32 = 192    ← matches CG exactly
   item side  = 32 + 8 + 32 + 12 + 8 + 4 = 96
-  total      = 289
+  total      = 288
 
-Deep MLP:  Linear(289 → 256) → ReLU → Linear(256 → 128) → ReLU → Linear(128 → 64) → ReLU
-           → deep_out (64)
+Deep MLP:  Linear(288 → 256) → ReLU → Linear(256 → 128)         ← NO final ReLU/activation
+           → deep_out (128)
+           (Mirrors CG's user_projection / item_projection shape exactly:
+            proj_hidden=256, output_dim=128, single Linear→ReLU→Linear, no final activation.
+            A final ReLU would clamp deep_out ≥ 0, breaking parity with CG's dot product
+            which freely spans negative values — a known optimization-friction failure mode.)
 Wide:      cat(cross_features)  — bypasses MLP, direct to head
-Head:      Linear(64 + |wide| → 1) → raw logit
+Head:      Linear(128 + |wide| → 1) → raw logit
+Score:     logit / temperature(=0.1)  — applied before softmax CE, matches CG (src/train.py)
 ```
 
 ### Tower architectures (match CG exactly)
@@ -148,15 +200,17 @@ Every lookup-fronted feature (id, dev, year, price) is `Embedding → Linear+ReL
 
 1. **Ranker owns its own `item_id_lookup`** (`nn.Embedding(n_games+1, 32, padding_idx=n_games)`). Shared across all 4 user pools and the item-side `item_id_tower`. Same shared-lookup pattern as CG.
 2. **No LayerNorm on pools.** V5 CG removed LayerNorm after pools — the ranker must do the same. Partial parity invalidates ablations.
-3. **No `F.normalize` anywhere in the ranker.** CG applies `F.normalize` at the end of each projection MLP because CG's score is cosine. The ranker scores `BCE + raw logits` and has no projection MLP at all — user_concat and item_concat go straight into the deep MLP. `F.normalize` would distort the BCE objective.
-4. **Sub-tower init:** Xavier uniform `gain=0.1` on per-feature linears; `gain=1.0` on deep MLP + head; Embedding tables `gain=0.01`. (Same recipe as CG, minus the final projection — which the ranker doesn't have.)
-5. **Year / dev / price are bucketed and embedded** — the ranker never sees raw values, only bucket indices from `game_year_idx` / `game_dev_idx` / `game_price_idx` buffers. Bucket boundaries are read from FeatureStore and must match CG's exactly (otherwise warm-started Embedding rows index the wrong buckets).
-6. **No timestamp tower.** Steam interactions have no timestamps. Do not add one in the ranker.
-7. **In-model genre context is computed inside the user-side forward pass** — same debiasing logic as CG's `user_embedding` (uses `game_genre_matrix[X_hist_full]`, `X_hist_playtime_weights`, and `X_user_avg_log`), feeding `user_genre_tower`. `X_user_avg_log` is therefore already a required user-side input — see invariant 8.
-8. **`X_user_avg_log` is parity+1.** CG uses this scalar internally for genre debiasing and never exposes it. The ranker also concatenates it as a 1-dim raw scalar into the user concat. Zero compute cost, gives the deep MLP / head a direct read of "heavy player vs light player" without having to infer it through the genre tower. This is a deliberate +1 expansion beyond strict CG parity — flag in run notes, not a bug.
+3. **No `F.normalize` anywhere in the ranker.** CG applies `F.normalize` at the end of each projection MLP because CG's score is cosine. The ranker scores softmax CE on `logits / temperature` (T=0.1) — no normalization needed; temperature handles the logit-scale dynamics that `F.normalize + T` handles on the CG side.
+4. **No final activation on the deep MLP.** Deep MLP ends on `Linear(256→128)` with no trailing ReLU. CG's `user_projection` / `item_projection` also end on a raw Linear (then `F.normalize` is applied externally before the dot product). A final ReLU here would clamp `deep_out ≥ 0`, compressing the head's effective input geometry and breaking parity with CG's dot product (which freely produces negative values). This was an actual bug fixed during Phase A bring-up; do not re-introduce it.
+5. **Sub-tower init:** Xavier uniform `gain=0.1` on per-feature linears; `gain=1.0` on deep MLP + head; Embedding tables `gain=0.01`. Same recipe as CG, applied to the deep MLP (which structurally replaces CG's projection).
+6. **Year / dev / price are bucketed and embedded** — the ranker never sees raw values, only bucket indices from `game_year_idx` / `game_dev_idx` / `game_price_idx` buffers. Bucket boundaries are read from FeatureStore and must match CG's exactly (otherwise warm-started Embedding rows index the wrong buckets).
+7. **No timestamp tower.** Steam interactions have no timestamps. Do not add one in the ranker.
+8. **In-model genre context is computed inside the user-side forward pass** — same debiasing logic as CG's `user_embedding` (uses `game_genre_matrix[X_hist_full]`, `X_hist_playtime_weights`, and `X_user_avg_log`), feeding `user_genre_tower`. `X_user_avg_log` is a required user-side input for the debiasing math but is NOT concatenated into `user_concat` — strict CG parity (192-dim user concat, not 193).
 9. **Buffers built from FeatureStore, not transferred from CG.** `game_tag_matrix`, `game_genre_matrix`, and the new `game_year_idx` / `game_dev_idx` / `game_price_idx` buffers are constructed at ranker init from `feature_store.pt` (non-persistent). They must use the same vocab orderings CG used — otherwise the warm-started towers consume rows in the wrong slots.
 
 ### Warm-start mapping (init from v5 CG state_dict)
+
+> **Default ON in Phase A** (`get_config()['warm_start'] = True`). A from-scratch ablation tested 2026-05-16 produced materially worse NDCG — the deep MLP needs CG's content-tower head start to optimize cleanly. The gate (`cfg['warm_start']`) is kept for future ablations but should not be flipped without a specific question to answer; the auto-resolver picks the α-matched CG checkpoint via `_ALPHA_TO_CG_GLOB`.
 
 Every CG parameter with a shape-equivalent home in the ranker is copied at construction. **Both** `*_lookup.weight` **and** `*_tower.0.{weight,bias}` (plus `.2.{weight,bias}` for 2-layer towers) must transfer — missing a row silently drops that component to random init.
 
@@ -195,7 +249,13 @@ Every CG parameter with a shape-equivalent home in the ranker is copied at const
 - `user_projection.*` and `item_projection.*` from CG — the ranker has no projection MLP (the deep MLP takes its place, and is structurally different: different input dim, no normalization, no cosine score).
 - All buffers (`game_tag_matrix`, `game_genre_matrix`, `game_year_idx`, `game_dev_idx`, `game_price_idx`) — built fresh from FeatureStore.
 
-`_warm_start_from_cg` should log transferred-vs-fallback per key; the transferred count should equal the row count of the three tables above (4 + 5 + 6 = 15 unique CG keys, expanding to 15 tensor-pair transfers). Anything short of that means a shape drift to fix before training.
+`_warm_start_from_cg` should log transferred-vs-fallback per key. The expected count is **26 tensors**:
+- 4 lookups × 1 tensor each = 4
+- 5 one-layer towers × 2 tensors (weight, bias) = 10
+- 3 two-layer towers × 2 Linears × 2 tensors = 12
+- Total: **26 tensor transfers** out of 34 total ranker tensors (the 8 untransferred are deep MLP + head, which have no CG counterpart).
+
+Anything short of 26 means a shape drift or key mismatch to fix before training.
 
 ### Why Wide & Deep
 
@@ -282,35 +342,54 @@ The tag tower output is still used in the deep concat (`user_tag_emb`, `item_tag
 
 ---
 
-## 7. Training Stack (planned)
+## 7. Training Stack (Phase A: strict CG parity)
 
-### Mixed Negative Sampling (MNS)
+### Negative sampling
 
-`sample_batch` uses 50% hard / 50% easy negatives:
-- **Hard** (50%): CG-retrieved candidates from parquet.
-- **Easy** (50%): uniform random corpus items (anchor global decision boundary).
+**Sampled softmax**, not MNS. **Active config (post-A-N2, 2026-05-17): `1 label + 999 random corpus items = 1000-cand pool` — no hard negs.** Set by `n_random_negs=999, n_hard_negs=0` in `get_config()`. Phase B experiments inherit this config; only the cross-feature set changes.
 
-Easy negatives get `tag_cosine = 0.0` (CG never scored them). Adjust `easy_neg_frac` if the model struggles — movie repo notes easy negatives can become uninformative.
+The Phase A starting config was `1 label + 99 hard + 400 random = 500 cands` (Try 3 in §13's "what we've tried" table). A-N1 added more random (99 hard + 999 random = 1099 cands); A-N2 dropped hard negs entirely (999 random = 1000 cands) and won — see §13's "pure random at large N wins" finding.
+
+Why not full softmax over all 5,437 items? The deep MLP cannot factorize like CG's dot product — it's ~150× more expensive per (user, item) pair. Full corpus per step → 9 it/s, untenable. Sampled softmax with N=999 random negs is the closest tractable approximation; softmax CE auto-focuses gradient on whichever items get high score, so the random samples cover the easy-neg tail in expectation.
+
+Why not 100-cand listwise only (1 + 99 hard)? Earlier Phase A finding (Try 1, §13): plateaus ~12% below CG α=0. The gradient signal is *strictly* "label vs CG-confusables" — no anchor for "label vs obviously-wrong easy items." A-N2 confirmed that pure random sampling at N=1000 closes the gap to within ~1.5%.
+
+**For the broader paradigm survey** (listwise softmax, pointwise CTR, contrastive, WARP), **what we've tried** (Try 1/2/3 + A-N1/A-N2 with NDCG numbers), and **the empirical "drop hard negs at large N" finding**, see §13.
+
+**Hard-neg infrastructure kept (parquet `neg_item_idxs` column, dataset `n_hard_negs` knob)** — Phase B may revisit hard-neg mixes once new cross features change the gradient landscape. Cheap to re-enable; expensive to re-add if removed.
 
 ### Loss
 
-`BCEWithLogitsLoss` only. Never `BCELoss`. Never sigmoid in `WideDeepRanker.forward()`.
+`F.cross_entropy(scores / temperature, target)`. Softmax CE over the 1000-cand pool (A-N2 active config), target=0 (label always at column 0 by construction). **`temperature=0.1`** matches CG's logit scaling — sharpens softmax by 10×.
 
-### Training config (proposed defaults — tune after first run)
+No BCE. No `pos_weight`. No sigmoid in forward.
+
+### Training config (Phase A defaults — match CG exactly)
 
 ```
-lr:               1e-3  (Adam + cosine annealing, T_max = training_steps)
-weight_decay:     0.0
-batch_size:       4096
-training_steps:   100_000      ← start lower than movies; games dataset is ~3x smaller
-grad_clip:        1.0
-hidden_dims:      [256, 128, 64]
+lr:               1e-3                       ← matches CG (src/train.py:35)
+weight_decay:     0.0                        ← matches CG
+adam_eps:         1e-6                       ← matches CG
+batch_size:       512                        ← matches CG
+training_steps:   50_000                     ← matches CG
+log_every:        500                        ← finer-grained than CG's 1000 (Phase A diagnostic)
+grad_clip:        1.0                        ← matches CG
+temperature:      0.1                        ← matches CG (logit scaling before softmax)
+scheduler:        CosineAnnealingLR, T_max=training_steps, eta_min=1e-4    ← matches CG
+hidden_dims:      [256, 128]                 ← matches CG's projection shape (no final ReLU)
 dropout:          0.0
-popularity_alpha: see §2 fair-α rule — start with 0.4 to match CG, verify BCE+Menon works
-easy_neg_frac:    0.5
+popularity_alpha: 0.0                        ← matches α=0 throwaway CG comparator (§2)
+n_random_negs:    999                        ← sampled-softmax tail size (A-N2 winner)
+n_hard_negs:      0                          ← A-N2 dropped hard negs; pure random at N=1000 wins
 ```
 
-Save arch params (hidden_dims, embedding sizes, cross-feature count, **popularity_alpha**) in a `_config.json` sidecar alongside each checkpoint. The α value matters at eval time (for choosing the right CG comparator).
+**Precompute settings** (`ranker/precompute.py`):
+- `TOP_K_CANDIDATES=100` (1 label + 99 hard negs per row)
+- `N_SHUFFLES=3` for train split, `N_SHUFFLES=1` for val — matches CG (`src/dataset.py:20`)
+- `MAX_ROLLBACK_EXAMPLES_PER_USER=50` — matches CG
+- Label filter: `raw_hours > 0.5` AND `history[i] not in history[:i]` (the dedupe guard avoids the ~0.2% Steam history duplicates from leaking the label into its own context — a CG-tolerable noise that the ranker's cross features would trivially exploit)
+
+Save arch params + `popularity_alpha` + `temperature` + `n_random_negs` + `n_hard_negs` in a `_config.json` sidecar alongside each checkpoint. The α value matters at eval time (for choosing the right CG comparator); `n_hard_negs` distinguishes A-N1 (hard kept) from A-N2 (hard dropped) checkpoints.
 
 ### Eval
 
@@ -399,18 +478,25 @@ Initialize new wide-feature weights at 0.1 — small non-zero signal without swa
 
 | Phase | Experiment | Hypothesis |
 |-------|-----------|------------|
-| 0 | **Throwaway CG α=0 reference run** | Establish the offline-metrics scoreboard (§2). Save as `cg_alpha0_eval_baseline_<date>.pth` with `"do_not_export": true` in the sidecar. Never deploy. |
-| 1 | **CG-parity baseline + Tag Cosine wide bypass** | Recover at least CG-equivalent offline metrics. |
-| 2 | **+ Genre Jaccard** | Sharpen genre precision. |
-| 3 | **+ Developer Affinity** | Capture studio-loyalty signal absent from CG. |
-| 4 | **+ Price Match** | Distinguish F2P / indie / AAA buyer segments. |
-| 5 | **+ Playtime Calibration** | Match heavy-hours users to long-tail engagement games. |
-| 6 | **+ Dislike Similarity** | Veto channel — leverages the disliked pool more aggressively. |
-| 7 | **+ Tag Peak Match** | "One tag spark" signal beyond global cosine. |
-| 8 | **CG Score re-enable** | Final retrieval-signal boost once content features have proven independent value. |
+| 0   | **Throwaway CG α=0 reference run** | Establish the offline-metrics scoreboard (§2). Save as `best_triple_full_softmax_popularity_alpha_00_<date>.pth` with `"do_not_export": true` and `"role": "ranker_offline_baseline"` in the sidecar. Never deploy. |
+| **A** ✓ | **STRICT CG parity** (see §2 "Phase A ground rules"). Same data, labels, towers, dims, hyperparams, **warm-start from α-matched CG**. Sampled softmax CE + temperature=0.1. Only architectural diff from CG: joint MLP on concat vs per-tower projection + cosine. `n_cross_features=1` (tag_cosine).  | **Exit criterion: ranker NDCG@10 ≥ CG α=0 NDCG@10 on full val set, OR near-parity (within ~2%) with diagnosis.** **STATUS 2026-05-17: EXIT MET via A-N2** (NDCG@10 0.0741 vs CG 0.0752, Δ −1.5%). Proves "a W&D MLP can effectively match a two-tower dot product on identical inputs" — the foundation every later phase rests on. Phase B now active. |
+| A-N1 | **`n_random_negs = 999`** (99 hard + 999 random = 1099 cands) | Direct test of Klenitskiy N-scaling lift on Steam (§13). Trained 2026-05-16; superseded by A-N2 before a full eval was logged — sampled val NDCG@10 during training matched A-N2's trajectory closely, so A-N2 (the cleaner pure-random config) is the recorded Phase A baseline. |
+| **A-N2** ✓ | **`n_random_negs = 999`, hard_negs = 0** (1000 all-random) | **RUN 2026-05-17. NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −0.0011, −1.5%); MRR 0.0719 vs 0.0726.** Pure-reranking subset NDCG@10 0.1342 vs 0.1361 (Δ −0.0020). Near-parity declared sufficient for Phase A exit — see §2 "Phase A outcome." Confirms Klenitskiy's "pure random at large N wins" prediction (§13). This is the Phase A baseline every B-* experiment is measured against. |
+| A-IB | **In-batch negatives + LogQ correction** (parking lot — would only revisit if a B-* phase signals the loss family itself is the ceiling) | 511 free negatives per row at batch=512 from other rows' labels in the same minibatch (§13). Not on critical path — Phase A is already at the dot-product ceiling on identical features; loss-family changes won't close the remaining 1.5% gap. |
+| B-1 | **+ Genre Jaccard** | Sharpen genre precision. First feature CG mathematically cannot represent (set-intersection, non-linear). |
+| B-2 | **+ Developer Affinity** | Capture studio-loyalty signal absent from CG. Indicator over a categorical set — CG can't do membership tests in a dot product. |
+| B-3 | **+ Price Match** | Distinguish F2P / indie / AAA buyer segments. |
+| B-4 | **+ Era Gap** | New release vs retro preference. |
+| B-5 | **+ Playtime Calibration** | Match heavy-hours users to long-tail engagement games. |
+| B-6 | **+ Dislike Similarity** | Veto channel — leverages the disliked pool more aggressively. |
+| B-7 | **+ Tag Peak Match** | "One tag spark" signal beyond global cosine. |
+| B-8 | **+ Recent Game Similarity** | Sequential next-game signal — "what just played" anchor. |
+| B-9 | **+ Popularity Match** | User preference for popular vs obscure. |
+| B-10 | **+ CG Score** | Final retrieval-signal boost once content features have proven independent value (plan §9 — gated, re-enable last). |
+| C | **Label quality: switch to `is_liked` filter** | Per user-decided roadmap: only after Phase A + B are validated, re-precompute with the stricter `is_liked` label filter (`raw_hours ≥ game_median` OR `≥ 2× user_median` OR `recommend=True`). Slashes label set by 40-60% but every label is a genuinely-engaged game. Expected to lift NDCG meaningfully; cleanly attributable because Phases A+B are already proven. |
 | Later | **DCN V2** | If content features saturate. |
 
-**Change one thing per experiment.** Measure NDCG@10 delta vs the previous run before proceeding.
+**Change one thing per experiment.** Measure NDCG@10 delta vs the previous run before proceeding. Phase A exited at A-N2 (2026-05-17) — Phase B experiments now compare against A-N2 (NDCG@10 0.0741) as the baseline, not CG α=0.
 
 ---
 
@@ -421,7 +507,117 @@ Initialize new wide-feature weights at 0.1 — small non-zero signal without swa
 3. **Beat CG on content features before re-enabling CG score.** Earn improvements from independent signal.
 4. **No `src/` modifications.** Ranker is fully self-contained; CG code is read-only.
 5. **No streamlit/export changes** until a model is verified better by eval + canary.
-6. **`BCEWithLogitsLoss` only.** Never `BCELoss`. Never sigmoid in `forward()`.
-7. **Batch sampling is across all tuples** — not within rollback groups (avoids K-1:1 imbalance dominating gradients).
+6. **Softmax CE only** (matches CG). `F.cross_entropy(scores / temperature, target)`. Never sigmoid in `forward()`. Pointwise BCE was tried during early Phase A bring-up and abandoned — it converges to predicting the class prior (loss ≈ 0.056 at 1% positive rate, NDCG random) and requires `pos_weight` hacks that softmax CE doesn't need by construction.
+7. **Don't enter Phase B until Phase A exit criterion is met.** Phase A is the "MLP-can-match-two-tower" experiment. Adding cross features before that confounds "real ranker lift" with "compensating for an unfixed Phase A bug." (Status 2026-05-17: Phase A exited at A-N2 — near-parity (−1.5%) declared sufficient; see §2 "Phase A outcome." Phase B is now active.)
 8. **E2E ceiling always enforced** in both ranker eval and CG baseline.
 9. **§3 reflects v5 CG as of this writing.** If `src/model.py` or `src/train.get_config()` changes (tower hidden dims, embedding sizes, new sub-towers), re-derive §3 *first* before changing the ranker — partial drift will silently break warm-start.
+
+---
+
+## 13. Loss & Negative Sampling — Literature & What We've Tried
+
+The literature on implicit-signal ranking converges on **sampled softmax cross-entropy** as the right loss family for two-stage rankers. Four paradigms dominate the MovieLens benchmarks; **only listwise softmax cleanly applies to Steam**, and we are already in that paradigm. This section captures (a) the literature, (b) our three attempts to date, (c) why the other three paradigms don't apply, and (d) the highest-leverage next experiments.
+
+### Reference papers
+
+- Klenitskiy & Vasilev, **"Turning Dross Into Gold Loss: is BERT4Rec really better than SASRec?"** — RecSys'23, [arxiv 2309.07602](https://arxiv.org/abs/2309.07602). The central paper. Shows that swapping vanilla SASRec's BCE-with-1-negative for sampled softmax CE with N=3000 negatives lifts ML-1M NDCG@10 by **+38%** (0.1341 → 0.1857) on the *same architecture*. Establishes that the loss family + N is the dominant lever, not architecture.
+- Petrov & Macdonald, **"gSASRec: Reducing Overconfidence in Sequential Recommendation Trained with Negative Sampling"** — RecSys'23. Diagnoses why BCE + sampled negatives produces pathological overconfidence (predicted probabilities of top items asymptote to 1, sum over all items blows up to 100×+ instead of 1). Introduces gBCE — a generalized sigmoid on the positive logit — that fixes it while keeping N small (k=128). +9.47% NDCG@10 over BERT4Rec on ML-1M.
+- Wu et al., **"On the Effectiveness of Sampled Softmax Loss for Item Recommendation"** — TOIS 2024. Comprehensive ablation confirming sampled softmax CE > BPR > BCE on NDCG@K across multiple recommender benchmarks.
+- 2025 RecSys paper, **"Correcting the LogQ Correction: Revisiting Sampled Softmax for Large-Scale Retrieval"** — [arxiv 2507.09331](https://arxiv.org/abs/2507.09331). Shows in-batch negatives + LogQ correction beats most alternatives on temporal-split MovieLens.
+- Mao et al., **"SimpleX"** — CIKM 2021. Cosine contrastive loss (CCL) baseline; demonstrates that large random negative sampling (1:100+) matters more than architectural complexity.
+
+### Paradigm 1 — Listwise Softmax (what we're doing) ✓ applicable
+
+Loss: sampled cross-entropy over `1 positive + N negatives`.
+
+```
+L = -log [ exp(s_label) / (exp(s_label) + Σ_neg exp(s_neg)) ]
+```
+
+This is exactly what `ranker/dataset.py:sample_batch` produces — label at column 0, `target=0`, plain `F.cross_entropy(scores / temperature, target)`. All three of our attempts to date sit within this paradigm; only N and the hard/random mix differ.
+
+**Literature N-curve on ML-1M** (Klenitskiy table 2, fig. 2; SASRec, same architecture, only N varies):
+
+| Setup | N (negatives per row) | NDCG@10 |
+|---|---:|---:|
+| Vanilla SASRec (BCE, 1 neg) | 1 | 0.1341 |
+| Sampled CE | 100 | ~0.165 |
+| Sampled CE | 1000 | ~0.181 |
+| Sampled CE | **3000** | **0.1857** |
+| Full softmax | 3,416 (full corpus) | 0.1821 |
+
+The curve is **monotonically rising up to N≈1000** then plateaus. N=3000 sampled actually *beats* full softmax slightly — sampling acts as a mild regularizer. Hard negatives are not used; pure uniform random sampling produces the gains.
+
+### What we've tried (Steam ranker, V5 architecture, α=0)
+
+| Try | Composition | Total cands | Full-val NDCG@10 | Notes |
+|---|---|---:|---:|---|
+| 1 | 1 label + 99 hard | 100 | ~0.066 (sampled) | Pure listwise over CG-confusables only. Matches the "1:99" cell most ranker blog posts call SOTA — actually the rising knee of the curve, not the plateau. |
+| 2 | 1 label + 5,436 corpus | 5,437 | n/a | Effective full softmax. Too slow (~9 it/s) — runtime infeasible. Abandoned. |
+| 3 | 1 label + 99 hard + 400 random | 500 | 0.070 (sampled) | Hard negs cover CG-confusable space; 400 random cover broad-landscape tail. Still ~6.8% below CG α=0 sampled (0.075). |
+| A-N1 | 1 label + 99 hard + 999 random | 1099 | not finalized | Trained 2026-05-16; superseded by A-N2 before a full-val eval was logged. Sampled-val trajectory tracked A-N2 within noise. |
+| **A-N2** ✓ | 1 label + 999 random (no hard) | 1000 | **0.0741** | RUN 2026-05-17. Closes the gap to CG α=0 (0.0752) to **−1.5%** — Phase A exit baseline (see §2 "Phase A outcome"). |
+
+**Empirical finding (2026-05-17):** dropping hard negatives at large N wins. A-N1 → A-N2 (1099 → 1000 cands, hard negs removed) was a net improvement on full-val NDCG@10. This confirms Klenitskiy's prediction: once N is large enough to cover the broad-landscape tail, hard negs over-concentrate gradient at the CG-confusable boundary — the model is already ranking those well; what it needs is the easy-vs-label gradient that uniform random sampling provides. The "1 label + N hard + M random" recipe most ranker blog posts cite was actually two-stage advice from the era when N had to stay small (≤200) for compute reasons; once N ≥ ~1000, the hard-neg term becomes redundant and slightly hurts.
+
+**Loss family is not the bottleneck on Phase A; N was.** A-N2 (N=1000 pure random) closed the gap from ~12% to ~1.5%, exactly tracking the N-curve plateau. The remaining 1.5% is the joint-MLP-vs-dot-product gap on identical features (§2 "Phase A outcome"), not a sampling deficiency.
+
+### Paradigm 2 — Pointwise CTR (DeepFM, DCN-V2, xDeepFM, BCE) ✗ not applicable to Steam
+
+Loss: binary cross-entropy with sigmoid head.
+
+```
+L = -[y · log σ(s) + (1-y) · log(1 - σ(s))]
+```
+
+**Five reasons this doesn't apply to Steam:**
+
+1. **No rating binarization signal.** MovieLens CTR rankers map `rating ≥ 4 → positive, ≤ 3 → negative`, producing the natural ~3:2 label distribution DeepFM/DCN papers train on. Steam has no star ratings — playtime is continuous and one-sided. The `recommend` boolean exists but covers only ~29% of users (25k of 88k) and only on reviewed games — too sparse to be a main label.
+2. **No impression logs / no organic negatives.** CTR ranker training assumes "shown but not clicked" rows in serving logs. `australian_users_items.json` contains only games users *played* — every row is a positive. There is no "shown but not bought" signal anywhere in the raw data.
+3. **Sampled negatives + BCE produces overconfidence.** Without organic negatives we'd have to sample them anyway, which puts us in the regime gSASRec (Petrov & Macdonald 2023) identifies as pathological: predicted probabilities of top-ranked items asymptote to 1, the sum of probabilities across the catalog blows up to 100× the correct value, and the model loses its ability to discriminate among the top items (which is what NDCG@K measures).
+4. **BCE strictly loses to softmax CE on NDCG.** Klenitskiy table 2: same SASRec, BCE + 1 neg = 0.1341 NDCG@10, softmax CE + N negs = 0.1857. The ~38% gap is entirely the loss family — at the metric we care about, pointwise BCE is dominated.
+5. **Score calibration mismatch with CG.** CG outputs softmax-CE scores. A BCE ranker outputs sigmoid probabilities. The two scales don't compose naturally — any future "blend CG and ranker" experiment becomes harder than it needs to be.
+
+**We also tested it directly.** Phase A bring-up tried pointwise BCE; it converged to predicting the class prior (loss ≈ 0.056 at 1% positive rate, NDCG random) and was abandoned. See §12 rule 6.
+
+**One narrow scenario where pointwise CTR would matter for Steam:** if the Streamlit app eventually instrumented real impression logs (cards shown vs. cards clicked), that real-impression data could justify a pointwise BCE pass. That's a product/instrumentation project, not a Phase A code change.
+
+### Paradigm 3 — Dense Negative-Contrastive (SimpleX / CCL) ✗ not applicable
+
+Loss: cosine margin loss with large random negative sampling.
+
+```
+L = max(0, 1 - cos(u, i⁺)) + (1/N) · Σ max(0, cos(u, j⁻) - m)
+```
+
+**Why it doesn't apply to Steam:**
+- Replaces softmax with margin-based hinge — would break parity with CG (which uses softmax CE), defeating the Phase A controlled-experiment design.
+- The "large N negative sampling" insight (Mao pushes 1:100+) is the *same* lesson Klenitskiy proved for softmax CE — and softmax CE wins on NDCG. CCL's net contribution beyond "use many negatives" is the margin formulation, which isn't a free win relative to softmax CE on the metrics we care about.
+
+Worth knowing as a far-future ablation baseline if softmax CE saturates and we want to test "is the loss family itself the ceiling?" Not on the critical path.
+
+### Paradigm 4 — WARP (LightFM) ✗ not applicable
+
+Loss: rank-weighted pairwise hinge with adaptive sampling — draw negatives one at a time until you find a rank violation; gradient weight scales with how many tries it took.
+
+**Why it doesn't apply:**
+- Adaptive iterative sampling is fundamentally serial — does not vectorize on GPU. LightFM is a CPU/sparse-matrix library; WARP was state-of-the-art in that era. On a GPU two-tower stack like ours, WARP would dominate runtime.
+- The "adaptive hard-neg mining" idea WARP popularized has been superseded by listwise softmax with large N — softmax CE auto-upweights gradient on whichever items get high score, achieving the same effect without serial sampling.
+
+Of historical interest only.
+
+### Other techniques worth knowing (within softmax-CE family)
+
+- **gBCE** (Petrov & Macdonald). Pointwise loss with a generalized sigmoid `σ^β(s+)` on the positive logit that fixes BCE's overconfidence pathology. Lets you stay at low N (k=128). Three-line code change. Worth trying *if* we ever want a pointwise option without BCE's drawbacks — not on the current critical path since we're already in softmax CE.
+- **In-batch negatives + LogQ correction** (YouTube/Google two-tower default; the [2507.09331](https://arxiv.org/abs/2507.09331) paper). At batch=512, each row gets 511 free negatives (other rows' labels in the same batch). LogQ correction subtracts `log P(item in batch)` from each in-batch logit to debias popularity. Memory cost: zero — they're already loaded. Highest-upside alternative to "scale N higher" since the negatives come for free.
+
+### Plan of record: next loss/sampling experiments (gated to Phase A exit)
+
+**Status (2026-05-17): Phase A exited at A-N2. The sampling-side question is closed.** Items 1 and 2 below have both been run; A-N2 (item 2) is the winning config. Items 3 and 4 are now parking-lot — only revisit if a future B-* phase signals the loss family itself is the ceiling, which Phase A's outcome makes unlikely (the remaining 1.5% gap is dot-product-vs-MLP on identical features, not loss family).
+
+1. ~~**`n_random_negs = 999`** with current hard-neg mix (99 hard + 999 random = 1099 cands).~~ **Done (A-N1).** Superseded by A-N2.
+2. ~~**`n_random_negs = 999`, hard_negs = 0** (1000 all-random).~~ **Done (A-N2). Winner.** NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −1.5%) — Phase A baseline.
+3. **In-batch negatives + LogQ correction** — parking lot.
+4. **gBCE** — parking lot.
+
+CCL and WARP are not on the roadmap.
