@@ -68,7 +68,11 @@ class WideDeepRanker(nn.Module):
                  # Per-game static buffers (each shaped (n_games+1, ...) — pad row appended)
                  game_tag_matrix:    torch.Tensor,  # (n_games+1, n_tags)   float32 — RAW TF-IDF
                  game_tag_matrix_l2: torch.Tensor,  # (n_games+1, n_tags)   float32 — L2-normalized rows
-                 game_genre_matrix:  torch.Tensor,  # (n_games+1, n_genres) float32 — one-hot
+                 game_tag_binary:    torch.Tensor,  # (n_games+1, n_tags)   float32 — binary one-hot   (B-1b cross feature)
+                 game_tag_count:     torch.Tensor,  # (n_games+1,)          float32 — per-item tag count, clamp(min=1)
+                 game_genre_matrix:  torch.Tensor,  # (n_games+1, n_genres) float32 — L1-row-normalized (1/k per genre)
+                 game_genre_binary:  torch.Tensor,  # (n_games+1, n_genres) float32 — binary one-hot   (B-1  cross feature)
+                 game_genre_count:   torch.Tensor,  # (n_games+1,)          float32 — per-item genre count, clamp(min=1)
                  game_year_idx:      torch.Tensor,  # (n_games+1,)          int64
                  game_dev_idx:       torch.Tensor,  # (n_games+1,)          int64
                  game_price_idx:     torch.Tensor,  # (n_games+1,)          int64
@@ -111,8 +115,21 @@ class WideDeepRanker(nn.Module):
         # path (see train._forward_batch). Two buffers, two consumers — no overlap.
         self.register_buffer('game_tag_matrix',    game_tag_matrix,    persistent=False)
         self.register_buffer('game_tag_matrix_l2', game_tag_matrix_l2, persistent=False)
+        # Binary one-hot + per-item tag count — fed into the tag_overlap cross feature
+        # (B-1b). True set-membership semantics, distinct from the raw TF-IDF matrix
+        # the deep towers consume.
+        self.register_buffer('game_tag_binary',    game_tag_binary,    persistent=False)
+        self.register_buffer('game_tag_count',     game_tag_count,     persistent=False)
+        # L1-row-normalized — fed into item_genre_tower / user_genre_tower (CG parity).
         self.register_buffer('game_genre_matrix',  game_genre_matrix,  persistent=False)
+        # Binary one-hot + per-item count — fed into the genre_overlap cross feature
+        # (B-1). True set-membership semantics, distinct from the L1-normalized matrix
+        # the deep towers consume.
+        self.register_buffer('game_genre_binary',  game_genre_binary,  persistent=False)
+        self.register_buffer('game_genre_count',   game_genre_count,   persistent=False)
         self.register_buffer('game_year_idx',      game_year_idx,      persistent=False)
+        # game_dev_idx is also consumed by the dev_affinity cross feature (B-2) via
+        # ranker.cross_features.dev_affinity_pool — see train._forward_batch.
         self.register_buffer('game_dev_idx',       game_dev_idx,       persistent=False)
         self.register_buffer('game_price_idx',     game_price_idx,     persistent=False)
 

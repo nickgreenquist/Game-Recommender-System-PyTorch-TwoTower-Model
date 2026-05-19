@@ -1,22 +1,27 @@
 """
-Stage 1+ — Ranker dataset (CG-parity feature set + Phase 1 tag_cosine cross feature).
+Stage 1+ — Ranker dataset (CG-parity feature set + Phase A/B cross features).
 
 Loads ranker_candidates_{train,val}.parquet → RankerDataset with pre-cached tensors.
 The model itself does not consume per-game item-feature matrices — those live as
 registered buffers on the WideDeepRanker (built from FeatureStore in train.build_ranker).
 
 sample_batch returns the raw inputs (user-tower inputs + sampled candidate matrix +
-target). train.py runs user_forward + item_embedding + computes tag_cosine on the fly
-from model.game_tag_matrix, then calls compute_cross_features.
+target). train.py runs user_forward + item_embedding + computes all cross features on
+the fly via ranker.cross_features utils (same code path as precompute → bit-exact
+parquet identity), then calls compute_cross_features to stack them for the wide head.
 
-Phase 1 cross features (1 total):
-  1. tag_cosine — TRAIN: computed on the fly per (user, candidate) pair via raw TF-IDF
-     cosine, mathematically identical to the parquet values. EVAL: read from parquet
-     (the 100-cand pool's tag_cosine_label / tag_cosine_negs columns).
+Active cross features (4 total — **Bucket 1** roster, plan §9):
+  1. tag_cosine    (B-0)  — raw TF-IDF cosine, direction match on user's full tag profile.
+  2. genre_overlap (B-1)  — weighted binary genre overlap, normalized by item's genre count.
+  3. tag_overlap   (B-1b) — weighted binary TAG overlap, magnitude-aware complement to (1).
+  4. dev_affinity  (B-2)  — playtime-weighted developer match.
 
-Plan §10 lists 11 more cross features in priority order. They land here in future
-phases — see Wide-feature normalization note in plan §10 for fixed-stats persistent
-buffers and gain=0.1 init for new wide weights.
+TRAIN: computed on the fly via ranker/cross_features.py utils (overlap_pool +
+dev_affinity_pool). EVAL / CANARY: read from parquet (or rebuilt via same utils for
+synthetic canary users — see ranker/canary.py).
+
+Plan §9 Buckets 2-4 land here in future phases — see Wide-feature normalization
+section in plan §9 for fixed-stats persistent buffers and gain=0.1 init.
 """
 import os
 import sys
@@ -54,9 +59,19 @@ class RankerDataset:
         self.neg_idx       = np.stack(df['neg_item_idxs'].values).astype(np.int32)     # (N, 99)
         self.cg_label_rank = df['cg_label_rank'].values.astype(np.int32)               # (N,)
 
-        # Cross feature: tag_cosine over raw TF-IDF (precompute.py).
-        self.tag_cosine_label = df['tag_cosine_label'].values.astype(np.float32)        # (N,)
-        self.tag_cosine_negs  = np.stack(df['tag_cosine_negs'].values).astype(np.float32)  # (N, 99)
+        # Cross features (precomputed by precompute.py — Bucket 1 roster).
+        #   B-0  tag_cosine    : raw TF-IDF cosine of user tag pool vs candidate
+        #   B-1  genre_overlap : weighted binary genre overlap / item genre count
+        #   B-1b tag_overlap   : weighted binary tag overlap / item tag count
+        #   B-2  dev_affinity  : playtime-weighted fraction of user history under candidate's developer
+        self.tag_cosine_label    = df['tag_cosine_label'].values.astype(np.float32)              # (N,)
+        self.tag_cosine_negs     = np.stack(df['tag_cosine_negs'].values).astype(np.float32)     # (N, 99)
+        self.genre_overlap_label = df['genre_overlap_label'].values.astype(np.float32)
+        self.genre_overlap_negs  = np.stack(df['genre_overlap_negs'].values).astype(np.float32)
+        self.tag_overlap_label   = df['tag_overlap_label'].values.astype(np.float32)
+        self.tag_overlap_negs    = np.stack(df['tag_overlap_negs'].values).astype(np.float32)
+        self.dev_affinity_label  = df['dev_affinity_label'].values.astype(np.float32)
+        self.dev_affinity_negs   = np.stack(df['dev_affinity_negs'].values).astype(np.float32)
 
         # User-tower inputs (pre-padded to MAX_HISTORY_LEN by precompute).
         self.X_user_avg_log  = df['user_avg_log_playtime'].values.astype(np.float32)
@@ -98,15 +113,26 @@ class RankerDataset:
 
 # ── Cross-feature computation (shared by sample_batch + evaluate + canary) ──
 
-def compute_cross_features(tag_cosine: torch.Tensor) -> torch.Tensor:
+def compute_cross_features(tag_cosine:    torch.Tensor,
+                           genre_overlap: torch.Tensor,
+                           tag_overlap:   torch.Tensor,
+                           dev_affinity:  torch.Tensor) -> torch.Tensor:
     """
-    Phase 1: only tag_cosine in the wide bypass. Returns (B, 1).
+    Bucket 1 wide-path stacker. Returns (B, 4).
 
-    Future phases: add genre_jaccard, dev_affinity, price_match, era_gap, ...
-    See plan §10. Each new feature is added one at a time and measured against
-    the previous run.
+    Inputs are 1-D (B,) tensors of per-(row, candidate) scalars. Column order in
+    the output tensor must match `n_cross_features=4` and the head weight slot
+    interpretation — checkpoints rely on this stable ordering:
+
+        column 0 : tag_cosine    (B-0)
+        column 1 : genre_overlap (B-1)
+        column 2 : tag_overlap   (B-1b)
+        column 3 : dev_affinity  (B-2)
+
+    Future buckets append further columns at indices ≥ 4; do not reorder existing
+    columns or older checkpoints become silently mis-aligned at load time.
     """
-    return tag_cosine.unsqueeze(-1)
+    return torch.stack([tag_cosine, genre_overlap, tag_overlap, dev_affinity], dim=-1)
 
 
 # ── Sampled softmax batch sampler ──────────────────────────────────────────

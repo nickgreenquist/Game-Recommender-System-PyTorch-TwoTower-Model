@@ -5,10 +5,18 @@ For each rollback example (user, position), build the V5 CG user context from th
 shuffled prefix history[:pos], score against all corpus items via the PROD CG model
 (α=0.4 by default), and save the top-(K-1) hard negatives + label as a single row.
 
-Cross feature (precomputed): tag_cosine — raw TF-IDF cosine of user tag pool vs
-candidate tag vector. Computed off game_tag_matrix (the registered buffer CG uses),
-*not* off the tag tower outputs — model-independent so the parquet stays valid if
-tower hidden dims change.
+Cross features (precomputed; columns written per (label, neg) per row):
+  - tag_cosine    (B-0) — raw TF-IDF cosine of user tag pool vs candidate tag vector.
+                    Computed off game_tag_matrix (the registered buffer CG uses),
+                    *not* off the tag tower outputs — model-independent so the
+                    parquet stays valid if tower hidden dims change.
+  - genre_overlap (B-1) — playtime-weighted binary genre overlap, normalized by
+                    candidate's genre count. Range [0, 1].
+  - tag_overlap   (B-1b) — playtime-weighted binary TAG overlap (set-membership),
+                    normalized by candidate's tag count. Magnitude-aware complement
+                    to tag_cosine (which is direction-only). Range [0, 1].
+  - dev_affinity  (B-2) — fraction of user's playtime on games by candidate's
+                    developer. Range [0, 1].
 
 Output:
     data/ranker_candidates_train.parquet
@@ -38,6 +46,7 @@ from src.train import (build_model, get_config,
 # encode the SAME CG that the ranker will compete against in evaluate.py.
 # Mismatched precompute (e.g. α=0.4 CG retrieval + α=0 ranker training) means the
 # E2E-ceiling "CG baseline" measured at eval time isn't the CG the ranker is fighting.
+from ranker.cross_features import overlap_pool, dev_affinity_pool
 from ranker.train import _ALPHA_TO_CG_GLOB
 
 
@@ -245,7 +254,10 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
       cg_label_rank : (n,)          int32 — label's rank in full corpus, 1-indexed, capped at top_k
       cg_label_score: (n,)          float32 — raw CG dot for the label (pre-mask)
       cg_neg_scores : (n, top_k - 1) float32 — raw CG dot per negative
-      tag_cosine_label, tag_cosine_negs — raw-TFIDF cosine (see _compute_tag_cosines)
+      tag_cosine_label,    tag_cosine_negs    — raw-TFIDF cosine cross feature (B-0)
+      genre_overlap_label, genre_overlap_negs — weighted genre overlap cross feature (B-1)
+      tag_overlap_label,   tag_overlap_negs   — weighted tag overlap cross feature  (B-1b)
+      dev_affinity_label,  dev_affinity_negs  — playtime-weighted dev affinity      (B-2)
     """
     n     = arrays['X_hist_full'].shape[0]
     n_neg = top_k - 1
@@ -258,18 +270,53 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     X_hist_pw    = torch.from_numpy(arrays['X_hist_playtime_weights'])
     label_idx    = torch.from_numpy(arrays['label_item_idx']).long()
 
-    neg_item_idxs   = np.zeros((n, n_neg), dtype=np.int32)
-    cg_label_rank   = np.zeros(n,          dtype=np.int32)
-    cg_label_score  = np.zeros(n,          dtype=np.float32)
-    cg_neg_scores   = np.zeros((n, n_neg), dtype=np.float32)
-    tag_cos_label   = np.zeros(n,          dtype=np.float32)
-    tag_cos_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    neg_item_idxs    = np.zeros((n, n_neg), dtype=np.int32)
+    cg_label_rank    = np.zeros(n,          dtype=np.int32)
+    cg_label_score   = np.zeros(n,          dtype=np.float32)
+    cg_neg_scores    = np.zeros((n, n_neg), dtype=np.float32)
+    tag_cos_label    = np.zeros(n,          dtype=np.float32)
+    tag_cos_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    genre_ov_label   = np.zeros(n,          dtype=np.float32)
+    genre_ov_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    tag_ov_label     = np.zeros(n,          dtype=np.float32)
+    tag_ov_negs      = np.zeros((n, n_neg), dtype=np.float32)
+    dev_aff_label    = np.zeros(n,          dtype=np.float32)
+    dev_aff_negs     = np.zeros((n, n_neg), dtype=np.float32)
 
     # Tag matrix on device once. Shape: (n_items+1, n_tags) — pad row appended for safe indexing.
     n_tags = fs['n_tags']
     tag_matrix_dev = torch.from_numpy(np.vstack([
         fs['game_tag_matrix'],
         np.zeros((1, n_tags), dtype=np.float32),
+    ])).to(device)
+
+    # Genre BINARY matrix + per-item genre count on device once. fs['game_genre_matrix']
+    # is L1-row-normalized (each entry = 1/k per genre, sums to 1); for the cross feature
+    # we want true set-membership semantics, so binarize. Pad row appended (count=0,
+    # clamped to 1 for safe divide — never gathered since cand_b stays in [0, n_items)).
+    n_genres = fs['n_genres']
+    genre_binary_dev = torch.from_numpy(np.vstack([
+        (fs['game_genre_matrix'] > 0).astype(np.float32),
+        np.zeros((1, n_genres), dtype=np.float32),
+    ])).to(device)
+    genre_count_dev = genre_binary_dev.sum(dim=1).clamp(min=1.0)                       # (n_items+1,)
+
+    # Tag BINARY matrix + per-item tag count on device once (B-1b). fs['game_tag_matrix']
+    # is raw TF-IDF (varying float values); for the overlap cross feature we want true
+    # set-membership semantics on which tags appear, so binarize (>0). Same pad/divide
+    # convention as the genre buffers.
+    tag_binary_dev = torch.from_numpy(np.vstack([
+        (fs['game_tag_matrix'] > 0).astype(np.float32),
+        np.zeros((1, n_tags), dtype=np.float32),
+    ])).to(device)
+    tag_count_dev  = tag_binary_dev.sum(dim=1).clamp(min=1.0)                          # (n_items+1,)
+
+    # Developer index per item, on device (B-2). Pad row = n_developers (matches
+    # CG's developer Embedding padding_idx).
+    n_devs       = fs['n_developers']
+    game_dev_dev = torch.from_numpy(np.concatenate([
+        fs['game_developer_idx'].astype(np.int64),
+        np.array([n_devs], dtype=np.int64),
     ])).to(device)
 
     for s in tqdm(range(0, n, batch_size), desc="Scoring candidates"):
@@ -314,13 +361,47 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         neg_tag_norm = F.normalize(tag_matrix_dev[topk.indices], p=2, dim=-1)  # (B, n_neg, n_tags)
         tag_cos_negs[s:e] = (user_tag_norm.unsqueeze(1) * neg_tag_norm).sum(dim=-1).cpu().numpy()
 
+        # ── Bucket 1 cross features (shared compute path with train) ────────
+        # Build a unified (B, 1 + n_neg) cand matrix with label at column 0, then call
+        # the same overlap / dev-affinity utils the training loop uses. This guarantees
+        # bit-exact identity between parquet (eval-time) values and on-the-fly (train-
+        # time) values — they're literally the same function on the same tensors.
+        cand_b = torch.cat([label_b.unsqueeze(1), topk.indices], dim=1)                   # (B, 1 + n_neg)
+
+        # B-1 Genre Overlap
+        genre_ov = overlap_pool(genre_binary_dev, genre_count_dev,
+                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        genre_ov_np = genre_ov.cpu().numpy()
+        genre_ov_label[s:e] = genre_ov_np[:, 0]
+        genre_ov_negs[s:e]  = genre_ov_np[:, 1:]
+
+        # B-1b Tag Overlap (same util, tag binary buffers)
+        tag_ov = overlap_pool(tag_binary_dev, tag_count_dev,
+                              pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        tag_ov_np = tag_ov.cpu().numpy()
+        tag_ov_label[s:e] = tag_ov_np[:, 0]
+        tag_ov_negs[s:e]  = tag_ov_np[:, 1:]
+
+        # B-2 Developer Affinity
+        dev_aff = dev_affinity_pool(game_dev_dev, dev_pad_idx=n_devs,
+                                    pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        dev_aff_np = dev_aff.cpu().numpy()
+        dev_aff_label[s:e] = dev_aff_np[:, 0]
+        dev_aff_negs[s:e]  = dev_aff_np[:, 1:]
+
     return {
-        'neg_item_idxs':    neg_item_idxs,
-        'cg_label_rank':    cg_label_rank,
-        'cg_label_score':   cg_label_score,
-        'cg_neg_scores':    cg_neg_scores,
-        'tag_cosine_label': tag_cos_label,
-        'tag_cosine_negs':  tag_cos_negs,
+        'neg_item_idxs':       neg_item_idxs,
+        'cg_label_rank':       cg_label_rank,
+        'cg_label_score':      cg_label_score,
+        'cg_neg_scores':       cg_neg_scores,
+        'tag_cosine_label':    tag_cos_label,
+        'tag_cosine_negs':     tag_cos_negs,
+        'genre_overlap_label': genre_ov_label,
+        'genre_overlap_negs':  genre_ov_negs,
+        'tag_overlap_label':   tag_ov_label,
+        'tag_overlap_negs':    tag_ov_negs,
+        'dev_affinity_label':  dev_aff_label,
+        'dev_affinity_negs':   dev_aff_negs,
     }
 
 
@@ -416,6 +497,12 @@ def _build_dataframe(arrays: dict, scoring: dict) -> pd.DataFrame:
         'cg_neg_scores':           list(scoring['cg_neg_scores']),
         'tag_cosine_label':        scoring['tag_cosine_label'],
         'tag_cosine_negs':         list(scoring['tag_cosine_negs']),
+        'genre_overlap_label':     scoring['genre_overlap_label'],
+        'genre_overlap_negs':      list(scoring['genre_overlap_negs']),
+        'tag_overlap_label':       scoring['tag_overlap_label'],
+        'tag_overlap_negs':        list(scoring['tag_overlap_negs']),
+        'dev_affinity_label':      scoring['dev_affinity_label'],
+        'dev_affinity_negs':       list(scoring['dev_affinity_negs']),
         'user_avg_log_playtime':   arrays['user_avg_log_playtime'],
         'user_interaction_count':  arrays['user_interaction_count'].astype(np.int32),
         'X_hist_liked':            list(arrays['X_hist_liked'].astype(np.int32)),

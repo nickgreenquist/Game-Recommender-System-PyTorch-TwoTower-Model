@@ -23,6 +23,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ranker.cross_features import dev_affinity_pool, overlap_pool
 from ranker.dataset import compute_cross_features
 from ranker.train import build_ranker, get_config, get_device
 from src.dataset import MAX_HISTORY_LEN
@@ -136,10 +137,21 @@ def _build_synthetic_user_inputs(fs: dict, user_type: str, pad_idx: int):
 
 # ── Tag cosine for a synthetic canary against candidate items ──────────────
 
+def _synthetic_user_pool_tensors(full_ids: list, full_pw: list,
+                                  device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pack a synthetic user's history into B=1 pool tensors for the shared cross-feature
+    utils. Returns (pool_indices (1, L), pool_weights (1, L)).
+    """
+    full_t = torch.tensor(full_ids, dtype=torch.long, device=device).unsqueeze(0)
+    pw_t   = torch.tensor(full_pw,  dtype=torch.float32, device=device).unsqueeze(0)
+    return full_t, pw_t
+
+
 def _synthetic_tag_cosine(ranker, full_ids: list, full_pw: list, cand_idx: torch.Tensor,
                           device: torch.device) -> torch.Tensor:
     """
-    Recreate precompute's tag_cosine for a synthetic user. Uses the ranker's own
+    Recreate precompute's tag_cosine (B-0) for a synthetic user. Uses the ranker's own
     game_tag_matrix buffer (raw TF-IDF rows).
     """
     if not full_ids:
@@ -267,8 +279,25 @@ def run_canary(cg_checkpoint: str | None = None,
             user_concat_exp = us.user_concat.expand(n_cand, -1)
             item_concat = ranker.item_embedding(cand_t)
 
+            # Wide-path cross features for the synthetic user.
+            # Pack the synthetic history into (B=1, L) pool tensors and run the same
+            # utils the training loop uses — guarantees parity with train-time compute.
             tag_cos = _synthetic_tag_cosine(ranker, full_ids, full_pw, cand_t, device)
-            cross   = compute_cross_features(tag_cos)
+            if full_ids:
+                pool_t, pool_w = _synthetic_user_pool_tensors(full_ids, full_pw, device)
+                cand_t1        = cand_t.unsqueeze(0)                                    # (1, n_cand)
+                genre_ov = overlap_pool(ranker.game_genre_binary, ranker.game_genre_count,
+                                        pool_indices=pool_t, pool_weights=pool_w, cand_idx=cand_t1).squeeze(0)
+                tag_ov   = overlap_pool(ranker.game_tag_binary,   ranker.game_tag_count,
+                                        pool_indices=pool_t, pool_weights=pool_w, cand_idx=cand_t1).squeeze(0)
+                dev_aff  = dev_affinity_pool(ranker.game_dev_idx, dev_pad_idx=ranker.dev_pad_idx,
+                                              pool_indices=pool_t, pool_weights=pool_w, cand_idx=cand_t1).squeeze(0)
+            else:
+                # Empty synthetic history → no signal.
+                genre_ov = torch.zeros(cand_t.shape[0], device=device)
+                tag_ov   = torch.zeros(cand_t.shape[0], device=device)
+                dev_aff  = torch.zeros(cand_t.shape[0], device=device)
+            cross = compute_cross_features(tag_cos, genre_ov, tag_ov, dev_aff)
 
             ranker_scores = ranker.score_pairs(user_concat_exp, item_concat, cross)
 

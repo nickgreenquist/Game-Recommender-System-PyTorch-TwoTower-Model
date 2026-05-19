@@ -37,6 +37,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ranker.cross_features import dev_affinity_pool, overlap_pool
 from ranker.dataset import (CANDIDATES_PER_ROW, compute_cross_features,
                              load_splits, sample_batch)
 from ranker.evaluate import (cg_baseline, compute_label_ranks,
@@ -131,8 +132,10 @@ def get_config() -> dict:
         'hidden_dims':        [256, 128],
         'dropout':            0.0,
 
-        # Wide bypass — Phase 1: tag_cosine only.
-        'n_cross_features':   1,
+        # Wide bypass — Bucket 1: tag_cosine + genre_overlap + tag_overlap + dev_affinity.
+        # Column order in compute_cross_features (stable, do not reorder — checkpoints depend on it):
+        #   0 tag_cosine (B-0) | 1 genre_overlap (B-1) | 2 tag_overlap (B-1b) | 3 dev_affinity (B-2)
+        'n_cross_features':   4,
 
         # Menon α — plan §8 default: 0 (ranker α=0 vs CG α=0). The 0.4 path is optional.
         'popularity_alpha':   0.0,
@@ -184,8 +187,16 @@ def _buffers_from_fs(fs: dict) -> dict:
     tag_norm     = np.linalg.norm(tag_matrix, ord=2, axis=-1, keepdims=True)
     tag_norm     = np.where(tag_norm > 0.0, tag_norm, 1.0)
     tag_matrix_l2 = (tag_matrix / tag_norm).astype(np.float32)
+    # ── Bucket 1 binary/count buffers (genre + tag) ──────────────────────
+    # The deep towers consume game_tag_matrix (raw TF-IDF) and game_genre_matrix
+    # (L1-row-normalized). The overlap cross features want TRUE set-membership
+    # semantics, so derive separate binary buffers + safe-divide counts.
+    tag_binary   = (tag_matrix > 0).astype(np.float32)
+    tag_count    = np.maximum(tag_binary.sum(axis=1), 1.0).astype(np.float32)
     genre_matrix = np.vstack([fs['game_genre_matrix'],
                                np.zeros((1, n_genres), dtype=np.float32)])
+    genre_binary = (genre_matrix > 0).astype(np.float32)
+    genre_count  = np.maximum(genre_binary.sum(axis=1), 1.0).astype(np.float32)
     year_idx     = np.concatenate([fs['game_year_idx'],
                                     np.zeros((1,), dtype=np.int64)])
     # Padding for developer index: use n_developers (matches Embedding padding_idx).
@@ -197,7 +208,11 @@ def _buffers_from_fs(fs: dict) -> dict:
     return {
         'game_tag_matrix':    torch.from_numpy(tag_matrix),
         'game_tag_matrix_l2': torch.from_numpy(tag_matrix_l2),
+        'game_tag_binary':    torch.from_numpy(tag_binary),
+        'game_tag_count':     torch.from_numpy(tag_count),
         'game_genre_matrix':  torch.from_numpy(genre_matrix),
+        'game_genre_binary':  torch.from_numpy(genre_binary),
+        'game_genre_count':   torch.from_numpy(genre_count),
         'game_year_idx':      torch.from_numpy(year_idx),
         'game_dev_idx':       torch.from_numpy(dev_idx),
         'game_price_idx':     torch.from_numpy(price_idx),
@@ -307,7 +322,11 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
         n_price_buckets=fs['n_price_buckets'],
         game_tag_matrix=bufs['game_tag_matrix'],
         game_tag_matrix_l2=bufs['game_tag_matrix_l2'],
+        game_tag_binary=bufs['game_tag_binary'],
+        game_tag_count=bufs['game_tag_count'],
         game_genre_matrix=bufs['game_genre_matrix'],
+        game_genre_binary=bufs['game_genre_binary'],
+        game_genre_count=bufs['game_genre_count'],
         game_year_idx=bufs['game_year_idx'],
         game_dev_idx=bufs['game_dev_idx'],
         game_price_idx=bufs['game_price_idx'],
@@ -373,6 +392,7 @@ def train(checkpoint_dir: str | None = None) -> str:
     print(f"  user_concat({model.user_concat_dim}) + item_concat({model.item_concat_dim}) "
           f"= deep_in({model.deep_in})")
     print(f"  → hidden={config['hidden_dims']} → head({config['hidden_dims'][-1]}+{n_cross}→1)")
+    print(f"  cross features: tag_cosine, genre_overlap, tag_overlap, dev_affinity (Bucket 1)")
     print(f"  ({n_params:,} trainable params)")
 
     # ── Menon α popularity bias (CLOSED in default Phase 1; see plan §8) ────
@@ -442,20 +462,36 @@ def train(checkpoint_dir: str | None = None) -> str:
         all_item_concat = model.item_embedding(all_item_ids)                       # (n_items, I)
         item_concat     = all_item_concat[cand_b.reshape(-1)]                      # (B*n_cand, I)
 
-        # Cross feature: tag_cosine on the fly for the sampled candidates.
-        # Mirror precompute logic — playtime-weighted user pool over raw TF-IDF.
-        # Compute the full (B, n_items+1) user-vs-corpus cosine matrix once via a
-        # dense matmul, then gather per (b, c). Cheaper than gathering
-        # (B, n_cand, n_tags) rows from game_tag_matrix_l2 (~370MB at N=999) and
-        # multiplying — MPS handles dense matmuls much better than fancy 3D gathers.
-        # Pad row in game_tag_matrix_l2 is all-zero → harmless contribution to the
-        # matmul, and cand_b never references it.
+        # Cross features on the fly for the sampled candidates. All four match
+        # precompute exactly — the overlap / dev-affinity utils ARE the same function
+        # called from precompute, so parquet values and train-time values are bit-
+        # identical by construction.
+        #
+        # Strategy: compute the full (B, n_items+1) user-vs-corpus score matrix once
+        # per feature via a dense matmul, then gather per (b, c). Cheaper than 3D
+        # gathers over (B, n_cand, n_feat) buffers — MPS handles dense matmuls much
+        # better. Pad rows in all buffers are zero → harmless; cand_b never references them.
+
+        # ── tag_cosine (B-0): playtime-weighted user pool over raw TF-IDF, cosine ─
         user_tag_pool = (model.game_tag_matrix[h_full] * h_pw.unsqueeze(-1)).sum(dim=1)  # (B, n_tags)
         user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
-        full_tag_cos  = user_tag_norm @ model.game_tag_matrix_l2.t()               # (B, n_items+1)
-        tag_cos       = full_tag_cos.gather(1, cand_b)                             # (B, n_cand)
+        full_tag_cos  = user_tag_norm @ model.game_tag_matrix_l2.t()                     # (B, n_items+1)
+        tag_cos       = full_tag_cos.gather(1, cand_b)                                   # (B, n_cand)
 
-        cross  = compute_cross_features(tag_cos.reshape(-1))
+        # ── Bucket 1 overlap + affinity (shared utils, full-history pool) ─────
+        # Same compute called from precompute (bit-exact parquet identity).
+        # Bucket 3 (future) calls these utils with last-3-liked pool args instead.
+        genre_ov = overlap_pool(model.game_genre_binary, model.game_genre_count,
+                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        tag_ov   = overlap_pool(model.game_tag_binary,   model.game_tag_count,
+                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        dev_aff  = dev_affinity_pool(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
+                                     pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+
+        cross = compute_cross_features(tag_cos.reshape(-1),
+                                        genre_ov.reshape(-1),
+                                        tag_ov.reshape(-1),
+                                        dev_aff.reshape(-1))
         # score_pairs_batched factorizes the first MLP layer over the (B, n_cand) layout
         # — runs user-side projection on B rows (not B*n_cand) and avoids materializing
         # a (B*n_cand, U) user replica. Math identity; output matches score_pairs to ~1e-6.
