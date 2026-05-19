@@ -70,21 +70,31 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         item_concat = all_item_concat[cand_flat]                               # (B*n_cand, item_dim)
 
         # ── Cross features ──────────────────────────────────────────────────
-        # Phase A/B (Bucket 1): read precomputed values from parquet (eval-time is the
-        # only place these are persisted; matches the precompute write). On-the-fly
+        # Bucket 2 (10 features): read precomputed values from parquet. On-the-fly
         # compute in train._forward_batch is mathematically identical to these values
-        # (same weighted_overlap / dev_affinity utils on both sides).
+        # (same weighted_overlap / dev_affinity / last_n_history utils on both sides).
         def _gather(label_col: np.ndarray, neg_col: np.ndarray) -> torch.Tensor:
             buf = np.empty((B, n_cand), dtype=np.float32)
             buf[:, 0]  = label_col[rows]
             buf[:, 1:] = neg_col[rows]
             return torch.from_numpy(buf.reshape(-1)).to(device)
 
-        tag_cos_flat  = _gather(dataset.tag_cosine_label,    dataset.tag_cosine_negs)
-        genre_ov_flat = _gather(dataset.genre_overlap_label, dataset.genre_overlap_negs)
-        tag_ov_flat   = _gather(dataset.tag_overlap_label,   dataset.tag_overlap_negs)
-        dev_aff_flat  = _gather(dataset.dev_affinity_label,  dataset.dev_affinity_negs)
-        cross = compute_cross_features(tag_cos_flat, genre_ov_flat, tag_ov_flat, dev_aff_flat)
+        tag_cos_flat     = _gather(dataset.tag_cosine_label,             dataset.tag_cosine_negs)
+        # Bucket 1 — full-history slice
+        genre_ov_flat    = _gather(dataset.genre_overlap_label,          dataset.genre_overlap_negs)
+        tag_ov_flat      = _gather(dataset.tag_overlap_label,            dataset.tag_overlap_negs)
+        dev_aff_flat     = _gather(dataset.dev_affinity_label,           dataset.dev_affinity_negs)
+        # Bucket 2A — liked slice
+        genre_ov_l_flat  = _gather(dataset.genre_overlap_liked_label,    dataset.genre_overlap_liked_negs)
+        tag_ov_l_flat    = _gather(dataset.tag_overlap_liked_label,      dataset.tag_overlap_liked_negs)
+        dev_aff_l_flat   = _gather(dataset.dev_affinity_liked_label,     dataset.dev_affinity_liked_negs)
+        # Bucket 2B — recent-3 window
+        genre_ov_r3_flat = _gather(dataset.genre_overlap_recent3_label,  dataset.genre_overlap_recent3_negs)
+        tag_ov_r3_flat   = _gather(dataset.tag_overlap_recent3_label,    dataset.tag_overlap_recent3_negs)
+        dev_aff_r3_flat  = _gather(dataset.dev_affinity_recent3_label,   dataset.dev_affinity_recent3_negs)
+        cross = compute_cross_features(tag_cos_flat, genre_ov_flat, tag_ov_flat, dev_aff_flat,
+                                       genre_ov_l_flat, tag_ov_l_flat, dev_aff_l_flat,
+                                       genre_ov_r3_flat, tag_ov_r3_flat, dev_aff_r3_flat)
 
         # ── Score: factorized MLP layer-1 over the (B, n_cand) layout ───────
         # See model.score_pairs_batched — math identity, runs user-side projection

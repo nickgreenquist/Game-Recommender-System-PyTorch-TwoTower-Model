@@ -37,7 +37,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ranker.cross_features import dev_affinity, weighted_overlap
+from ranker.cross_features import dev_affinity, last_n_history, weighted_overlap
 from ranker.dataset import (CANDIDATES_PER_ROW, compute_cross_features,
                              load_splits, sample_batch)
 from ranker.evaluate import (cg_baseline, compute_label_ranks,
@@ -132,10 +132,19 @@ def get_config() -> dict:
         'hidden_dims':        [256, 128],
         'dropout':            0.0,
 
-        # Wide bypass — Bucket 1: tag_cosine + genre_overlap + tag_overlap + dev_affinity.
-        # Column order in compute_cross_features (stable, do not reorder — checkpoints depend on it):
-        #   0 tag_cosine (B-0) | 1 genre_overlap (B-1) | 2 tag_overlap (B-1b) | 3 dev_affinity (B-2)
-        'n_cross_features':   4,
+        # Wide bypass — Bucket 2 (10 features total). Column order in compute_cross_features
+        # is stable, do not reorder — checkpoints depend on it:
+        #   0 tag_cosine (B-0)            ← Phase A
+        #   1 genre_overlap (B-1)         ← Bucket 1 (full-history slice)
+        #   2 tag_overlap (B-1b)          ← Bucket 1
+        #   3 dev_affinity (B-2)          ← Bucket 1
+        #   4 genre_overlap_liked (B-3a)  ← Bucket 2A (liked-only slice)
+        #   5 tag_overlap_liked (B-3b)    ← Bucket 2A
+        #   6 dev_affinity_liked (B-3c)   ← Bucket 2A
+        #   7 genre_overlap_recent3 (B-4a) ← Bucket 2B (last-3-liked window)
+        #   8 tag_overlap_recent3 (B-4b)   ← Bucket 2B
+        #   9 dev_affinity_recent3 (B-4c)  ← Bucket 2B
+        'n_cross_features':   10,
 
         # Menon α — plan §8 default: 0 (ranker α=0 vs CG α=0). The 0.4 path is optional.
         'popularity_alpha':   0.0,
@@ -392,7 +401,9 @@ def train(checkpoint_dir: str | None = None) -> str:
     print(f"  user_concat({model.user_concat_dim}) + item_concat({model.item_concat_dim}) "
           f"= deep_in({model.deep_in})")
     print(f"  → hidden={config['hidden_dims']} → head({config['hidden_dims'][-1]}+{n_cross}→1)")
-    print(f"  cross features: tag_cosine, genre_overlap, tag_overlap, dev_affinity (Bucket 1)")
+    print(f"  cross features (10, Bucket 2): tag_cosine | "
+          f"genre/tag/dev overlap (full) | genre/tag/dev overlap (liked) | "
+          f"genre/tag/dev overlap (recent-3-liked)")
     print(f"  ({n_params:,} trainable params)")
 
     # ── Menon α popularity bias (CLOSED in default Phase 1; see plan §8) ────
@@ -446,9 +457,11 @@ def train(checkpoint_dir: str | None = None) -> str:
     n_items_int   = int(model.game_pad_idx)
     all_item_ids  = torch.arange(n_items_int, device=device)
 
+    pad_idx_int = int(model.game_pad_idx)
+
     def _forward_batch(batch):
         """Sampled-softmax forward. Returns (scores (B, n_cand), target (B,), cand_b (B, n_cand))."""
-        (x_avg, h_lkd, h_dis, h_full, h_pw, cand_b, target_b) = batch
+        (x_avg, h_lkd, h_lkd_pw, h_dis, h_full, h_pw, cand_b, target_b) = batch
         B, n_cand = cand_b.shape
 
         # User-side: ONE pass per row.
@@ -462,10 +475,10 @@ def train(checkpoint_dir: str | None = None) -> str:
         all_item_concat = model.item_embedding(all_item_ids)                       # (n_items, I)
         item_concat     = all_item_concat[cand_b.reshape(-1)]                      # (B*n_cand, I)
 
-        # Cross features on the fly for the sampled candidates. All four match
-        # precompute exactly — the overlap / dev-affinity utils ARE the same function
-        # called from precompute, so parquet values and train-time values are bit-
-        # identical by construction.
+        # Cross features on the fly for the sampled candidates. All ten match
+        # precompute exactly — the overlap / dev-affinity / last_n_history utils ARE
+        # the same functions called from precompute, so parquet values and train-time
+        # values are bit-identical by construction.
         #
         # Strategy: compute the full (B, n_items+1) user-vs-corpus score matrix once
         # per feature via a dense matmul, then gather per (b, c). Cheaper than 3D
@@ -478,10 +491,7 @@ def train(checkpoint_dir: str | None = None) -> str:
         full_tag_cos  = user_tag_norm @ model.game_tag_matrix_l2.t()                     # (B, n_items+1)
         tag_cos       = full_tag_cos.gather(1, cand_b)                                   # (B, n_cand)
 
-        # ── Bucket 1 overlap + affinity (shared utils, full-history slice) ────
-        # Same compute called from precompute (bit-exact parquet identity).
-        # Buckets 2-4 (future) call these utils with different history slices
-        # (liked / last-3-liked / disliked) — see plan §9.
+        # ── Bucket 1 — full-history slice (h_full, h_pw) ────────────────────────
         genre_ov = weighted_overlap(model.game_genre_binary, model.game_genre_count,
                                     history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
         tag_ov   = weighted_overlap(model.game_tag_binary,   model.game_tag_count,
@@ -489,10 +499,29 @@ def train(checkpoint_dir: str | None = None) -> str:
         dev_aff  = dev_affinity(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
                                 history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
 
+        # ── Bucket 2A — liked-only history slice (h_lkd, h_lkd_pw) ─────────────
+        genre_ov_l = weighted_overlap(model.game_genre_binary, model.game_genre_count,
+                                      history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_b)
+        tag_ov_l   = weighted_overlap(model.game_tag_binary,   model.game_tag_count,
+                                      history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_b)
+        dev_aff_l  = dev_affinity(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
+                                  history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_b)
+
+        # ── Bucket 2B — last-3-liked window (derived from liked slice) ──────────
+        # last_n_history takes the last 3 non-pad positions and re-normalizes weights.
+        # Identical computation to precompute → bit-exact parquet identity.
+        h_recent3, h_recent3_pw = last_n_history(h_lkd, h_lkd_pw, n=3, pad_idx=pad_idx_int)
+        genre_ov_r3 = weighted_overlap(model.game_genre_binary, model.game_genre_count,
+                                       history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+        tag_ov_r3   = weighted_overlap(model.game_tag_binary,   model.game_tag_count,
+                                       history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+        dev_aff_r3  = dev_affinity(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
+                                   history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+
         cross = compute_cross_features(tag_cos.reshape(-1),
-                                        genre_ov.reshape(-1),
-                                        tag_ov.reshape(-1),
-                                        dev_aff.reshape(-1))
+                                        genre_ov.reshape(-1), tag_ov.reshape(-1), dev_aff.reshape(-1),
+                                        genre_ov_l.reshape(-1), tag_ov_l.reshape(-1), dev_aff_l.reshape(-1),
+                                        genre_ov_r3.reshape(-1), tag_ov_r3.reshape(-1), dev_aff_r3.reshape(-1))
         # score_pairs_batched factorizes the first MLP layer over the (B, n_cand) layout
         # — runs user-side projection on B rows (not B*n_cand) and avoids materializing
         # a (B*n_cand, U) user replica. Math identity; output matches score_pairs to ~1e-6.

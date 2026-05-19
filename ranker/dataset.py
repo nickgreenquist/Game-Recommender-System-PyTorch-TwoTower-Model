@@ -10,17 +10,27 @@ target). train.py runs user_forward + item_embedding + computes all cross featur
 the fly via ranker.cross_features utils (same code path as precompute → bit-exact
 parquet identity), then calls compute_cross_features to stack them for the wide head.
 
-Active cross features (4 total — **Bucket 1** roster, plan §9):
-  1. tag_cosine    (B-0)  — raw TF-IDF cosine, direction match on user's full tag profile.
-  2. genre_overlap (B-1)  — weighted binary genre overlap, normalized by item's genre count.
-  3. tag_overlap   (B-1b) — weighted binary TAG overlap, magnitude-aware complement to (1).
-  4. dev_affinity  (B-2)  — playtime-weighted developer match.
+Active cross features (10 total — **Bucket 2** roster, plan §9):
+  Phase A:
+    1. tag_cosine               (B-0)  — raw TF-IDF cosine on user's full tag profile.
+  Bucket 1 (full-history slice):
+    2. genre_overlap            (B-1)  — weighted binary genre overlap / item genre count.
+    3. tag_overlap              (B-1b) — weighted binary TAG overlap, magnitude-aware.
+    4. dev_affinity             (B-2)  — playtime-weighted developer match, full hist.
+  Bucket 2A (liked-only history slice):
+    5. genre_overlap_liked      (B-3a) — same as B-1, restricted to liked games.
+    6. tag_overlap_liked        (B-3b) — same as B-1b, restricted to liked games.
+    7. dev_affinity_liked       (B-3c) — same as B-2, restricted to liked games.
+  Bucket 2B (last-3-liked window):
+    8. genre_overlap_recent3    (B-4a) — same as B-1, on last 3 non-pad of X_hist_liked.
+    9. tag_overlap_recent3      (B-4b) — same as B-1b, on last 3 non-pad of X_hist_liked.
+   10. dev_affinity_recent3     (B-4c) — same as B-2, on last 3 non-pad of X_hist_liked.
 
-TRAIN: computed on the fly via ranker/cross_features.py utils (weighted_overlap +
-dev_affinity). EVAL / CANARY: read from parquet (or rebuilt via same utils for
-synthetic canary users — see ranker/canary.py).
+TRAIN: computed on the fly via ranker/cross_features.py utils (weighted_overlap /
+dev_affinity / last_n_history). EVAL / CANARY: read from parquet (or rebuilt via
+same utils for synthetic canary users — see ranker/canary.py).
 
-Plan §9 Buckets 2-4 land here in future phases — see Wide-feature normalization
+Plan §9 Buckets 3-5 land here in future phases — see Wide-feature normalization
 section in plan §9 for fixed-stats persistent buffers and gain=0.1 init.
 """
 import os
@@ -59,19 +69,44 @@ class RankerDataset:
         self.neg_idx       = np.stack(df['neg_item_idxs'].values).astype(np.int32)     # (N, 99)
         self.cg_label_rank = df['cg_label_rank'].values.astype(np.int32)               # (N,)
 
-        # Cross features (precomputed by precompute.py — Bucket 1 roster).
-        #   B-0  tag_cosine    : raw TF-IDF cosine of user tag pool vs candidate
-        #   B-1  genre_overlap : weighted binary genre overlap / item genre count
-        #   B-1b tag_overlap   : weighted binary tag overlap / item tag count
-        #   B-2  dev_affinity  : playtime-weighted fraction of user history under candidate's developer
-        self.tag_cosine_label    = df['tag_cosine_label'].values.astype(np.float32)              # (N,)
-        self.tag_cosine_negs     = np.stack(df['tag_cosine_negs'].values).astype(np.float32)     # (N, 99)
-        self.genre_overlap_label = df['genre_overlap_label'].values.astype(np.float32)
-        self.genre_overlap_negs  = np.stack(df['genre_overlap_negs'].values).astype(np.float32)
-        self.tag_overlap_label   = df['tag_overlap_label'].values.astype(np.float32)
-        self.tag_overlap_negs    = np.stack(df['tag_overlap_negs'].values).astype(np.float32)
-        self.dev_affinity_label  = df['dev_affinity_label'].values.astype(np.float32)
-        self.dev_affinity_negs   = np.stack(df['dev_affinity_negs'].values).astype(np.float32)
+        # Cross features (precomputed by precompute.py — Bucket 2 roster, 10 features total).
+        # Phase A:
+        #   B-0  tag_cosine             : raw TF-IDF cosine of user tag pool vs candidate
+        # Bucket 1 (full-history slice):
+        #   B-1  genre_overlap          : weighted binary genre overlap / item genre count
+        #   B-1b tag_overlap            : weighted binary tag overlap / item tag count
+        #   B-2  dev_affinity           : playtime-weighted fraction of user history under candidate's developer
+        # Bucket 2A (liked-only history slice):
+        #   B-3a genre_overlap_liked    : same as B-1, restricted to liked games
+        #   B-3b tag_overlap_liked      : same as B-1b, restricted to liked games
+        #   B-3c dev_affinity_liked     : same as B-2, restricted to liked games
+        # Bucket 2B (last-3-liked window):
+        #   B-4a genre_overlap_recent3  : same as B-1, on last 3 non-pad of X_hist_liked
+        #   B-4b tag_overlap_recent3    : same as B-1b, on last 3 non-pad of X_hist_liked
+        #   B-4c dev_affinity_recent3   : same as B-2, on last 3 non-pad of X_hist_liked
+        self.tag_cosine_label             = df['tag_cosine_label'].values.astype(np.float32)              # (N,)
+        self.tag_cosine_negs              = np.stack(df['tag_cosine_negs'].values).astype(np.float32)     # (N, 99)
+        # Bucket 1
+        self.genre_overlap_label          = df['genre_overlap_label'].values.astype(np.float32)
+        self.genre_overlap_negs           = np.stack(df['genre_overlap_negs'].values).astype(np.float32)
+        self.tag_overlap_label            = df['tag_overlap_label'].values.astype(np.float32)
+        self.tag_overlap_negs             = np.stack(df['tag_overlap_negs'].values).astype(np.float32)
+        self.dev_affinity_label           = df['dev_affinity_label'].values.astype(np.float32)
+        self.dev_affinity_negs            = np.stack(df['dev_affinity_negs'].values).astype(np.float32)
+        # Bucket 2A — liked slice
+        self.genre_overlap_liked_label    = df['genre_overlap_liked_label'].values.astype(np.float32)
+        self.genre_overlap_liked_negs     = np.stack(df['genre_overlap_liked_negs'].values).astype(np.float32)
+        self.tag_overlap_liked_label      = df['tag_overlap_liked_label'].values.astype(np.float32)
+        self.tag_overlap_liked_negs       = np.stack(df['tag_overlap_liked_negs'].values).astype(np.float32)
+        self.dev_affinity_liked_label     = df['dev_affinity_liked_label'].values.astype(np.float32)
+        self.dev_affinity_liked_negs      = np.stack(df['dev_affinity_liked_negs'].values).astype(np.float32)
+        # Bucket 2B — recent-3 window
+        self.genre_overlap_recent3_label  = df['genre_overlap_recent3_label'].values.astype(np.float32)
+        self.genre_overlap_recent3_negs   = np.stack(df['genre_overlap_recent3_negs'].values).astype(np.float32)
+        self.tag_overlap_recent3_label    = df['tag_overlap_recent3_label'].values.astype(np.float32)
+        self.tag_overlap_recent3_negs     = np.stack(df['tag_overlap_recent3_negs'].values).astype(np.float32)
+        self.dev_affinity_recent3_label   = df['dev_affinity_recent3_label'].values.astype(np.float32)
+        self.dev_affinity_recent3_negs    = np.stack(df['dev_affinity_recent3_negs'].values).astype(np.float32)
 
         # User-tower inputs (pre-padded to MAX_HISTORY_LEN by precompute).
         self.X_user_avg_log  = df['user_avg_log_playtime'].values.astype(np.float32)
@@ -79,6 +114,10 @@ class RankerDataset:
         self.X_hist_disliked = np.stack(df['X_hist_disliked'].values).astype(np.int64)
         self.X_hist_full     = np.stack(df['X_hist_full'].values).astype(np.int64)
         self.X_hist_pw       = np.stack(df['X_hist_playtime_weights'].values).astype(np.float32)
+        # Bucket 2 — playtime weights for the LIKED slice (parallel to X_hist_liked,
+        # normalized to sum 1 over non-pad liked entries; 0 at pad). Distinct from
+        # X_hist_pw (which is normalized over the FULL slice).
+        self.X_hist_liked_pw = np.stack(df['X_hist_liked_playtime_weights'].values).astype(np.float32)
 
         self.N        = len(self.label_idx)
         self.n_neg    = self.neg_idx.shape[1]
@@ -93,46 +132,63 @@ class RankerDataset:
         # reads them directly for the 100-cand eval pool. Both are awkward on-device.
         self._X_user_avg_log_t  = torch.from_numpy(self.X_user_avg_log).unsqueeze(-1)  # (N, 1)
         self._X_hist_liked_t    = torch.from_numpy(self.X_hist_liked)
+        self._X_hist_liked_pw_t = torch.from_numpy(self.X_hist_liked_pw)
         self._X_hist_disliked_t = torch.from_numpy(self.X_hist_disliked)
         self._X_hist_full_t     = torch.from_numpy(self.X_hist_full)
         self._X_hist_pw_t       = torch.from_numpy(self.X_hist_pw)
 
     def to(self, device: torch.device) -> 'RankerDataset':
         """Move user-tower tensors to device, then drop the numpy originals to free RAM.
-        Numpy lookup/scalar arrays (label_idx, neg_idx, cg_label_rank, tag_cosine_*)
+        Numpy lookup/scalar arrays (label_idx, neg_idx, cg_label_rank, *_label/*_negs)
         stay on host — sample_batch and evaluate.py read them via numpy slicing."""
         self._X_user_avg_log_t  = self._X_user_avg_log_t.to(device)
         self._X_hist_liked_t    = self._X_hist_liked_t.to(device)
+        self._X_hist_liked_pw_t = self._X_hist_liked_pw_t.to(device)
         self._X_hist_disliked_t = self._X_hist_disliked_t.to(device)
         self._X_hist_full_t     = self._X_hist_full_t.to(device)
         self._X_hist_pw_t       = self._X_hist_pw_t.to(device)
-        del self.X_user_avg_log, self.X_hist_liked, self.X_hist_disliked
+        del self.X_user_avg_log, self.X_hist_liked, self.X_hist_liked_pw, self.X_hist_disliked
         del self.X_hist_full, self.X_hist_pw
         return self
 
 
 # ── Cross-feature computation (shared by sample_batch + evaluate + canary) ──
 
-def compute_cross_features(tag_cosine:    torch.Tensor,
-                           genre_overlap: torch.Tensor,
-                           tag_overlap:   torch.Tensor,
-                           dev_affinity:  torch.Tensor) -> torch.Tensor:
+def compute_cross_features(tag_cosine:             torch.Tensor,
+                           genre_overlap:          torch.Tensor,
+                           tag_overlap:            torch.Tensor,
+                           dev_affinity:           torch.Tensor,
+                           genre_overlap_liked:    torch.Tensor,
+                           tag_overlap_liked:      torch.Tensor,
+                           dev_affinity_liked:     torch.Tensor,
+                           genre_overlap_recent3:  torch.Tensor,
+                           tag_overlap_recent3:    torch.Tensor,
+                           dev_affinity_recent3:   torch.Tensor) -> torch.Tensor:
     """
-    Bucket 1 wide-path stacker. Returns (B, 4).
+    Bucket 2 wide-path stacker. Returns (B, 10).
 
     Inputs are 1-D (B,) tensors of per-(row, candidate) scalars. Column order in
-    the output tensor must match `n_cross_features=4` and the head weight slot
+    the output tensor must match `n_cross_features=10` and the head weight slot
     interpretation — checkpoints rely on this stable ordering:
 
-        column 0 : tag_cosine    (B-0)
-        column 1 : genre_overlap (B-1)
-        column 2 : tag_overlap   (B-1b)
-        column 3 : dev_affinity  (B-2)
+        column 0 : tag_cosine              (B-0,  Phase A)
+        column 1 : genre_overlap           (B-1,  Bucket 1)
+        column 2 : tag_overlap             (B-1b, Bucket 1)
+        column 3 : dev_affinity            (B-2,  Bucket 1)
+        column 4 : genre_overlap_liked     (B-3a, Bucket 2A)
+        column 5 : tag_overlap_liked       (B-3b, Bucket 2A)
+        column 6 : dev_affinity_liked      (B-3c, Bucket 2A)
+        column 7 : genre_overlap_recent3   (B-4a, Bucket 2B)
+        column 8 : tag_overlap_recent3     (B-4b, Bucket 2B)
+        column 9 : dev_affinity_recent3    (B-4c, Bucket 2B)
 
-    Future buckets append further columns at indices ≥ 4; do not reorder existing
+    Future buckets append further columns at indices ≥ 10; do not reorder existing
     columns or older checkpoints become silently mis-aligned at load time.
     """
-    return torch.stack([tag_cosine, genre_overlap, tag_overlap, dev_affinity], dim=-1)
+    return torch.stack([tag_cosine, genre_overlap, tag_overlap, dev_affinity,
+                        genre_overlap_liked, tag_overlap_liked, dev_affinity_liked,
+                        genre_overlap_recent3, tag_overlap_recent3, dev_affinity_recent3],
+                       dim=-1)
 
 
 # ── Sampled softmax batch sampler ──────────────────────────────────────────
@@ -164,14 +220,15 @@ def sample_batch(dataset: RankerDataset, batch_size: int, device: torch.device,
     Cross features (tag_cosine, etc.) are computed on-the-fly in train.py for the
     sampled candidates — mathematically identical to precompute values.
 
-    Returns 7-tuple (all on `device`):
+    Returns 8-tuple (all on `device`):
       X_user_avg_log     (B, 1)
       X_hist_liked       (B, H)
+      X_hist_liked_pw    (B, H)   ← Bucket 2: weights normalized over liked slice
       X_hist_disliked    (B, H)
       X_hist_full        (B, H)
-      X_hist_pw          (B, H)
+      X_hist_pw          (B, H)   ← weights normalized over full slice
       cand_idx           (B, 1 + n_hard_take + n_random)   ← label at col 0
-      target             (B,)   ← all zeros (label is at column 0)
+      target             (B,)     ← all zeros (label is at column 0)
     """
     rows = rng.integers(0, dataset.N, size=batch_size)
     rows_t = torch.from_numpy(rows).long()
@@ -195,6 +252,7 @@ def sample_batch(dataset: RankerDataset, batch_size: int, device: torch.device,
     return (
         dataset._X_user_avg_log_t[rows_t].to(device),
         dataset._X_hist_liked_t[rows_t].to(device),
+        dataset._X_hist_liked_pw_t[rows_t].to(device),
         dataset._X_hist_disliked_t[rows_t].to(device),
         dataset._X_hist_full_t[rows_t].to(device),
         dataset._X_hist_pw_t[rows_t].to(device),

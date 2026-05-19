@@ -6,17 +6,29 @@ shuffled prefix history[:pos], score against all corpus items via the PROD CG mo
 (α=0.4 by default), and save the top-(K-1) hard negatives + label as a single row.
 
 Cross features (precomputed; columns written per (label, neg) per row):
-  - tag_cosine    (B-0) — raw TF-IDF cosine of user tag pool vs candidate tag vector.
+  - tag_cosine    (B-0)  — raw TF-IDF cosine of user tag pool vs candidate tag vector.
                     Computed off game_tag_matrix (the registered buffer CG uses),
                     *not* off the tag tower outputs — model-independent so the
                     parquet stays valid if tower hidden dims change.
-  - genre_overlap (B-1) — playtime-weighted binary genre overlap, normalized by
+
+  Bucket 1 (full-history slice — X_hist_full + X_hist_playtime_weights):
+  - genre_overlap (B-1)  — playtime-weighted binary genre overlap, normalized by
                     candidate's genre count. Range [0, 1].
   - tag_overlap   (B-1b) — playtime-weighted binary TAG overlap (set-membership),
                     normalized by candidate's tag count. Magnitude-aware complement
                     to tag_cosine (which is direction-only). Range [0, 1].
-  - dev_affinity  (B-2) — fraction of user's playtime on games by candidate's
+  - dev_affinity  (B-2)  — fraction of user's playtime on games by candidate's
                     developer. Range [0, 1].
+
+  Bucket 2 (liked-only history slice — X_hist_liked + X_hist_liked_playtime_weights):
+  - genre_overlap_liked   (B-3a) — same formula as B-1, on liked-only history slice.
+  - tag_overlap_liked     (B-3b) — same formula as B-1b, on liked-only history slice.
+  - dev_affinity_liked    (B-3c) — same formula as B-2, on liked-only history slice.
+
+  Bucket 2 (last-3-liked window — derived via last_n_history from the liked slice):
+  - genre_overlap_recent3 (B-4a) — same as B-1 over last 3 non-pad of X_hist_liked.
+  - tag_overlap_recent3   (B-4b) — same as B-1b over last 3 non-pad of X_hist_liked.
+  - dev_affinity_recent3  (B-4c) — same as B-2 over last 3 non-pad of X_hist_liked.
 
 Output:
     data/ranker_candidates_train.parquet
@@ -46,7 +58,7 @@ from src.train import (build_model, get_config,
 # encode the SAME CG that the ranker will compete against in evaluate.py.
 # Mismatched precompute (e.g. α=0.4 CG retrieval + α=0 ranker training) means the
 # E2E-ceiling "CG baseline" measured at eval time isn't the CG the ranker is fighting.
-from ranker.cross_features import weighted_overlap, dev_affinity
+from ranker.cross_features import weighted_overlap, dev_affinity, last_n_history
 from ranker.train import _ALPHA_TO_CG_GLOB
 
 
@@ -142,6 +154,10 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
     X_hist_disliked = np.full((total_examples, MAX_HISTORY_LEN), pad_idx, dtype=np.int32)
     X_hist_full     = np.full((total_examples, MAX_HISTORY_LEN), pad_idx, dtype=np.int32)
     X_hist_pw       = np.zeros((total_examples, MAX_HISTORY_LEN), dtype=np.float32)
+    # Bucket 2 — playtime weights for the LIKED slice (parallel to X_hist_liked,
+    # normalized to sum to 1 over the non-pad liked entries; 0 at pad). Separate from
+    # X_hist_pw, which is normalized over the FULL slice and is not a subset of this.
+    X_hist_liked_pw = np.zeros((total_examples, MAX_HISTORY_LEN), dtype=np.float32)
 
     # ── Step 2: fill arrays ─────────────────────────────────────────────────
     ex = 0
@@ -191,6 +207,7 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
 
                 user_median = float(np.median(raw_hours[:pos]))
                 liked_ids, disliked_ids = [], []
+                liked_logs = []                 # parallel to liked_ids; raw log-playtime per liked entry
                 for i in range(pos):
                     ctx_iid = history[i]
                     ctx_h   = raw_hours[i]
@@ -201,16 +218,20 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
                                   or (ctx_h <= user_median / 2)
                     if is_liked:
                         liked_ids.append(ctx_iid)
+                        liked_logs.append(raw_logs[i])
                     if is_disliked:
                         disliked_ids.append(ctx_iid)
 
                 full_start    = max(0, pos - MAX_HISTORY_LEN)
                 full_ids      = history[full_start:pos]
                 liked_ids     = liked_ids[-MAX_HISTORY_LEN:]
+                liked_logs    = liked_logs[-MAX_HISTORY_LEN:]
                 disliked_ids  = disliked_ids[-MAX_HISTORY_LEN:]
 
                 if liked_ids:
                     X_hist_liked[ex, :len(liked_ids)] = liked_ids
+                    total_liked_pw = sum(liked_logs) or 1.0
+                    X_hist_liked_pw[ex, :len(liked_ids)] = [ll / total_liked_pw for ll in liked_logs]
                 if disliked_ids:
                     X_hist_disliked[ex, :len(disliked_ids)] = disliked_ids
                 if full_ids:
@@ -229,15 +250,16 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
 
     # Truncate over-allocation
     return {
-        'user_id':                 user_id_arr[:ex],
-        'rollback_n':              rollback_n_arr[:ex],
-        'label_item_idx':          label_idx_arr[:ex],
-        'user_avg_log_playtime':   user_avg_log[:ex],
-        'user_interaction_count':  user_int_count[:ex],
-        'X_hist_liked':            X_hist_liked[:ex],
-        'X_hist_disliked':         X_hist_disliked[:ex],
-        'X_hist_full':             X_hist_full[:ex],
-        'X_hist_playtime_weights': X_hist_pw[:ex],
+        'user_id':                       user_id_arr[:ex],
+        'rollback_n':                    rollback_n_arr[:ex],
+        'label_item_idx':                label_idx_arr[:ex],
+        'user_avg_log_playtime':         user_avg_log[:ex],
+        'user_interaction_count':        user_int_count[:ex],
+        'X_hist_liked':                  X_hist_liked[:ex],
+        'X_hist_disliked':               X_hist_disliked[:ex],
+        'X_hist_full':                   X_hist_full[:ex],
+        'X_hist_playtime_weights':       X_hist_pw[:ex],
+        'X_hist_liked_playtime_weights': X_hist_liked_pw[:ex],
     }
 
 
@@ -254,34 +276,56 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
       cg_label_rank : (n,)          int32 — label's rank in full corpus, 1-indexed, capped at top_k
       cg_label_score: (n,)          float32 — raw CG dot for the label (pre-mask)
       cg_neg_scores : (n, top_k - 1) float32 — raw CG dot per negative
-      tag_cosine_label,    tag_cosine_negs    — raw-TFIDF cosine cross feature (B-0)
-      genre_overlap_label, genre_overlap_negs — weighted genre overlap cross feature (B-1)
-      tag_overlap_label,   tag_overlap_negs   — weighted tag overlap cross feature  (B-1b)
-      dev_affinity_label,  dev_affinity_negs  — playtime-weighted dev affinity      (B-2)
+      tag_cosine_label,    tag_cosine_negs    — raw-TFIDF cosine                   (B-0)
+      genre_overlap_label, genre_overlap_negs — weighted genre overlap, full hist  (B-1)
+      tag_overlap_label,   tag_overlap_negs   — weighted tag overlap, full hist    (B-1b)
+      dev_affinity_label,  dev_affinity_negs  — playtime-weighted dev, full hist   (B-2)
+      genre_overlap_liked_label,   ...negs    — weighted genre overlap, liked hist (B-3a)
+      tag_overlap_liked_label,     ...negs    — weighted tag overlap, liked hist   (B-3b)
+      dev_affinity_liked_label,    ...negs    — playtime-weighted dev, liked hist  (B-3c)
+      genre_overlap_recent3_label, ...negs    — weighted genre overlap, last-3-liked (B-4a)
+      tag_overlap_recent3_label,   ...negs    — weighted tag overlap, last-3-liked   (B-4b)
+      dev_affinity_recent3_label,  ...negs    — playtime-weighted dev, last-3-liked  (B-4c)
     """
     n     = arrays['X_hist_full'].shape[0]
     n_neg = top_k - 1
     pad_idx = fs['n_items']
 
-    X_avg_log    = torch.from_numpy(arrays['user_avg_log_playtime']).reshape(-1, 1)
-    X_hist_liked = torch.from_numpy(arrays['X_hist_liked']).long()
-    X_hist_dis   = torch.from_numpy(arrays['X_hist_disliked']).long()
-    X_hist_full  = torch.from_numpy(arrays['X_hist_full']).long()
-    X_hist_pw    = torch.from_numpy(arrays['X_hist_playtime_weights'])
-    label_idx    = torch.from_numpy(arrays['label_item_idx']).long()
+    X_avg_log      = torch.from_numpy(arrays['user_avg_log_playtime']).reshape(-1, 1)
+    X_hist_liked   = torch.from_numpy(arrays['X_hist_liked']).long()
+    X_hist_liked_pw = torch.from_numpy(arrays['X_hist_liked_playtime_weights'])
+    X_hist_dis     = torch.from_numpy(arrays['X_hist_disliked']).long()
+    X_hist_full    = torch.from_numpy(arrays['X_hist_full']).long()
+    X_hist_pw      = torch.from_numpy(arrays['X_hist_playtime_weights'])
+    label_idx      = torch.from_numpy(arrays['label_item_idx']).long()
 
-    neg_item_idxs    = np.zeros((n, n_neg), dtype=np.int32)
-    cg_label_rank    = np.zeros(n,          dtype=np.int32)
-    cg_label_score   = np.zeros(n,          dtype=np.float32)
-    cg_neg_scores    = np.zeros((n, n_neg), dtype=np.float32)
-    tag_cos_label    = np.zeros(n,          dtype=np.float32)
-    tag_cos_negs     = np.zeros((n, n_neg), dtype=np.float32)
-    genre_ov_label   = np.zeros(n,          dtype=np.float32)
-    genre_ov_negs    = np.zeros((n, n_neg), dtype=np.float32)
-    tag_ov_label     = np.zeros(n,          dtype=np.float32)
-    tag_ov_negs      = np.zeros((n, n_neg), dtype=np.float32)
-    dev_aff_label    = np.zeros(n,          dtype=np.float32)
-    dev_aff_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    neg_item_idxs      = np.zeros((n, n_neg), dtype=np.int32)
+    cg_label_rank      = np.zeros(n,          dtype=np.int32)
+    cg_label_score     = np.zeros(n,          dtype=np.float32)
+    cg_neg_scores      = np.zeros((n, n_neg), dtype=np.float32)
+    tag_cos_label      = np.zeros(n,          dtype=np.float32)
+    tag_cos_negs       = np.zeros((n, n_neg), dtype=np.float32)
+    # Bucket 1 — full-history slice
+    genre_ov_label     = np.zeros(n,          dtype=np.float32)
+    genre_ov_negs      = np.zeros((n, n_neg), dtype=np.float32)
+    tag_ov_label       = np.zeros(n,          dtype=np.float32)
+    tag_ov_negs        = np.zeros((n, n_neg), dtype=np.float32)
+    dev_aff_label      = np.zeros(n,          dtype=np.float32)
+    dev_aff_negs       = np.zeros((n, n_neg), dtype=np.float32)
+    # Bucket 2A — liked-only history slice
+    genre_ov_l_label   = np.zeros(n,          dtype=np.float32)
+    genre_ov_l_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    tag_ov_l_label     = np.zeros(n,          dtype=np.float32)
+    tag_ov_l_negs      = np.zeros((n, n_neg), dtype=np.float32)
+    dev_aff_l_label    = np.zeros(n,          dtype=np.float32)
+    dev_aff_l_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    # Bucket 2B — last-3-liked window
+    genre_ov_r3_label  = np.zeros(n,          dtype=np.float32)
+    genre_ov_r3_negs   = np.zeros((n, n_neg), dtype=np.float32)
+    tag_ov_r3_label    = np.zeros(n,          dtype=np.float32)
+    tag_ov_r3_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    dev_aff_r3_label   = np.zeros(n,          dtype=np.float32)
+    dev_aff_r3_negs    = np.zeros((n, n_neg), dtype=np.float32)
 
     # Tag matrix on device once. Shape: (n_items+1, n_tags) — pad row appended for safe indexing.
     n_tags = fs['n_tags']
@@ -325,6 +369,7 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
 
         x_avg     = X_avg_log[s:e].to(device)
         h_liked   = X_hist_liked[s:e].to(device)
+        h_liked_pw = X_hist_liked_pw[s:e].to(device)
         h_dis     = X_hist_dis[s:e].to(device)
         h_full    = X_hist_full[s:e].to(device)
         h_pw      = X_hist_pw[s:e].to(device)
@@ -361,13 +406,14 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         neg_tag_norm = F.normalize(tag_matrix_dev[topk.indices], p=2, dim=-1)  # (B, n_neg, n_tags)
         tag_cos_negs[s:e] = (user_tag_norm.unsqueeze(1) * neg_tag_norm).sum(dim=-1).cpu().numpy()
 
-        # ── Bucket 1 cross features (shared compute path with train) ────────
+        # ── Bucket 1 + Bucket 2 cross features (shared compute path with train) ─
         # Build a unified (B, 1 + n_neg) cand matrix with label at column 0, then call
         # the same overlap / dev-affinity utils the training loop uses. This guarantees
         # bit-exact identity between parquet (eval-time) values and on-the-fly (train-
         # time) values — they're literally the same function on the same tensors.
         cand_b = torch.cat([label_b.unsqueeze(1), topk.indices], dim=1)                   # (B, 1 + n_neg)
 
+        # Bucket 1 — full-history slice (h_full, h_pw)
         # B-1 Genre Overlap
         genre_ov = weighted_overlap(genre_binary_dev, genre_count_dev,
                                     history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
@@ -389,19 +435,80 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         dev_aff_label[s:e] = dev_aff_np[:, 0]
         dev_aff_negs[s:e]  = dev_aff_np[:, 1:]
 
+        # Bucket 2A — liked-only history slice (h_liked, h_liked_pw)
+        # B-3a Genre Overlap (Liked)
+        genre_ov_l = weighted_overlap(genre_binary_dev, genre_count_dev,
+                                      history_indices=h_liked, history_weights=h_liked_pw, cand_idx=cand_b)
+        genre_ov_l_np = genre_ov_l.cpu().numpy()
+        genre_ov_l_label[s:e] = genre_ov_l_np[:, 0]
+        genre_ov_l_negs[s:e]  = genre_ov_l_np[:, 1:]
+
+        # B-3b Tag Overlap (Liked)
+        tag_ov_l = weighted_overlap(tag_binary_dev, tag_count_dev,
+                                    history_indices=h_liked, history_weights=h_liked_pw, cand_idx=cand_b)
+        tag_ov_l_np = tag_ov_l.cpu().numpy()
+        tag_ov_l_label[s:e] = tag_ov_l_np[:, 0]
+        tag_ov_l_negs[s:e]  = tag_ov_l_np[:, 1:]
+
+        # B-3c Developer Affinity (Liked)
+        dev_aff_l = dev_affinity(game_dev_dev, dev_pad_idx=n_devs,
+                                 history_indices=h_liked, history_weights=h_liked_pw, cand_idx=cand_b)
+        dev_aff_l_np = dev_aff_l.cpu().numpy()
+        dev_aff_l_label[s:e] = dev_aff_l_np[:, 0]
+        dev_aff_l_negs[s:e]  = dev_aff_l_np[:, 1:]
+
+        # Bucket 2B — last-3-liked window (derived from h_liked via last_n_history)
+        h_recent3, h_recent3_pw = last_n_history(h_liked, h_liked_pw, n=3, pad_idx=pad_idx)
+
+        # B-4a Genre Overlap (Recent-3)
+        genre_ov_r3 = weighted_overlap(genre_binary_dev, genre_count_dev,
+                                       history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+        genre_ov_r3_np = genre_ov_r3.cpu().numpy()
+        genre_ov_r3_label[s:e] = genre_ov_r3_np[:, 0]
+        genre_ov_r3_negs[s:e]  = genre_ov_r3_np[:, 1:]
+
+        # B-4b Tag Overlap (Recent-3)
+        tag_ov_r3 = weighted_overlap(tag_binary_dev, tag_count_dev,
+                                     history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+        tag_ov_r3_np = tag_ov_r3.cpu().numpy()
+        tag_ov_r3_label[s:e] = tag_ov_r3_np[:, 0]
+        tag_ov_r3_negs[s:e]  = tag_ov_r3_np[:, 1:]
+
+        # B-4c Developer Affinity (Recent-3)
+        dev_aff_r3 = dev_affinity(game_dev_dev, dev_pad_idx=n_devs,
+                                  history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
+        dev_aff_r3_np = dev_aff_r3.cpu().numpy()
+        dev_aff_r3_label[s:e] = dev_aff_r3_np[:, 0]
+        dev_aff_r3_negs[s:e]  = dev_aff_r3_np[:, 1:]
+
     return {
-        'neg_item_idxs':       neg_item_idxs,
-        'cg_label_rank':       cg_label_rank,
-        'cg_label_score':      cg_label_score,
-        'cg_neg_scores':       cg_neg_scores,
-        'tag_cosine_label':    tag_cos_label,
-        'tag_cosine_negs':     tag_cos_negs,
-        'genre_overlap_label': genre_ov_label,
-        'genre_overlap_negs':  genre_ov_negs,
-        'tag_overlap_label':   tag_ov_label,
-        'tag_overlap_negs':    tag_ov_negs,
-        'dev_affinity_label':  dev_aff_label,
-        'dev_affinity_negs':   dev_aff_negs,
+        'neg_item_idxs':                neg_item_idxs,
+        'cg_label_rank':                cg_label_rank,
+        'cg_label_score':               cg_label_score,
+        'cg_neg_scores':                cg_neg_scores,
+        'tag_cosine_label':             tag_cos_label,
+        'tag_cosine_negs':              tag_cos_negs,
+        # Bucket 1 (full-history slice)
+        'genre_overlap_label':          genre_ov_label,
+        'genre_overlap_negs':           genre_ov_negs,
+        'tag_overlap_label':            tag_ov_label,
+        'tag_overlap_negs':             tag_ov_negs,
+        'dev_affinity_label':           dev_aff_label,
+        'dev_affinity_negs':            dev_aff_negs,
+        # Bucket 2A (liked-only history slice)
+        'genre_overlap_liked_label':    genre_ov_l_label,
+        'genre_overlap_liked_negs':     genre_ov_l_negs,
+        'tag_overlap_liked_label':      tag_ov_l_label,
+        'tag_overlap_liked_negs':       tag_ov_l_negs,
+        'dev_affinity_liked_label':     dev_aff_l_label,
+        'dev_affinity_liked_negs':      dev_aff_l_negs,
+        # Bucket 2B (last-3-liked window)
+        'genre_overlap_recent3_label':  genre_ov_r3_label,
+        'genre_overlap_recent3_negs':   genre_ov_r3_negs,
+        'tag_overlap_recent3_label':    tag_ov_r3_label,
+        'tag_overlap_recent3_negs':     tag_ov_r3_negs,
+        'dev_affinity_recent3_label':   dev_aff_r3_label,
+        'dev_affinity_recent3_negs':    dev_aff_r3_negs,
     }
 
 
@@ -488,27 +595,44 @@ def _verify_split(arrays: dict, neg: np.ndarray, cg_rank: np.ndarray,
 
 def _build_dataframe(arrays: dict, scoring: dict) -> pd.DataFrame:
     return pd.DataFrame({
-        'user_id':                 arrays['user_id'],
-        'rollback_n':              arrays['rollback_n'].astype(np.int32),
-        'label_item_idx':          arrays['label_item_idx'].astype(np.int32),
-        'neg_item_idxs':           list(scoring['neg_item_idxs'].astype(np.int32)),
-        'cg_label_rank':           scoring['cg_label_rank'].astype(np.int32),
-        'cg_label_score':          scoring['cg_label_score'],
-        'cg_neg_scores':           list(scoring['cg_neg_scores']),
-        'tag_cosine_label':        scoring['tag_cosine_label'],
-        'tag_cosine_negs':         list(scoring['tag_cosine_negs']),
-        'genre_overlap_label':     scoring['genre_overlap_label'],
-        'genre_overlap_negs':      list(scoring['genre_overlap_negs']),
-        'tag_overlap_label':       scoring['tag_overlap_label'],
-        'tag_overlap_negs':        list(scoring['tag_overlap_negs']),
-        'dev_affinity_label':      scoring['dev_affinity_label'],
-        'dev_affinity_negs':       list(scoring['dev_affinity_negs']),
-        'user_avg_log_playtime':   arrays['user_avg_log_playtime'],
-        'user_interaction_count':  arrays['user_interaction_count'].astype(np.int32),
-        'X_hist_liked':            list(arrays['X_hist_liked'].astype(np.int32)),
-        'X_hist_disliked':         list(arrays['X_hist_disliked'].astype(np.int32)),
-        'X_hist_full':             list(arrays['X_hist_full'].astype(np.int32)),
-        'X_hist_playtime_weights': list(arrays['X_hist_playtime_weights']),
+        'user_id':                       arrays['user_id'],
+        'rollback_n':                    arrays['rollback_n'].astype(np.int32),
+        'label_item_idx':                arrays['label_item_idx'].astype(np.int32),
+        'neg_item_idxs':                 list(scoring['neg_item_idxs'].astype(np.int32)),
+        'cg_label_rank':                 scoring['cg_label_rank'].astype(np.int32),
+        'cg_label_score':                scoring['cg_label_score'],
+        'cg_neg_scores':                 list(scoring['cg_neg_scores']),
+        # Cross features — Bucket 1 (full-history slice)
+        'tag_cosine_label':              scoring['tag_cosine_label'],
+        'tag_cosine_negs':               list(scoring['tag_cosine_negs']),
+        'genre_overlap_label':           scoring['genre_overlap_label'],
+        'genre_overlap_negs':            list(scoring['genre_overlap_negs']),
+        'tag_overlap_label':             scoring['tag_overlap_label'],
+        'tag_overlap_negs':              list(scoring['tag_overlap_negs']),
+        'dev_affinity_label':            scoring['dev_affinity_label'],
+        'dev_affinity_negs':             list(scoring['dev_affinity_negs']),
+        # Cross features — Bucket 2A (liked-only history slice)
+        'genre_overlap_liked_label':     scoring['genre_overlap_liked_label'],
+        'genre_overlap_liked_negs':      list(scoring['genre_overlap_liked_negs']),
+        'tag_overlap_liked_label':       scoring['tag_overlap_liked_label'],
+        'tag_overlap_liked_negs':        list(scoring['tag_overlap_liked_negs']),
+        'dev_affinity_liked_label':      scoring['dev_affinity_liked_label'],
+        'dev_affinity_liked_negs':       list(scoring['dev_affinity_liked_negs']),
+        # Cross features — Bucket 2B (last-3-liked window)
+        'genre_overlap_recent3_label':   scoring['genre_overlap_recent3_label'],
+        'genre_overlap_recent3_negs':    list(scoring['genre_overlap_recent3_negs']),
+        'tag_overlap_recent3_label':     scoring['tag_overlap_recent3_label'],
+        'tag_overlap_recent3_negs':      list(scoring['tag_overlap_recent3_negs']),
+        'dev_affinity_recent3_label':    scoring['dev_affinity_recent3_label'],
+        'dev_affinity_recent3_negs':     list(scoring['dev_affinity_recent3_negs']),
+        # User-side history
+        'user_avg_log_playtime':         arrays['user_avg_log_playtime'],
+        'user_interaction_count':        arrays['user_interaction_count'].astype(np.int32),
+        'X_hist_liked':                  list(arrays['X_hist_liked'].astype(np.int32)),
+        'X_hist_disliked':               list(arrays['X_hist_disliked'].astype(np.int32)),
+        'X_hist_full':                   list(arrays['X_hist_full'].astype(np.int32)),
+        'X_hist_playtime_weights':       list(arrays['X_hist_playtime_weights']),
+        'X_hist_liked_playtime_weights': list(arrays['X_hist_liked_playtime_weights']),
     })
 
 
