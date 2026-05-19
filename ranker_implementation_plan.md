@@ -2,7 +2,7 @@
 
 ## Status (2026-05-19)
 
-Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (dropped).
+Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (dropped), Phase B Bucket 4 ✗ (dropped).
 
 **A-N2** (Phase A exit, tag_cosine only): NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −1.5%). Proved a Wide & Deep MLP can effectively match the CG two-tower dot product on identical features.
 
@@ -12,7 +12,9 @@ Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (d
 
 **Bucket 3 — DROPPED** (Bucket 2 + 3 features: genre/tag/dev × Disliked, 13 wide cross features total): **NDCG@10 0.0824** vs Bucket 2 0.0828 (Δ **−0.5%**), MRR 0.0781 vs 0.0784 (−0.4%), pure-reranking NDCG@10 0.1492 vs 0.1499 (−0.5%). Regressed on every headline metric vs Bucket 2 and essentially tied with Bucket 1 (+0.2% / +0.3%). The 3 disliked columns took capacity away from the existing 10 and contributed no usable signal. Root cause: Steam's "disliked" partition is too noisy to earn its columns — the `recommend==False` signal is sparse (most users don't review), the `0.1 < hours < 1.0` heuristic captures "tried it, didn't stick" which is ambiguous, and `hours ≤ user_rolling_median / 2` flags below-average games which for heavy players can include genuine favorites. Reverted in code; disliked variants are now dropped from later buckets (e.g. Bucket 4's deliberate exclusion stays permanent).
 
-**Next: Bucket 4 (Developer Catalog Signals)** — 6 features (genre/tag × {full, liked, recent-3}) on the *developer catalog* item-side buffer (per-developer averaged genre/tag vectors) rather than per-game vectors. Fundamentally different signal class from the per-game categorical overlaps already in Buckets 1+2, so much less likely to be redundant. Disliked slice deliberately excluded — see §10. Measured against Bucket 2 (NDCG@10 0.0828).
+**Bucket 4 — DROPPED** (Bucket 2 + 6 features: genre/tag × {full, liked, recent-3} on per-developer averaged genre/tag vectors, 16 wide cross features total): **NDCG@10 0.0827** vs Bucket 2 0.0828 (Δ **−0.1%**), MRR 0.0785 vs 0.0784 (+0.1%), pure-rerank NDCG@10 0.1496 vs 0.1499 (−0.2%). Mixed-sign micro-deltas, regressions on the two headline NDCG metrics. Two independent training runs (same seed) reproduced the flat pattern — not seed variance. Root cause: the deep tower's `developer_lookup` already encodes studio identity end-to-end via warm-start; averaging genre/tag vectors per developer and inner-producting against the candidate adds no signal the dev embedding wasn't already representing implicitly. 6 columns of capacity displacement, ~0 net lift. Reverted in code; the dev-catalog signal class is permanently dropped (see §10 — don't retry in a different shape).
+
+**Next: Bucket 6 (Item-Intrinsic Priors)** — 3 per-candidate static scalars (dev specialization, dev catalog size, candidate max tag IDF) on the wide bypass. Fundamentally different signal class from Buckets 1-4 (all user × item overlap) — these are properties of the candidate itself, dense and non-redundant. Higher-confidence next candidate than Bucket 5 (Numeric Matching) given that the last two buckets that added user × item overlap features have flattened. Measured against Bucket 2 (NDCG@10 0.0828).
 
 > **Terminology note:** earlier drafts called these "pools." That's wrong — "pool" in this codebase means an embedding aggregation (the deep tower's `pool_liked` / `pool_disliked` / `pool_full` / `pool_playtime`, which sum item embeddings). The cross features compute weighted overlap and categorical affinity *directly over the history arrays* — no embedding aggregation happens. The code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
 
@@ -407,6 +409,29 @@ Net result: the disliked slice is a mix of true dislikes and noise. Three noisy 
 
 **Permanent rule from this:** disliked-history variants are dropped from later buckets entirely. Bucket 4's deliberate exclusion of disliked dev-catalog signals stays. Don't retry the disliked slice unless the partition rule itself improves (e.g. richer dislike signal from somewhere outside the current dataset).
 
+### Phase B — Bucket 4 ✗ DROPPED (2026-05-19)
+
+**Developer Catalog Signals — tried and dropped.** Six categorical-overlap features on `X_hist_full / X_hist_liked / last_n_history(X_hist_liked, 3)` × {genre, tag}, but with the per-item buffers replaced by **developer-catalog-averaged** versions (`game_dev_genre_avg`, `game_dev_tag_avg` — per-developer mean of `game_genre_binary` / `game_tag_binary`). Columns 10-15 in the trial. Hypothesis: existing `dev_affinity` is identity-match ("user has playtime on this exact studio's games"); dev-catalog overlap adds similarity-match ("user likes studios that *make games like* this one's studio does"). Should help especially when candidate's own tags are sparse but the studio's catalog disambiguates.
+
+**Result:** flat-to-negative vs Bucket 2 on every headline metric. Two independent training runs reproduced the pattern.
+
+| Metric | Bucket 2 | Bucket 4 (run 1) | Bucket 4 (run 2) | Bucket 4 Δ vs 2 (run 2) |
+|---|---|---|---|---|
+| NDCG@10 | **0.0828** | 0.0824 | 0.0827 | −0.1% |
+| MRR | **0.0784** | 0.0781 | 0.0785 | +0.1% |
+| Hit@10 | **0.1549** | 0.1545 | 0.1543 | −0.4% |
+| NDCG@20 | **0.1037** | 0.1033 | 0.1036 | −0.1% |
+| Pure-rerank NDCG@10 | **0.1499** | 0.1492 | 0.1496 | −0.2% |
+| Pure-rerank MRR | **0.1339** | 0.1333 | 0.1340 | +0.1% |
+
+Two seeds, same flat pattern: micro-delta on MRR (+0.1%), regression on the two headline NDCG metrics (−0.1% and −0.2%). Not seed variance.
+
+**Root cause: the deep tower's `developer_lookup` already encodes studio identity end-to-end.** The dev embedding is 12-dim per developer, trained jointly with the rest of the deep MLP and warm-started from CG's `developer_embedding_lookup`. It implicitly learns whatever catalog-level signal exists (because two games by the same studio share an embedding, the head can already condition on "studio X tends to make Z-like games"). Hand-crafting a per-dev average of `game_genre_binary` / `game_tag_binary` and dotting it against the user's history doesn't add an independent axis — it duplicates a signal the deep path already carries. 6 wide columns of capacity displacement, ~0 net lift.
+
+**Code reverted on disk** (2026-05-19): n_cross_features=16 → 10, the 12 new parquet columns (label + negs × 6 features) dropped, the 4 dev-catalog buffers (`game_dev_genre_avg / count`, `game_dev_tag_avg / count`) removed from `WideDeepRanker`, dataset/train/evaluate/canary/precompute back to 10-feature roster. `DevCatalogBuffers` NamedTuple, `build_dev_catalog_buffers` constructor, and `dev_catalog_overlap_pair` util in `ranker/cross_features.py` all removed — not kept as shared infra because the dev-catalog signal class is permanently dropped (see below).
+
+**Permanent rule from this:** the dev-catalog signal class is dropped from future buckets entirely. Don't retry in a different shape (e.g. publisher-catalog, tag-tfidf-weighted dev catalog, dev embedding cosine cross feature) — the structural reason is that `developer_lookup` already encodes studio identity in the deep tower, and any hand-crafted per-dev aggregate of content features will be approximately redundant with what the deep path learns end-to-end. If a future bucket wants to extract more dev-side signal, the lever is on the deep tower (e.g. richer dev features inside the deep concat), not a wide-bypass cross feature.
+
 ---
 
 ## 9. Cross-Feature Roadmap (Phase B)
@@ -427,11 +452,9 @@ The same three categorical-overlap features (genre_overlap, tag_overlap, dev_aff
 
 Bucket 2 rolls **Liked** and **Recent-3 Liked** into a single training run (6 features). Each bucket independently answers "does this history-variant family add signal on top of the previous baseline?"
 
-**Bucket 3 (Disliked) was tried and dropped** — see dedicated Bucket 3 ✗ section below for the eval table and root cause.
+**Bucket 3 (Disliked) and Bucket 4 (Developer Catalog Signals) were both tried and dropped** — see dedicated ✗ sections below for eval tables and root causes. Bucket 4's drop is the second consecutive "more user × item categorical overlap" bucket to flatten, recalibrating downstream expectations away from this signal class.
 
-**Bucket 4 (Developer Catalog Signals)** is a separate experimental class: same `weighted_overlap` util, but the item-side per-game buffers are swapped from `game_genre_binary` / `game_tag_binary` to **developer-catalog-averaged** versions — so the candidate is matched against its developer's catalog signature rather than its own genre/tag vector. Six features in one training run, mirroring Bucket 2's slice structure (genre/tag × full/liked/recent-3 liked). See dedicated Bucket 4 section below.
-
-**Buckets 6-8 (Item-Intrinsic Priors / Tag Rarity Reweighting / Engagement-Level Cross)** are a separate class again: features about the dev/genre/tag **itself** (catalog size, specialization, tag rarity, engagement level), not user × item overlap. They give the head priors and modulators that the existing overlap features structurally can't represent. See dedicated sections below. Bucket 5 (Numeric Matching) sits between Bucket 4 and the new ones in roadmap order — same Phase B discipline (one bucket per training run, bundle-level NDCG verdict).
+**Buckets 6-8 (Item-Intrinsic Priors / Tag Rarity Reweighting / Engagement-Level Cross)** are a separate class: features about the dev/genre/tag **itself** (catalog size, specialization, tag rarity, engagement level), not user × item overlap. They give the head priors and modulators that the existing overlap features structurally can't represent — particularly relevant given the flat results from the last two overlap-style buckets. Bucket 5 (Numeric Matching) sits between the dropped buckets and the new ones in roadmap order — same Phase B discipline (one bucket per training run, bundle-level NDCG verdict).
 
 Naming convention for the cross-feature column slots (must stay stable across checkpoints — see `dataset.compute_cross_features` ordering):
 
@@ -446,26 +469,20 @@ col 6   : dev_affinity_liked                  (Bucket 2 ✓)
 col 7   : genre_overlap_recent3               (Bucket 2 ✓)
 col 8   : tag_overlap_recent3                 (Bucket 2 ✓)
 col 9   : dev_affinity_recent3                (Bucket 2 ✓)
-col 10  : genre_overlap_dev_catalog_full      (Bucket 4, pending validation)
-col 11  : tag_overlap_dev_catalog_full        (Bucket 4)
-col 12  : genre_overlap_dev_catalog_liked     (Bucket 4)
-col 13  : tag_overlap_dev_catalog_liked       (Bucket 4)
-col 14  : genre_overlap_dev_catalog_recent3   (Bucket 4)
-col 15  : tag_overlap_dev_catalog_recent3     (Bucket 4)
-col 16  : price_match                         (Bucket 5)
-col 17  : era_gap                             (Bucket 5)
-col 18  : playtime_calibration                (Bucket 5)
-col 19  : popularity_match                    (Bucket 5)
-col 20  : dev_specialization                  (Bucket 6, NEW)
-col 21  : dev_catalog_size                    (Bucket 6)
-col 22  : candidate_max_tag_idf               (Bucket 6)
-col 23  : tag_overlap_idf_full                (Bucket 7, NEW)
-col 24  : tag_overlap_idf_liked               (Bucket 7)
-col 25  : user_dev_engagement_cross           (Bucket 8, NEW)
-col 26  : user_genre_engagement_cross         (Bucket 8)
-col 27  : cg_score                            (Bucket 9, kept solo — was Bucket 6 in earlier drafts)
+col 10  : price_match                         (Bucket 5)
+col 11  : era_gap                             (Bucket 5)
+col 12  : playtime_calibration                (Bucket 5)
+col 13  : popularity_match                    (Bucket 5)
+col 14  : dev_specialization                  (Bucket 6)
+col 15  : dev_catalog_size                    (Bucket 6)
+col 16  : candidate_max_tag_idf               (Bucket 6)
+col 17  : tag_overlap_idf_full                (Bucket 7)
+col 18  : tag_overlap_idf_liked               (Bucket 7)
+col 19  : user_dev_engagement_cross           (Bucket 8)
+col 20  : user_genre_engagement_cross         (Bucket 8)
+col 21  : cg_score                            (Bucket 9, kept solo — was Bucket 6 in earlier drafts)
 ```
-(Bucket 3's columns 10-12 were the disliked-slice triple; that bucket was dropped — see Bucket 3 ✗ section. Bucket 4 promoted up to cols 10-15. Bucket 9 CG Score is held to the end of the roadmap per Discipline Rule 3.)
+(Bucket 3's columns 10-12 were the disliked-slice triple; that bucket was dropped — see Bucket 3 ✗ section. Bucket 4 then took cols 10-15 for the dev-catalog triple-times-two and also dropped — see Bucket 4 ✗ section. Bucket 5 onward reclaims the slots in roadmap order. Bucket 9 CG Score is held to the end of the roadmap per Discipline Rule 3.)
 
 #### Bucket 1 ✓ — Full History (2026-05-18)
 
@@ -508,39 +525,15 @@ Both slices reuse the `X_hist_liked_playtime_weights` precompute column — land
 
 **Permanent decision:** disliked-history variants stay out of future buckets. Bucket 4's deliberate exclusion of disliked dev-catalog signals becomes the rule, not the exception. Open weighting options (a/b/c) are no longer worth pursuing — the noise lives in the partition rule itself, not in the weighting.
 
-### Bucket 4 — Developer Catalog Signals
+#### Bucket 4 ✗ — Developer Catalog Signals (DROPPED 2026-05-19)
 
-Six features in one training run: 2 dev-catalog overlap features (genre, tag) × 3 history slices (full, liked, recent-3 liked) — mirroring Bucket 2's slice structure but on the item side substituting **developer-catalog-averaged** buffers for per-game ones. Same `weighted_overlap` util as Bucket 1, same `history_indices` / `history_weights` slices as Bucket 2; only the per-item content buffers change.
+**Tried and dropped.** Six categorical-overlap features mirroring Bucket 2's slice structure but with per-item buffers swapped from `game_genre_binary` / `game_tag_binary` to **developer-catalog-averaged** versions: `game_dev_genre_avg[item, g]` = fraction of the dev's catalog carrying genre g (and similarly for tags). Two new per-item buffers (genre + tag) × three history slices (full / liked / recent-3 liked) = 6 wide-head columns (cols 10-15 in the trial). Hypothesis was that existing `dev_affinity` is *identity-match* ("user has playtime on this exact studio") and dev-catalog overlap would add *similarity-match* ("user likes studios that make games *like* this one's studio"), helping especially for sparse-tag candidates and unseen-but-similar studios.
 
-For each game in the corpus, precompute its **developer's catalog-average** genre and tag vectors. This gives a "studio signature" that smooths over single-game noise — e.g. a candidate from Firaxis inherits the 4X / Turn-Based-Strategy distribution that defines their catalog, even if the specific game's own tags are sparse or atypical.
+**Outcome:** flat-to-negative vs Bucket 2 on every headline metric, two independent training runs reproducing the same pattern (NDCG@10 −0.1%, MRR +0.1%, pure-rerank NDCG@10 −0.2%). See §8 Bucket 4 ✗ DROPPED entry for the full metric table and root-cause analysis.
 
-Two new per-game item-side buffers (built at model construction from `fs['game_developer_idx']` + `fs['game_genre_matrix']` / `game_tag_matrix`), registered non-persistent so they rebuild from FeatureStore on load:
+**Why it failed:** the deep tower's `developer_lookup` (12-dim embedding per developer, warm-started from CG, trained jointly with the deep MLP) already encodes whatever catalog-level signal exists — because two games by the same studio share an embedding, the head can already condition on "studio X tends to make Z-like games." Hand-crafting a per-dev average of `game_genre_binary` / `game_tag_binary` and dotting it against the user's history doesn't add an independent axis; it duplicates a signal the deep path already carries. 6 wide columns of capacity displacement, ~0 net lift.
 
-- `game_dev_genre_avg[item, g]` = `(1 / dev_catalog_size) · Σ_{g' in dev's games} game_genre_binary[g', g]` — fraction of the dev's catalog carrying genre g. Range [0, 1].
-- `game_dev_tag_avg[item, t]`   — same structure on tags.
-- Companion `game_dev_genre_count[item]` = `sum_g(game_dev_genre_avg[item, g])`, clamp(min=1) — normalization denominator analogous to `game_genre_count`.
-- Companion `game_dev_tag_count[item]` — same for tags.
-
-Each cross feature is one call to `weighted_overlap` with (a) one of the two dev-catalog buffers above and (b) one of the three history slices already exposed by precompute (full / liked via Bucket 2's new `X_hist_liked_playtime_weights` column / recent-3 derived from liked via `last_n_history`). No new user-side history infrastructure required — Bucket 2 lands all three slices first.
-
-| # | Feature | History slice | Item-side buffer |
-|---|---|---|---|
-| B-6a | **Genre Overlap (Dev-Catalog, Full)**    | `X_hist_full`, `X_hist_playtime_weights`           | `game_dev_genre_avg` |
-| B-6b | **Tag Overlap (Dev-Catalog, Full)**      | `X_hist_full`, `X_hist_playtime_weights`           | `game_dev_tag_avg`   |
-| B-6c | **Genre Overlap (Dev-Catalog, Liked)**   | `X_hist_liked`, `X_hist_liked_playtime_weights`    | `game_dev_genre_avg` |
-| B-6d | **Tag Overlap (Dev-Catalog, Liked)**     | `X_hist_liked`, `X_hist_liked_playtime_weights`    | `game_dev_tag_avg`   |
-| B-6e | **Genre Overlap (Dev-Catalog, Recent-3)** | `last_n_history(X_hist_liked, ...)` | `game_dev_genre_avg` |
-| B-6f | **Tag Overlap (Dev-Catalog, Recent-3)**   | `last_n_history(X_hist_liked, ...)` | `game_dev_tag_avg`   |
-
-Each cell is `(user_w · game_dev_X_avg[cand]) / game_dev_X_count[cand]` where `user_w` is the per-(genre|tag) weight derived from the row's history slice. Range [0, 1].
-
-**Hypothesis:** the existing `dev_affinity` (B-2 + Bucket 2 variants) is an *identity match* — "user has playtime on this exact studio's games." Bucket 4 adds *similarity-match* — "user likes studios that make games *like* this one's studio does." Should help when (a) the candidate is from a studio the user hasn't tried but whose catalog overlaps the user's taste, or (b) the candidate's own tags are sparse/atypical but the studio's catalog disambiguates. Slicing across full / liked / recent-3 mirrors Bucket 2's user-side exploration — if Bucket 2 shows liked/recent slices matter, this lets them matter for the dev-catalog signal too.
-
-**Edge case:** for single-game developers, `game_dev_genre_avg` reduces to the game's own genre vector (catalog size 1). The feature collapses to Bucket 1/2's `genre_overlap` variants for those rows — graceful degrade, no extra signal but no harm. Real lift comes from multi-game studios (Firaxis, Larian, Paradox, FromSoftware) — exactly where canary quality matters most.
-
-**Disliked dev-catalog deliberately excluded — now permanent.** Adding `genre/tag_overlap_dev_catalog_disliked` would compound the dev-catalog smoothing on top of the noisy disliked-slice partition. Bucket 3 ✗ established that the disliked-slice signal itself doesn't earn its columns on Steam (root cause: noisy partition rule, see Bucket 3 ✗ section); piling dev-catalog smoothing on top of that noise won't fix it.
-
-**Implementation cost:** 2 new per-game buffers (n_items × n_genres + n_items × n_tags, built once at construction, registered non-persistent); 12 new parquet columns (label + negs × 6 features); cross-feature compute reuses `weighted_overlap` + `last_n_history` with no changes to those utils. Hard prerequisite: **Bucket 2 must land first** so the precompute infrastructure for the liked + recent-3 history slices is in place. Same Phase B discipline applies — one training run, bundle-level NDCG verdict, drop-one ablation only if disappointing.
+**Permanent decision:** the dev-catalog signal class is dropped from future buckets entirely. Don't retry in a different shape (publisher-catalog, tag-tfidf-weighted dev catalog, dev embedding cosine cross feature, etc.) — the structural reason is that `developer_lookup` in the deep tower already encodes studio identity, and any hand-crafted per-dev aggregate of content features will be approximately redundant with what the deep path learns end-to-end. If a future bucket wants more dev-side signal, the lever is on the deep tower (richer dev features inside the deep concat), not a wide-bypass cross feature.
 
 ### Bucket 5 — Numeric Matching
 
@@ -633,8 +626,6 @@ Expected ranges (pre-normalization):
   Developer Affinity (Full / Liked /      [0, 1]    → Z-score (heavy zero mass — may need
     Recent-3 / Disliked)                              separate treatment; all four history variants
                                                       share this concern)
-  Genre/Tag Overlap (Dev-Catalog,         [0, 1]    → no normalization (Bucket 4)
-    Full / Liked / Recent-3)
   Price Match                             [0, ~8]   → Z-score
   Era Gap                                 [0, 1]    → Z-score (after normalizing year to [0,1])
   Playtime Calibration                    [~−5, +5] → Z-score
@@ -667,6 +658,7 @@ Initialize new wide-feature weights at 0.1 — small non-zero signal without swa
 6. **Softmax CE only.** Never sigmoid in `forward()`. Pointwise BCE was tried during early bring-up and abandoned.
 7. **E2E ceiling always enforced** in both ranker eval and CG baseline.
 8. **If `src/model.py` or `src/train.get_config()` changes** (tower hidden dims, embedding sizes, new sub-towers): re-derive §3 *first* before changing the ranker — partial drift silently breaks warm-start.
+9. **Permanently dropped wide-feature classes:** (a) disliked-history variants (Bucket 3 ✗, see §8 — partition rule too noisy on Steam); (b) dev-catalog signals in any shape (Bucket 4 ✗, see §8 — redundant with `developer_lookup` in the deep tower). Don't re-propose either class as a new bucket. If a future need points at dev-side signal, the lever is on the deep tower, not the wide bypass.
 
 ---
 
