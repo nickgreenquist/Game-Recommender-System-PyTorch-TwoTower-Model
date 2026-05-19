@@ -23,7 +23,8 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ranker.cross_features import dev_affinity, last_n_history, weighted_overlap
+from ranker.cross_features import (OverlapBuffers, categorical_overlap_triple,
+                                     last_n_history)
 from ranker.dataset import compute_cross_features
 from ranker.train import build_ranker, get_config, get_device
 from src.dataset import MAX_HISTORY_LEN
@@ -67,7 +68,7 @@ def _resolve_ranker_checkpoint() -> str:
 
 def _build_synthetic_user_inputs(fs: dict, user_type: str, pad_idx: int):
     """
-    Build the 6 user-side inputs for the ranker:
+    Build the user-side inputs for the ranker:
       X_user_avg_log (1, 1), X_hist_liked / disliked / full (1, MAX_HISTORY_LEN),
       X_hist_playtime_weights (1, MAX_HISTORY_LEN),
       X_hist_liked_playtime_weights (1, MAX_HISTORY_LEN)   ← Bucket 2
@@ -134,12 +135,12 @@ def _build_synthetic_user_inputs(fs: dict, user_type: str, pad_idx: int):
         return out
 
     user_inputs = {
-        'X_user_avg_log':                np.array([[avg_log]], dtype=np.float32),     # (1, 1)
-        'X_hist_liked':                  pad_list(liked_ids).reshape(1, -1),           # (1, H)
-        'X_hist_disliked':               pad_list(disliked_ids).reshape(1, -1),
-        'X_hist_full':                   pad_list(full_ids).reshape(1, -1),
-        'X_hist_playtime_weights':       pad_weights(full_pw).reshape(1, -1),
-        'X_hist_liked_playtime_weights': pad_weights(liked_pw).reshape(1, -1),         # (1, H) ← Bucket 2
+        'X_user_avg_log':                   np.array([[avg_log]], dtype=np.float32),       # (1, 1)
+        'X_hist_liked':                     pad_list(liked_ids).reshape(1, -1),             # (1, H)
+        'X_hist_disliked':                  pad_list(disliked_ids).reshape(1, -1),
+        'X_hist_full':                      pad_list(full_ids).reshape(1, -1),
+        'X_hist_playtime_weights':          pad_weights(full_pw).reshape(1, -1),
+        'X_hist_liked_playtime_weights':    pad_weights(liked_pw).reshape(1, -1),           # (1, H) ← Bucket 2
     }
     return user_inputs, fav_titles, anchor_titles, dis_titles, full_ids, full_pw
 
@@ -274,6 +275,31 @@ def run_canary(cg_checkpoint: str | None = None,
         h_pw      = torch.from_numpy(ui['X_hist_playtime_weights']).to(device)
         pad_idx_int = int(ranker.game_pad_idx)
 
+        # Bundle the 6 per-item buffers used by every history-slice triple-overlap
+        # compute. Same bundle the training loop uses — guarantees parity.
+        buffers = OverlapBuffers(
+            genre_binary=ranker.game_genre_binary,
+            genre_count =ranker.game_genre_count,
+            tag_binary  =ranker.game_tag_binary,
+            tag_count   =ranker.game_tag_count,
+            game_dev_idx=ranker.game_dev_idx,
+            dev_pad_idx =int(ranker.dev_pad_idx),
+        )
+
+        def _slice_triple(slice_indices, slice_weights):
+            """Categorical overlap triple for a single history slice, squeezed back to (n_cand,)
+            for the B=1 synthetic-user case. Returns (genre, tag, dev_affinity) or three
+            zero-tensors if the slice has no non-pad entries (the precompute graceful-degrade
+            path produces 0 in that case anyway; we short-circuit for clarity)."""
+            if not bool((slice_indices != pad_idx_int).any().item()):
+                z = torch.zeros(n_cand, device=device)
+                return z, z, z
+            g, t, d = categorical_overlap_triple(buffers,
+                                                  history_indices=slice_indices,
+                                                  history_weights=slice_weights,
+                                                  cand_idx=cand_t1)
+            return g.squeeze(0), t.squeeze(0), d.squeeze(0)
+
         with torch.no_grad():
             us = ranker.user_forward(x_avg, h_lkd, h_dis, h_full, h_pw)
             user_concat_exp = us.user_concat.expand(n_cand, -1)
@@ -287,46 +313,12 @@ def run_canary(cg_checkpoint: str | None = None,
             tag_cos = _synthetic_tag_cosine(ranker, full_ids, full_pw, cand_t, device)
 
             # Bucket 1 — full-history slice (h_full, h_pw)
-            if full_ids:
-                genre_ov = weighted_overlap(ranker.game_genre_binary, ranker.game_genre_count,
-                                            history_indices=h_full, history_weights=h_pw, cand_idx=cand_t1).squeeze(0)
-                tag_ov   = weighted_overlap(ranker.game_tag_binary,   ranker.game_tag_count,
-                                            history_indices=h_full, history_weights=h_pw, cand_idx=cand_t1).squeeze(0)
-                dev_aff  = dev_affinity(ranker.game_dev_idx, dev_pad_idx=ranker.dev_pad_idx,
-                                        history_indices=h_full, history_weights=h_pw, cand_idx=cand_t1).squeeze(0)
-            else:
-                genre_ov = torch.zeros(n_cand, device=device)
-                tag_ov   = torch.zeros(n_cand, device=device)
-                dev_aff  = torch.zeros(n_cand, device=device)
-
+            genre_ov,    tag_ov,    dev_aff    = _slice_triple(h_full, h_pw)
             # Bucket 2A — liked-only slice (h_lkd, h_lkd_pw)
-            # For synthetic users, "liked" = favorite games only (anchors and dislikes
-            # excluded), so h_lkd_pw is normalized over the favorites subset.
-            has_liked = bool((h_lkd != pad_idx_int).any().item())
-            if has_liked:
-                genre_ov_l = weighted_overlap(ranker.game_genre_binary, ranker.game_genre_count,
-                                              history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_t1).squeeze(0)
-                tag_ov_l   = weighted_overlap(ranker.game_tag_binary,   ranker.game_tag_count,
-                                              history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_t1).squeeze(0)
-                dev_aff_l  = dev_affinity(ranker.game_dev_idx, dev_pad_idx=ranker.dev_pad_idx,
-                                          history_indices=h_lkd, history_weights=h_lkd_pw, cand_idx=cand_t1).squeeze(0)
-
-                # Bucket 2B — last-3-liked window (derived via last_n_history)
-                h_recent3, h_recent3_pw = last_n_history(h_lkd, h_lkd_pw, n=3, pad_idx=pad_idx_int)
-                genre_ov_r3 = weighted_overlap(ranker.game_genre_binary, ranker.game_genre_count,
-                                               history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_t1).squeeze(0)
-                tag_ov_r3   = weighted_overlap(ranker.game_tag_binary,   ranker.game_tag_count,
-                                               history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_t1).squeeze(0)
-                dev_aff_r3  = dev_affinity(ranker.game_dev_idx, dev_pad_idx=ranker.dev_pad_idx,
-                                           history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_t1).squeeze(0)
-            else:
-                # No favorites → no liked or recent-3 signal.
-                genre_ov_l  = torch.zeros(n_cand, device=device)
-                tag_ov_l    = torch.zeros(n_cand, device=device)
-                dev_aff_l   = torch.zeros(n_cand, device=device)
-                genre_ov_r3 = torch.zeros(n_cand, device=device)
-                tag_ov_r3   = torch.zeros(n_cand, device=device)
-                dev_aff_r3  = torch.zeros(n_cand, device=device)
+            genre_ov_l,  tag_ov_l,  dev_aff_l  = _slice_triple(h_lkd,  h_lkd_pw)
+            # Bucket 2B — last-3-liked window (derived via last_n_history)
+            h_recent3, h_recent3_pw = last_n_history(h_lkd, h_lkd_pw, n=3, pad_idx=pad_idx_int)
+            genre_ov_r3, tag_ov_r3, dev_aff_r3 = _slice_triple(h_recent3, h_recent3_pw)
 
             cross = compute_cross_features(tag_cos, genre_ov, tag_ov, dev_aff,
                                            genre_ov_l, tag_ov_l, dev_aff_l,

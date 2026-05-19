@@ -8,20 +8,46 @@ here do NOT pool embeddings — they reduce per-item categorical signals weighte
 playtime, producing one scalar per (history slice, candidate) pair.
 
 The functions are parameterized on **history_indices** and **history_weights** so
-the same compute path serves all four planned history variants (plan §9):
+the same compute path serves all planned history variants (plan §9):
 
   - Bucket 1 ✓ (full history):  (X_hist_full,      X_hist_playtime_weights)
-  - Bucket 2  (liked history):  (X_hist_liked,     X_hist_liked_playtime_weights)
-  - Bucket 3  (last-3 liked):   (last 3 non-pad of X_hist_liked, re-normalized)
-  - Bucket 4  (disliked):       (X_hist_disliked,  X_hist_disliked_playtime_weights)
+  - Bucket 2 ✓ (liked history): (X_hist_liked,     X_hist_liked_playtime_weights)
+  - Bucket 2 ✓ (last-3 liked):  (last 3 non-pad of X_hist_liked, re-normalized)
+  - Bucket 4  (dev-catalog × 3 slices): swap item-side buffers, reuse slices above
 
-Buckets 2-4 require new precompute columns; the compute path here doesn't change.
+(Bucket 3 — disliked slice — was tried and dropped: Steam's "disliked" partition
+relies on noisy heuristics since the recommend signal is sparse, and the 3 disliked
+columns slightly regressed vs Bucket 2 across every headline metric.)
+
+Each new slice requires a (history_indices, history_weights) tensor pair. The
+three categorical-overlap features for a slice are bundled in
+`categorical_overlap_triple(buffers, slice_indices, slice_weights, cand_idx)`
+so every slice computes its 3 features in one line.
 
 All functions expect tensors already on the same device, and are batched over (B).
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
+
+
+class OverlapBuffers(NamedTuple):
+    """Bundle of per-item static buffers needed by `categorical_overlap_triple`.
+
+    Lives on the model (`ranker/model.py` registers all six as non-persistent
+    buffers built from FeatureStore) or as device-resident tensors on the caller
+    (precompute builds them locally). Either way, pass the bundle through and the
+    triple-overlap util gets all the inputs it needs to score a single history
+    slice against the candidate set.
+    """
+    genre_binary: torch.Tensor      # (n_items+1, n_genres) float32 — binary one-hot
+    genre_count:  torch.Tensor      # (n_items+1,)          float32 — per-item genre count, clamp(min=1)
+    tag_binary:   torch.Tensor      # (n_items+1, n_tags)   float32 — binary one-hot
+    tag_count:    torch.Tensor      # (n_items+1,)          float32 — per-item tag count, clamp(min=1)
+    game_dev_idx: torch.Tensor      # (n_items+1,)          int64   — per-item dev index (pad row = dev_pad_idx)
+    dev_pad_idx:  int                                                # n_developers
 
 
 def weighted_overlap(item_binary:      torch.Tensor,   # (n_items+1, n_feat) float32 — binary one-hot per item
@@ -136,3 +162,38 @@ def last_n_history(history_indices:  torch.Tensor,   # (B, H) int64 — pad_idx 
     last_weights = torch.where(sums > 0, last_weights / sums, last_weights)
 
     return last_indices, last_weights
+
+
+def categorical_overlap_triple(buffers:          OverlapBuffers,
+                               history_indices:  torch.Tensor,    # (B, H) int64
+                               history_weights:  torch.Tensor,    # (B, H) float32
+                               cand_idx:         torch.Tensor,    # (B, n_cand) int64
+                               ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    The three categorical-overlap cross features (genre_overlap, tag_overlap,
+    dev_affinity) for a single user-side history slice. All three reuse the
+    primitives (`weighted_overlap` and `dev_affinity`) — this wrapper just bundles
+    the buffers + call sites so every history slice (Full / Liked / Recent-3 /
+    Disliked / future) computes its 3 features in one line.
+
+    Returns (genre_overlap, tag_overlap, dev_affinity), each shaped (B, n_cand).
+
+    Used by:
+      - ranker/precompute.py — once per history slice, results written to parquet
+      - ranker/train.py      — once per history slice, results stacked into cross
+      - ranker/canary.py     — once per history slice for the synthetic user
+    """
+    genre_ov = weighted_overlap(buffers.genre_binary, buffers.genre_count,
+                                history_indices=history_indices,
+                                history_weights=history_weights,
+                                cand_idx=cand_idx)
+    tag_ov   = weighted_overlap(buffers.tag_binary, buffers.tag_count,
+                                history_indices=history_indices,
+                                history_weights=history_weights,
+                                cand_idx=cand_idx)
+    dev_aff  = dev_affinity(buffers.game_dev_idx,
+                            dev_pad_idx=buffers.dev_pad_idx,
+                            history_indices=history_indices,
+                            history_weights=history_weights,
+                            cand_idx=cand_idx)
+    return genre_ov, tag_ov, dev_aff

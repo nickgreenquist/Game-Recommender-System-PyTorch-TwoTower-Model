@@ -10,7 +10,11 @@ target). train.py runs user_forward + item_embedding + computes all cross featur
 the fly via ranker.cross_features utils (same code path as precompute → bit-exact
 parquet identity), then calls compute_cross_features to stack them for the wide head.
 
-Active cross features (10 total — **Bucket 2** roster, plan §9):
+Active cross features (10 total — **Bucket 2** roster, plan §9). Bucket 3 (disliked
+slice) was tried and dropped — the Steam "disliked" partition is too noisy (most users
+don't review games; the hours-based heuristic flags below-average games for heavy
+players that they actually liked) and adding it slightly regressed vs Bucket 2 across
+every headline metric. See plan §9 / git log for the comparison.
   Phase A:
     1. tag_cosine               (B-0)  — raw TF-IDF cosine on user's full tag profile.
   Bucket 1 (full-history slice):
@@ -26,11 +30,11 @@ Active cross features (10 total — **Bucket 2** roster, plan §9):
     9. tag_overlap_recent3      (B-4b) — same as B-1b, on last 3 non-pad of X_hist_liked.
    10. dev_affinity_recent3     (B-4c) — same as B-2, on last 3 non-pad of X_hist_liked.
 
-TRAIN: computed on the fly via ranker/cross_features.py utils (weighted_overlap /
-dev_affinity / last_n_history). EVAL / CANARY: read from parquet (or rebuilt via
-same utils for synthetic canary users — see ranker/canary.py).
+TRAIN: computed on the fly via ranker/cross_features.py utils (categorical_overlap_triple
++ last_n_history). EVAL / CANARY: read from parquet (or rebuilt via the same utils
+for synthetic canary users — see ranker/canary.py).
 
-Plan §9 Buckets 3-5 land here in future phases — see Wide-feature normalization
+Plan §9 Buckets 4-6 land here in future phases — see Wide-feature normalization
 section in plan §9 for fixed-stats persistent buffers and gain=0.1 init.
 """
 import os
@@ -109,15 +113,15 @@ class RankerDataset:
         self.dev_affinity_recent3_negs    = np.stack(df['dev_affinity_recent3_negs'].values).astype(np.float32)
 
         # User-tower inputs (pre-padded to MAX_HISTORY_LEN by precompute).
-        self.X_user_avg_log  = df['user_avg_log_playtime'].values.astype(np.float32)
-        self.X_hist_liked    = np.stack(df['X_hist_liked'].values).astype(np.int64)
-        self.X_hist_disliked = np.stack(df['X_hist_disliked'].values).astype(np.int64)
-        self.X_hist_full     = np.stack(df['X_hist_full'].values).astype(np.int64)
-        self.X_hist_pw       = np.stack(df['X_hist_playtime_weights'].values).astype(np.float32)
+        self.X_user_avg_log     = df['user_avg_log_playtime'].values.astype(np.float32)
+        self.X_hist_liked       = np.stack(df['X_hist_liked'].values).astype(np.int64)
+        self.X_hist_disliked    = np.stack(df['X_hist_disliked'].values).astype(np.int64)
+        self.X_hist_full        = np.stack(df['X_hist_full'].values).astype(np.int64)
+        self.X_hist_pw          = np.stack(df['X_hist_playtime_weights'].values).astype(np.float32)
         # Bucket 2 — playtime weights for the LIKED slice (parallel to X_hist_liked,
         # normalized to sum 1 over non-pad liked entries; 0 at pad). Distinct from
         # X_hist_pw (which is normalized over the FULL slice).
-        self.X_hist_liked_pw = np.stack(df['X_hist_liked_playtime_weights'].values).astype(np.float32)
+        self.X_hist_liked_pw    = np.stack(df['X_hist_liked_playtime_weights'].values).astype(np.float32)
 
         self.N        = len(self.label_idx)
         self.n_neg    = self.neg_idx.shape[1]
@@ -130,25 +134,25 @@ class RankerDataset:
         # neg_idx, cg_label_rank) and cross-feature scalars (tag_cosine_*) stay numpy:
         # sample_batch builds the cand matrix via numpy slicing/np.random; evaluate.py
         # reads them directly for the 100-cand eval pool. Both are awkward on-device.
-        self._X_user_avg_log_t  = torch.from_numpy(self.X_user_avg_log).unsqueeze(-1)  # (N, 1)
-        self._X_hist_liked_t    = torch.from_numpy(self.X_hist_liked)
-        self._X_hist_liked_pw_t = torch.from_numpy(self.X_hist_liked_pw)
-        self._X_hist_disliked_t = torch.from_numpy(self.X_hist_disliked)
-        self._X_hist_full_t     = torch.from_numpy(self.X_hist_full)
-        self._X_hist_pw_t       = torch.from_numpy(self.X_hist_pw)
+        self._X_user_avg_log_t     = torch.from_numpy(self.X_user_avg_log).unsqueeze(-1)  # (N, 1)
+        self._X_hist_liked_t       = torch.from_numpy(self.X_hist_liked)
+        self._X_hist_liked_pw_t    = torch.from_numpy(self.X_hist_liked_pw)
+        self._X_hist_disliked_t    = torch.from_numpy(self.X_hist_disliked)
+        self._X_hist_full_t        = torch.from_numpy(self.X_hist_full)
+        self._X_hist_pw_t          = torch.from_numpy(self.X_hist_pw)
 
     def to(self, device: torch.device) -> 'RankerDataset':
         """Move user-tower tensors to device, then drop the numpy originals to free RAM.
         Numpy lookup/scalar arrays (label_idx, neg_idx, cg_label_rank, *_label/*_negs)
         stay on host — sample_batch and evaluate.py read them via numpy slicing."""
-        self._X_user_avg_log_t  = self._X_user_avg_log_t.to(device)
-        self._X_hist_liked_t    = self._X_hist_liked_t.to(device)
-        self._X_hist_liked_pw_t = self._X_hist_liked_pw_t.to(device)
-        self._X_hist_disliked_t = self._X_hist_disliked_t.to(device)
-        self._X_hist_full_t     = self._X_hist_full_t.to(device)
-        self._X_hist_pw_t       = self._X_hist_pw_t.to(device)
-        del self.X_user_avg_log, self.X_hist_liked, self.X_hist_liked_pw, self.X_hist_disliked
-        del self.X_hist_full, self.X_hist_pw
+        self._X_user_avg_log_t     = self._X_user_avg_log_t.to(device)
+        self._X_hist_liked_t       = self._X_hist_liked_t.to(device)
+        self._X_hist_liked_pw_t    = self._X_hist_liked_pw_t.to(device)
+        self._X_hist_disliked_t    = self._X_hist_disliked_t.to(device)
+        self._X_hist_full_t        = self._X_hist_full_t.to(device)
+        self._X_hist_pw_t          = self._X_hist_pw_t.to(device)
+        del self.X_user_avg_log, self.X_hist_liked, self.X_hist_liked_pw
+        del self.X_hist_disliked, self.X_hist_full, self.X_hist_pw
         return self
 
 
@@ -171,16 +175,16 @@ def compute_cross_features(tag_cosine:             torch.Tensor,
     the output tensor must match `n_cross_features=10` and the head weight slot
     interpretation — checkpoints rely on this stable ordering:
 
-        column 0 : tag_cosine              (B-0,  Phase A)
-        column 1 : genre_overlap           (B-1,  Bucket 1)
-        column 2 : tag_overlap             (B-1b, Bucket 1)
-        column 3 : dev_affinity            (B-2,  Bucket 1)
-        column 4 : genre_overlap_liked     (B-3a, Bucket 2A)
-        column 5 : tag_overlap_liked       (B-3b, Bucket 2A)
-        column 6 : dev_affinity_liked      (B-3c, Bucket 2A)
-        column 7 : genre_overlap_recent3   (B-4a, Bucket 2B)
-        column 8 : tag_overlap_recent3     (B-4b, Bucket 2B)
-        column 9 : dev_affinity_recent3    (B-4c, Bucket 2B)
+        column 0  : tag_cosine              (B-0,  Phase A)
+        column 1  : genre_overlap           (B-1,  Bucket 1)
+        column 2  : tag_overlap             (B-1b, Bucket 1)
+        column 3  : dev_affinity            (B-2,  Bucket 1)
+        column 4  : genre_overlap_liked     (B-3a, Bucket 2A)
+        column 5  : tag_overlap_liked       (B-3b, Bucket 2A)
+        column 6  : dev_affinity_liked      (B-3c, Bucket 2A)
+        column 7  : genre_overlap_recent3   (B-4a, Bucket 2B)
+        column 8  : tag_overlap_recent3     (B-4b, Bucket 2B)
+        column 9  : dev_affinity_recent3    (B-4c, Bucket 2B)
 
     Future buckets append further columns at indices ≥ 10; do not reorder existing
     columns or older checkpoints become silently mis-aligned at load time.

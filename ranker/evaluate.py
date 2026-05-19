@@ -72,7 +72,7 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         # ── Cross features ──────────────────────────────────────────────────
         # Bucket 2 (10 features): read precomputed values from parquet. On-the-fly
         # compute in train._forward_batch is mathematically identical to these values
-        # (same weighted_overlap / dev_affinity / last_n_history utils on both sides).
+        # (same categorical_overlap_triple + last_n_history utils on both sides).
         def _gather(label_col: np.ndarray, neg_col: np.ndarray) -> torch.Tensor:
             buf = np.empty((B, n_cand), dtype=np.float32)
             buf[:, 0]  = label_col[rows]
