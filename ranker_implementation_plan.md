@@ -1,14 +1,16 @@
 # Steam Ranker: Implementation Plan
 
-## Status (2026-05-18)
+## Status (2026-05-19)
 
-Phase A ✓ and Phase B Bucket 1 ✓.
+Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓.
 
 **A-N2** (Phase A exit, tag_cosine only): NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −1.5%). Proved a Wide & Deep MLP can effectively match the CG two-tower dot product on identical features.
 
 **Bucket 1** (A-N2 + genre_overlap + tag_overlap + dev_affinity, 4 wide cross features): **NDCG@10 0.0822** vs CG α=0 0.0752 (Δ **+9.3%**) and vs A-N2 0.0741 (Δ **+10.9%**). MRR 0.0779 (+7.3% vs CG). Pure-reranking subset NDCG@10 0.1487 vs 0.1361 (+9.3%) — the lift is genuine reranking signal, not an E2E ceiling artifact. The three new categorical-overlap features together earned their seat and ranker now decisively beats the α=0 CG yardstick.
 
-**Next: Bucket 2 (Liked + Recent-3 Liked)** — six new features in one training run: the three categorical-overlap features from Bucket 1 (genre_overlap / tag_overlap / dev_affinity) computed over two history slices — the full liked-history (`X_hist_liked`) and the last-3-liked window. Disliked History → Bucket 3, Developer Catalog Signals → Bucket 4 (NEW — 6 features, studio-signature smoothing across full/liked/recent-3 slices), Numeric Matching → Bucket 5, CG Score → Bucket 6. Measured against Bucket 1 (NDCG@10 0.0822).
+**Bucket 2** (Bucket 1 + 6 features: genre/tag/dev × {Liked, Recent-3 Liked}, 10 wide cross features total): **NDCG@10 0.0828** vs Bucket 1 0.0822 (Δ **+0.7%**). MRR 0.0784 (+0.6%). Pure-reranking NDCG@10 0.1499 vs 0.1487 (+0.8%). Direction is positive and consistent across every metric (no regressions), but magnitudes are tiny compared to Bucket 1's +10.9%. Bucket 1 already extracted most of the categorical-overlap signal from this data — Liked and Recent-3 slices add a thin layer on top. Bundle earns its seat, barely.
+
+**Next: Bucket 3 (Disliked History)** — three features (genre/tag/dev affinity on the disliked-history slice, `X_hist_disliked`). Tests whether disliked-as-negative-signal carries any lift. Expected wide-head weights: negative. If Bucket 3 doesn't help, disliked variants are dropped from later buckets entirely (e.g. Bucket 4's deliberate exclusion stays). Measured against Bucket 2 (NDCG@10 0.0828). Calibrated expectation given Bucket 2's marginal lift: +0.5-1% is a realistic target.
 
 > **Terminology note:** earlier drafts called these "pools." That's wrong — "pool" in this codebase means an embedding aggregation (the deep tower's `pool_liked` / `pool_disliked` / `pool_full` / `pool_playtime`, which sum item embeddings). The cross features compute weighted overlap and categorical affinity *directly over the history arrays* — no embedding aggregation happens. The code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
 
@@ -358,16 +360,32 @@ Hit@100 unchanged at the CG ceiling — as expected, the ranker can't recover la
 
 **Bucket 1 outcome:** content/categorical cross features deliver real lift independent of any CG-score signal (rule 3 satisfied). The wide-bypass architecture works as intended — three scalars in a 132-dim head are not drowned out by the 128-dim deep output.
 
-### Phase B — Bucket 2 (NEXT)
+### Phase B — Bucket 2 ✓ (2026-05-19)
 
-**Liked + Recent-3 Liked**: Bucket 1's three categorical-overlap features computed over two new history slices in a single training run — six new wide-head columns (cols 4-9).
+**Liked + Recent-3 Liked**: Bucket 1's three categorical-overlap features computed over two new history slices in a single training run — six new wide-head columns (cols 4-9):
 
 - **Liked slice:** `history_indices=X_hist_liked`, `history_weights=X_hist_liked_playtime_weights` (new precompute column).
-- **Recent-3 slice:** last 3 non-pad positions of `X_hist_liked` with playtime weights re-normalized over those 3.
+- **Recent-3 slice:** last 3 non-pad positions of `X_hist_liked` with playtime weights re-normalized over those 3 (extracted by new `last_n_history` util in `ranker/cross_features.py`).
 
-Both slices reuse the same `weighted_overlap` / `dev_affinity` utils — different `history_indices` / `history_weights` only.
+Both slices reuse the same `weighted_overlap` / `dev_affinity` utils — different `history_indices` / `history_weights` only. Bit-exact identity between precompute (parquet) and train (on-the-fly) verified.
 
-The hypothesis: restricting the user-side history to liked-only games should sharpen the signal by removing noise from games the user disliked or barely touched. The Recent-3 slice adds a recency channel on top — "what has the user been *enjoying* lately." Combining them in one bucket trades per-slice attribution for one fewer training run; if the bundle wins we'll know liked-history signal helps, and a drop-one ablation can isolate the recent-3 contribution if needed (§10 rule 1). Measured against Bucket 1 (NDCG@10 0.0822).
+| Metric | CG α=0 | Bucket 1 | Bucket 2 | Δ vs B1 |
+|---|---:|---:|---:|---:|
+| NDCG@1 | 0.0278 | 0.0305 | 0.0308 | +1.0% |
+| NDCG@10 | 0.0752 | 0.0822 | **0.0828** | **+0.7%** |
+| NDCG@20 | 0.0968 | 0.1029 | 0.1037 | +0.8% |
+| MRR | 0.0726 | 0.0779 | 0.0784 | +0.6% |
+| Hit@10 | 0.1430 | 0.1540 | 0.1549 | +0.6% |
+| Pure-rerank NDCG@10 | 0.1361 | 0.1487 | 0.1499 | +0.8% |
+| Pure-rerank MRR | 0.1235 | 0.1330 | 0.1339 | +0.7% |
+
+**Bucket 2 outcome:** lift is real but small. Direction is consistent positive across every metric (no regressions), so the 6 features earn their seat. But the magnitude (+0.7% NDCG@10) is an order of magnitude smaller than Bucket 1's +10.9% over A-N2. Honest read: Bucket 1 already extracted most of the categorical-overlap signal — the Liked and Recent-3 slices add a thin layer on top, not the second-step lift the experiment hoped for. Recalibrates expectations for downstream buckets toward the +0.5-1% range.
+
+### Phase B — Bucket 3 (NEXT)
+
+**Disliked History**: three categorical-overlap features on the `X_hist_disliked` slice (genre/tag/dev affinity, columns 10-12). Tests whether disliked-as-negative-signal carries any lift on top of Bucket 2. Expected wide-head weights are negative (high overlap with user's disliked profile → suppress score). Mirrors Bucket 1's structure on a new history slice; reuses all existing utils with no new infrastructure needed (X_hist_disliked is already in precompute, no new playtime-weights column required since disliked weights inherit the same flat-uniform convention by default — see §9 Bucket 3 design question for the open (a/b/c) weighting choice).
+
+If Bucket 3 disappoints, disliked variants are dropped from later buckets entirely (Bucket 4 already excludes them deliberately). If Bucket 3 wins, a small follow-up bucket can combine disliked × dev-catalog later.
 
 ---
 
@@ -425,9 +443,9 @@ History: `X_hist_full`, weighted by `X_hist_playtime_weights`. **Outcome:** NDCG
 | B-1b | **Tag Overlap (Full)** | `(user_tag_w · item_tag_binary) / item_tag_count` — same structure as B-1 but on tags. **Magnitude-aware and complementary to B-0 Tag Cosine** (cosine is direction-only; overlap is "average user weight on candidate's tags"). Buffers: `game_tag_binary`, `game_tag_count`. |
 | B-2 | **Developer Affinity (Full)** | `playtime-weighted fraction of user's history under this developer` (i.e. `Σ_i h_pw[i] · 1[hist_dev[i] == item_dev]`). Captures studio loyalty (FromSoftware, Larian, Paradox) — categorical membership CG can't do. |
 
-#### Bucket 2 — Liked + Recent-3 Liked (NEXT)
+#### Bucket 2 ✓ — Liked + Recent-3 Liked (2026-05-19)
 
-Six new features in one training run: Bucket 1's three categorical-overlap features computed over two slices of the user's liked-only history.
+Six new features in one training run: Bucket 1's three categorical-overlap features computed over two slices of the user's liked-only history. **Outcome:** NDCG@10 0.0822 → 0.0828 (+0.7% vs Bucket 1). Direction-consistent across every metric but small magnitude; see §8 Phase Log Bucket 2 entry for the full metric table and honest read.
 
 **Slice A — Liked (full):** `history_indices=X_hist_liked`, `history_weights=X_hist_liked_playtime_weights` (**new precompute column**, parallel to `X_hist_liked`, MAX_HISTORY_LEN, looking up each liked entry's playtime weight from the full-history computation). Filters out games the user disliked or barely touched, so the user-side weight vector reflects only genuine positive preferences.
 
@@ -446,7 +464,7 @@ Both slices reuse the `X_hist_liked_playtime_weights` precompute column — land
 | B-4b | **Tag Overlap (Recent-3)** | Same as B-1b, last 3 liked. |
 | B-4c | **Developer Affinity (Recent-3)** | Same as B-2, last 3 liked. "Are you currently on a studio kick?" |
 
-#### Bucket 3 — Disliked History
+#### Bucket 3 — Disliked History (NEXT)
 
 History: `X_hist_disliked`, weighted by **new precompute column** `X_hist_disliked_playtime_weights` (parallel to `X_hist_disliked`, MAX_HISTORY_LEN — looks up each disliked entry's playtime weight from the full-history computation).
 
