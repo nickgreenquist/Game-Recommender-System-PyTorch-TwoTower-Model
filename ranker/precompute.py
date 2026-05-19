@@ -46,7 +46,7 @@ from src.train import (build_model, get_config,
 # encode the SAME CG that the ranker will compete against in evaluate.py.
 # Mismatched precompute (e.g. α=0.4 CG retrieval + α=0 ranker training) means the
 # E2E-ceiling "CG baseline" measured at eval time isn't the CG the ranker is fighting.
-from ranker.cross_features import overlap_pool, dev_affinity_pool
+from ranker.cross_features import weighted_overlap, dev_affinity
 from ranker.train import _ALPHA_TO_CG_GLOB
 
 
@@ -369,22 +369,22 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         cand_b = torch.cat([label_b.unsqueeze(1), topk.indices], dim=1)                   # (B, 1 + n_neg)
 
         # B-1 Genre Overlap
-        genre_ov = overlap_pool(genre_binary_dev, genre_count_dev,
-                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        genre_ov = weighted_overlap(genre_binary_dev, genre_count_dev,
+                                    history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
         genre_ov_np = genre_ov.cpu().numpy()
         genre_ov_label[s:e] = genre_ov_np[:, 0]
         genre_ov_negs[s:e]  = genre_ov_np[:, 1:]
 
         # B-1b Tag Overlap (same util, tag binary buffers)
-        tag_ov = overlap_pool(tag_binary_dev, tag_count_dev,
-                              pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        tag_ov = weighted_overlap(tag_binary_dev, tag_count_dev,
+                                  history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
         tag_ov_np = tag_ov.cpu().numpy()
         tag_ov_label[s:e] = tag_ov_np[:, 0]
         tag_ov_negs[s:e]  = tag_ov_np[:, 1:]
 
         # B-2 Developer Affinity
-        dev_aff = dev_affinity_pool(game_dev_dev, dev_pad_idx=n_devs,
-                                    pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        dev_aff = dev_affinity(game_dev_dev, dev_pad_idx=n_devs,
+                               history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
         dev_aff_np = dev_aff.cpu().numpy()
         dev_aff_label[s:e] = dev_aff_np[:, 0]
         dev_aff_negs[s:e]  = dev_aff_np[:, 1:]

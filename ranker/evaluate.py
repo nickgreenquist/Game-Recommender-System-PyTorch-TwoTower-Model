@@ -73,7 +73,7 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         # Phase A/B (Bucket 1): read precomputed values from parquet (eval-time is the
         # only place these are persisted; matches the precompute write). On-the-fly
         # compute in train._forward_batch is mathematically identical to these values
-        # (same overlap_pool / dev_affinity_pool utils on both sides).
+        # (same weighted_overlap / dev_affinity utils on both sides).
         def _gather(label_col: np.ndarray, neg_col: np.ndarray) -> torch.Tensor:
             buf = np.empty((B, n_cand), dtype=np.float32)
             buf[:, 0]  = label_col[rows]

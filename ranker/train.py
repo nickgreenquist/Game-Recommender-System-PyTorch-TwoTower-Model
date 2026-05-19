@@ -37,7 +37,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ranker.cross_features import dev_affinity_pool, overlap_pool
+from ranker.cross_features import dev_affinity, weighted_overlap
 from ranker.dataset import (CANDIDATES_PER_ROW, compute_cross_features,
                              load_splits, sample_batch)
 from ranker.evaluate import (cg_baseline, compute_label_ranks,
@@ -478,15 +478,16 @@ def train(checkpoint_dir: str | None = None) -> str:
         full_tag_cos  = user_tag_norm @ model.game_tag_matrix_l2.t()                     # (B, n_items+1)
         tag_cos       = full_tag_cos.gather(1, cand_b)                                   # (B, n_cand)
 
-        # ── Bucket 1 overlap + affinity (shared utils, full-history pool) ─────
+        # ── Bucket 1 overlap + affinity (shared utils, full-history slice) ────
         # Same compute called from precompute (bit-exact parquet identity).
-        # Bucket 3 (future) calls these utils with last-3-liked pool args instead.
-        genre_ov = overlap_pool(model.game_genre_binary, model.game_genre_count,
-                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
-        tag_ov   = overlap_pool(model.game_tag_binary,   model.game_tag_count,
-                                pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
-        dev_aff  = dev_affinity_pool(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
-                                     pool_indices=h_full, pool_weights=h_pw, cand_idx=cand_b)
+        # Buckets 2-4 (future) call these utils with different history slices
+        # (liked / last-3-liked / disliked) — see plan §9.
+        genre_ov = weighted_overlap(model.game_genre_binary, model.game_genre_count,
+                                    history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
+        tag_ov   = weighted_overlap(model.game_tag_binary,   model.game_tag_count,
+                                    history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
+        dev_aff  = dev_affinity(model.game_dev_idx, dev_pad_idx=model.dev_pad_idx,
+                                history_indices=h_full, history_weights=h_pw, cand_idx=cand_b)
 
         cross = compute_cross_features(tag_cos.reshape(-1),
                                         genre_ov.reshape(-1),

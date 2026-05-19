@@ -16,8 +16,8 @@ Active cross features (4 total — **Bucket 1** roster, plan §9):
   3. tag_overlap   (B-1b) — weighted binary TAG overlap, magnitude-aware complement to (1).
   4. dev_affinity  (B-2)  — playtime-weighted developer match.
 
-TRAIN: computed on the fly via ranker/cross_features.py utils (overlap_pool +
-dev_affinity_pool). EVAL / CANARY: read from parquet (or rebuilt via same utils for
+TRAIN: computed on the fly via ranker/cross_features.py utils (weighted_overlap +
+dev_affinity). EVAL / CANARY: read from parquet (or rebuilt via same utils for
 synthetic canary users — see ranker/canary.py).
 
 Plan §9 Buckets 2-4 land here in future phases — see Wide-feature normalization

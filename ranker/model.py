@@ -129,7 +129,7 @@ class WideDeepRanker(nn.Module):
         self.register_buffer('game_genre_count',   game_genre_count,   persistent=False)
         self.register_buffer('game_year_idx',      game_year_idx,      persistent=False)
         # game_dev_idx is also consumed by the dev_affinity cross feature (B-2) via
-        # ranker.cross_features.dev_affinity_pool — see train._forward_batch.
+        # ranker.cross_features.dev_affinity — see train._forward_batch.
         self.register_buffer('game_dev_idx',       game_dev_idx,       persistent=False)
         self.register_buffer('game_price_idx',     game_price_idx,     persistent=False)
 

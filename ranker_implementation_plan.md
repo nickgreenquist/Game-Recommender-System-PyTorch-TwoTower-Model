@@ -8,7 +8,9 @@ Phase A ✓ and Phase B Bucket 1 ✓.
 
 **Bucket 1** (A-N2 + genre_overlap + tag_overlap + dev_affinity, 4 wide cross features): **NDCG@10 0.0822** vs CG α=0 0.0752 (Δ **+9.3%**) and vs A-N2 0.0741 (Δ **+10.9%**). MRR 0.0779 (+7.3% vs CG). Pure-reranking subset NDCG@10 0.1487 vs 0.1361 (+9.3%) — the lift is genuine reranking signal, not an E2E ceiling artifact. The three new categorical-overlap features together earned their seat and ranker now decisively beats the α=0 CG yardstick.
 
-**Next: Bucket 2 (Liked Pool)** — same three features as Bucket 1 (genre_overlap / tag_overlap / dev_affinity) but the user-side pool is restricted to `X_hist_liked` instead of `X_hist_full`. First of three pool-variant buckets (Buckets 2–4: Liked, Last-3-Liked, Disliked); Numeric Matching pushed to Bucket 5. Measured against Bucket 1 (NDCG@10 0.0822).
+**Next: Bucket 2 (Liked History)** — same three features as Bucket 1 (genre_overlap / tag_overlap / dev_affinity) but the user-side history is restricted to `X_hist_liked` instead of `X_hist_full`. First of three history-variant buckets (Buckets 2–4: Liked, Last-3-Liked, Disliked); Numeric Matching pushed to Bucket 5. Measured against Bucket 1 (NDCG@10 0.0822).
+
+> **Terminology note:** earlier drafts called these "pools." That's wrong — "pool" in this codebase means an embedding aggregation (the deep tower's `pool_liked` / `pool_disliked` / `pool_full` / `pool_playtime`, which sum item embeddings). The cross features compute weighted overlap and categorical affinity *directly over the history arrays* — no embedding aggregation happens. The code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
 
 ---
 
@@ -337,7 +339,7 @@ Cross features added in **buckets** of related signals, measured against the pre
 
 Added three set-membership / categorical features CG mathematically cannot represent: genre_overlap (B-1), tag_overlap (B-1b), dev_affinity (B-2). All three sit on the wide bypass (each is one column in `head.weight`); none are concatenated into the deep MLP.
 
-Implementation lives in `ranker/cross_features.py` — two utility functions (`overlap_pool`, `dev_affinity_pool`) parameterized on `(pool_indices, pool_weights, cand_idx)` so Bucket 3 can reuse them with last-3-liked pool args. Precompute and train both call the same utils → bit-exact identity between parquet and on-the-fly compute (verified to 2.98e-8 FP roundoff).
+Implementation lives in `ranker/cross_features.py` — two utility functions (`weighted_overlap`, `dev_affinity`) parameterized on `(history_indices, history_weights, cand_idx)` so Buckets 2–4 can reuse them with different history slices (liked / last-3-liked / disliked). Precompute and train both call the same utils → bit-exact identity between parquet and on-the-fly compute (verified to 2.98e-8 FP roundoff).
 
 | Metric | CG α=0 | A-N2 | Bucket 1 | Δ vs CG | Δ vs A-N2 |
 |---|---:|---:|---:|---:|---:|
@@ -358,9 +360,9 @@ Hit@100 unchanged at the CG ceiling — as expected, the ranker can't recover la
 
 ### Phase B — Bucket 2 (NEXT)
 
-**Liked Pool variant** of Bucket 1's three categorical-overlap features. Same `overlap_pool` / `dev_affinity_pool` utils, called with `pool_indices=X_hist_liked` and `pool_weights=X_hist_liked_playtime_weights` (new precompute column). First of three pool-variant buckets (2: Liked, 3: Last-3-Liked, 4: Disliked) — see §9.
+**Liked History variant** of Bucket 1's three categorical-overlap features. Same `weighted_overlap` / `dev_affinity` utils, called with `history_indices=X_hist_liked` and `history_weights=X_hist_liked_playtime_weights` (new precompute column). First of three history-variant buckets (2: Liked, 3: Last-3-Liked, 4: Disliked) — see §9.
 
-The hypothesis: filtering the user-side pool to liked-only games should sharpen the signal by removing noise from games the user disliked or barely touched. Full history (Bucket 1) treats every played game equally as a taste signal; Liked-only treats only genuine preferences as the input pool. Measured against Bucket 1 (NDCG@10 0.0822).
+The hypothesis: restricting the user-side history to liked-only games should sharpen the signal by removing noise from games the user disliked or barely touched. Full history (Bucket 1) treats every played game equally as a taste signal; Liked-only treats only genuine preferences as the input. Measured against Bucket 1 (NDCG@10 0.0822).
 
 ---
 
@@ -376,9 +378,9 @@ All Phase B cross features sit on the **wide bypass** — each feature is one co
 |---|---|
 | **Tag Cosine** | precomputed: `cosine(user_tag_pool_tfidf, item_tag_vec)` — direction match on the user's full tag profile vs candidate. Magnitude-blind. |
 
-### Buckets 1–4: Categorical-overlap pool variants
+### Buckets 1–4: Categorical-overlap history variants
 
-The same three categorical-overlap features (genre_overlap, tag_overlap, dev_affinity) computed over **four different user-side pools**. All four reuse `ranker/cross_features.py`'s `overlap_pool` and `dev_affinity_pool` utils — only `pool_indices` and `pool_weights` change. Implementation cost is small once Bucket 1 landed; the experiment cost is one short training run per pool variant. Each bucket also independently answers "does this pool variant add signal on top of the previous baseline?"
+The same three categorical-overlap features (genre_overlap, tag_overlap, dev_affinity) computed over **four different slices of the user's interaction history**. All four reuse `ranker/cross_features.py`'s `weighted_overlap` and `dev_affinity` utils — only `history_indices` and `history_weights` change. There is no pooling here (no embedding aggregation): the utils index per-item categorical buffers directly and reduce by playtime weights to one scalar per (history slice, candidate) pair. Implementation cost is small once Bucket 1 landed; the experiment cost is one short training run per history variant. Each bucket also independently answers "does this history variant add signal on top of the previous baseline?"
 
 Naming convention for the cross-feature column slots (must stay stable across checkpoints — see `dataset.compute_cross_features` ordering):
 
@@ -398,9 +400,9 @@ col 11: tag_overlap_disliked        (Bucket 4)
 col 12: dev_affinity_disliked       (Bucket 4)
 ```
 
-#### Bucket 1 ✓ — Full History Pool (2026-05-18)
+#### Bucket 1 ✓ — Full History (2026-05-18)
 
-Pool: `X_hist_full`, weighted by `X_hist_playtime_weights`. **Outcome:** NDCG@10 0.0741 → 0.0822 (+10.9% vs A-N2). See §8 Phase Log for the full metric table.
+History: `X_hist_full`, weighted by `X_hist_playtime_weights`. **Outcome:** NDCG@10 0.0741 → 0.0822 (+10.9% vs A-N2). See §8 Phase Log for the full metric table.
 
 | # | Feature | Formula |
 |---|---|---|
@@ -408,21 +410,21 @@ Pool: `X_hist_full`, weighted by `X_hist_playtime_weights`. **Outcome:** NDCG@10
 | B-1b | **Tag Overlap (Full)** | `(user_tag_w · item_tag_binary) / item_tag_count` — same structure as B-1 but on tags. **Magnitude-aware and complementary to B-0 Tag Cosine** (cosine is direction-only; overlap is "average user weight on candidate's tags"). Buffers: `game_tag_binary`, `game_tag_count`. |
 | B-2 | **Developer Affinity (Full)** | `playtime-weighted fraction of user's history under this developer` (i.e. `Σ_i h_pw[i] · 1[hist_dev[i] == item_dev]`). Captures studio loyalty (FromSoftware, Larian, Paradox) — categorical membership CG can't do. |
 
-#### Bucket 2 — Liked Pool (NEXT)
+#### Bucket 2 — Liked History (NEXT)
 
-Pool: `X_hist_liked`, weighted by **new precompute column** `X_hist_liked_playtime_weights`. Filters out games the user disliked or barely touched, so the user-side weight vector reflects only genuine positive preferences.
+History: `X_hist_liked`, weighted by **new precompute column** `X_hist_liked_playtime_weights`. Filters out games the user disliked or barely touched, so the user-side weight vector reflects only genuine positive preferences.
 
-**Hypothesis:** sharper signal-to-noise on the positive-pool side should improve discrimination, especially for users with bimodal libraries (e.g. plays both AAA and indie — full-pool dev_affinity gets smeared across both, liked-pool concentrates on the studios they *kept* playing). Measured against Bucket 1.
+**Hypothesis:** sharper signal-to-noise on the liked-only side should improve discrimination, especially for users with bimodal libraries (e.g. plays both AAA and indie — full-history dev_affinity gets smeared across both, liked-history concentrates on the studios they *kept* playing). Measured against Bucket 1.
 
 | # | Feature | Formula |
 |---|---|---|
-| B-3a | **Genre Overlap (Liked)** | Same as B-1, pool restricted to liked games. |
-| B-3b | **Tag Overlap (Liked)** | Same as B-1b, pool restricted to liked games. |
-| B-3c | **Developer Affinity (Liked)** | Same as B-2, pool restricted to liked games. |
+| B-3a | **Genre Overlap (Liked)** | Same as B-1, history restricted to liked games. |
+| B-3b | **Tag Overlap (Liked)** | Same as B-1b, history restricted to liked games. |
+| B-3c | **Developer Affinity (Liked)** | Same as B-2, history restricted to liked games. |
 
-#### Bucket 3 — Last-3-Liked Pool (Recency)
+#### Bucket 3 — Last-3-Liked (Recency)
 
-Pool: **last 3 non-pad positions of `X_hist_liked`**. Captures recency drift on positive-signal context — "what has the user been *enjoying* lately" — sharper than the full-liked pool in Bucket 2.
+History: **last 3 non-pad positions of `X_hist_liked`**. Captures recency drift on positive-signal context — "what has the user been *enjoying* lately" — sharper than the full-liked history in Bucket 2.
 
 Steam has no timestamps, so "last" = the last 3 entries in `X_hist_liked` (filled in shuffled-prefix order, seeded so consistent across runs). Playtime weights re-normalized to sum to 1 over those 3 positions. If a user has fewer than 3 liked games in the context, use however many exist; if 0, all three features fall through to 0 and the model relies on Buckets 1 + 2.
 
@@ -430,23 +432,23 @@ Requires the same `X_hist_liked_playtime_weights` precompute column as Bucket 2 
 
 | # | Feature | Formula |
 |---|---|---|
-| B-4a | **Genre Overlap (Recent-3)** | Same as B-1, pool = last 3 non-pad of `X_hist_liked` with weights re-normalized. |
+| B-4a | **Genre Overlap (Recent-3)** | Same as B-1, history = last 3 non-pad of `X_hist_liked` with weights re-normalized. |
 | B-4b | **Tag Overlap (Recent-3)** | Same as B-1b, last 3 liked. |
 | B-4c | **Developer Affinity (Recent-3)** | Same as B-2, last 3 liked. "Are you currently on a studio kick?" |
 
-#### Bucket 4 — Disliked Pool
+#### Bucket 4 — Disliked History
 
-Pool: `X_hist_disliked`, weighted by **new precompute column** `X_hist_disliked_playtime_weights` (parallel to `X_hist_disliked`, MAX_HISTORY_LEN — looks up each disliked entry's playtime weight from the full-pool computation).
+History: `X_hist_disliked`, weighted by **new precompute column** `X_hist_disliked_playtime_weights` (parallel to `X_hist_disliked`, MAX_HISTORY_LEN — looks up each disliked entry's playtime weight from the full-history computation).
 
 This is the **negative-signal experiment**: features encode "how much does this candidate look like games the user actively *disliked*?" The wide-bypass head will learn a negative weight for these columns (high overlap with dislikes → lower score). If users' dislikes are coherent (consistent studios/tags/genres they avoid), this should add real signal. If dislikes are scattered noise, the head weights will train to ~0 and the bucket gracefully no-ops.
 
 | # | Feature | Formula |
 |---|---|---|
-| B-5a | **Genre Overlap (Disliked)** | Same as B-1, pool = `X_hist_disliked`. Expected wide-head weight: negative. |
-| B-5b | **Tag Overlap (Disliked)** | Same as B-1b, disliked pool. |
-| B-5c | **Developer Affinity (Disliked)** | Same as B-2, disliked pool. "How many of this dev's games did the user actively dislike?" |
+| B-5a | **Genre Overlap (Disliked)** | Same as B-1, history = `X_hist_disliked`. Expected wide-head weight: negative. |
+| B-5b | **Tag Overlap (Disliked)** | Same as B-1b, disliked history. |
+| B-5c | **Developer Affinity (Disliked)** | Same as B-2, disliked history. "How many of this dev's games did the user actively dislike?" |
 
-**Open design question for Bucket 4 specifically:** what should `pool_weights` mean on the disliked side? Three candidates:
+**Open design question for Bucket 4 specifically:** what should `history_weights` mean on the disliked side? Three candidates:
 - (a) Use playtime weights consistently — low-hours games (clearly disliked) get low weight, which mutes the very signal we want to amplify.
 - (b) Use uniform weights — every disliked game counts equally; "if you disliked any of this dev's games, slight penalty."
 - (c) Use inverse-playtime weights — least-played games get highest weight (most clearly disliked).
@@ -455,7 +457,7 @@ Default to **(a)** for parity with Buckets 1–3 (same util signature, same arit
 
 ### Bucket 5 — Numeric Matching
 
-Absolute-difference scalars on user-vs-item numeric stats. All require Z-score normalization with fixed train-set mean/std stored as persistent buffers (see "Wide-feature normalization" below). Pushed back from Bucket 2 to keep all pool-variant work together first.
+Absolute-difference scalars on user-vs-item numeric stats. All require Z-score normalization with fixed train-set mean/std stored as persistent buffers (see "Wide-feature normalization" below). Pushed back from Bucket 2 to keep all history-variant work together first.
 
 | # | Feature | Formula |
 |---|---|---|
@@ -478,7 +480,7 @@ Absolute-difference scalars on user-vs-item numeric stats. All require Z-score n
 
 ### Removed from the roadmap
 
-- ~~Dislike Similarity~~ (was B-6, `cosine(user_disliked_pool, item_id_emb)`) — dropped as a one-off scalar; **superseded by Bucket 4** above, which gives the disliked-pool signal three structured columns instead of one cosine.
+- ~~Dislike Similarity~~ (was B-6, `cosine(user_disliked_pool, item_id_emb)`) — dropped as a one-off scalar; **superseded by Bucket 4** above, which gives the disliked-history signal three structured columns instead of one cosine. (The cosine name `user_disliked_pool` here refers to the deep-tower's `pool_disliked` — that one IS a legit embedding pool.)
 - ~~Tag Peak Match~~ (was B-7, `max(user_tag_profile * item_tag_vec)`) — dropped. Tag Cosine (B-0) and Tag Overlap variants (Buckets 1–4 each carry one) cover every useful tag-affinity view; the "single peak" angle is redundant.
 - ~~Recent Game Similarity~~ (was B-8, `dot(last_played_id_emb, item_id_emb)`) — **replaced** by Bucket 3 above (Recent Genre Overlap / Tag Overlap / Developer Affinity on the last 3 LIKED games). Item-ID dot is a weak proxy; mirroring Bucket 1's three features on a recent-liked window is the meaningful recency signal.
 
@@ -492,7 +494,7 @@ Expected ranges (pre-normalization):
   Genre/Tag Overlap (Full / Liked /       [0, 1]    → no normalization
     Recent-3 / Disliked)
   Developer Affinity (Full / Liked /      [0, 1]    → Z-score (heavy zero mass — may need
-    Recent-3 / Disliked)                              separate treatment; all four pool variants
+    Recent-3 / Disliked)                              separate treatment; all four history variants
                                                       share this concern)
   Price Match                             [0, ~8]   → Z-score
   Era Gap                                 [0, 1]    → Z-score (after normalizing year to [0,1])
