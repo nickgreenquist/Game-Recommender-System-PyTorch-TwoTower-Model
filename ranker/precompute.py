@@ -30,6 +30,23 @@ Cross features (precomputed; columns written per (label, neg) per row):
   - tag_overlap_recent3   (B-4b) — same as B-1b over last 3 non-pad of X_hist_liked.
   - dev_affinity_recent3  (B-4c) — same as B-2 over last 3 non-pad of X_hist_liked.
 
+  Bucket 5 (numeric matching — scalar arithmetic on per-user / per-item stats):
+  - price_match              (B-7a) — abs(user_mean_price_bucket - item_price_bucket)
+  - era_gap                  (B-7b) — abs(user_mean_year_numeric - item_year_numeric)
+  - playtime_cal_median      (B-7c) — SIGNED user_median_log_playtime - item_median_log_hours
+  - popularity_match         (B-7d) — abs(user_mean_log_count - item_log_count)
+  - sentiment_match          (B-7e) — abs(user_mean_sentiment - item_sentiment_ordinal)
+  All five are RAW (pre-Z-score). The model's Z-score buffers normalize them at
+  forward time — populating those buffers from train-parquet stats happens AFTER
+  precompute (see ranker.train.populate_wide_norm_buffers).
+
+Per-row user-side scalars persisted to parquet alongside the cross features (5 new
+columns) — needed at train time to recompute the 5 Bucket 5 cross features on the
+fly for sampled random negatives (where the parquet's label/neg precomputed values
+don't cover the sampled cands):
+  - user_mean_price_bucket, user_mean_year_numeric, user_median_log_playtime,
+    user_mean_log_count, user_mean_sentiment
+
 Output:
     data/ranker_candidates_train.parquet
     data/ranker_candidates_val.parquet
@@ -58,8 +75,12 @@ from src.train import (build_model, get_config,
 # encode the SAME CG that the ranker will compete against in evaluate.py.
 # Mismatched precompute (e.g. α=0.4 CG retrieval + α=0 ranker training) means the
 # E2E-ceiling "CG baseline" measured at eval time isn't the CG the ranker is fighting.
-from ranker.cross_features import (OverlapBuffers, categorical_overlap_triple,
-                                     last_n_history)
+from ranker.cross_features import (B5_USER_MEAN_LOG_COUNT, B5_USER_MEAN_PRICE,
+                                     B5_USER_MEAN_SENTIMENT, B5_USER_MEAN_YEAR,
+                                     B5_USER_MEDIAN_LOG_PT, Bucket5GameBuffers,
+                                     OverlapBuffers, categorical_overlap_triple,
+                                     last_n_history, numeric_match_quintuple)
+from src.features import SENTIMENT_UNKNOWN_FILL
 from ranker.train import _ALPHA_TO_CG_GLOB
 
 
@@ -159,6 +180,11 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
     # normalized to sum to 1 over the non-pad liked entries; 0 at pad). Separate from
     # X_hist_pw, which is normalized over the FULL slice and is not a subset of this.
     X_hist_liked_pw    = np.zeros((total_examples, MAX_HISTORY_LEN), dtype=np.float32)
+    # Bucket 5 — per-row user-side numeric aggregates (5 scalars per row, constant for
+    # all rollback positions of the same user). Column order MUST match the B5_USER_*
+    # indices in ranker/cross_features.py — train.py, dataset.py, canary.py all rely
+    # on this ordering when unpacking.
+    X_user_b5          = np.zeros((total_examples, 5), dtype=np.float32)
 
     # ── Step 2: fill arrays ─────────────────────────────────────────────────
     ex = 0
@@ -172,6 +198,18 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
 
         avg_log_u = fs['user_to_avg_log_playtime'].get(uid, 1.0) or 1.0
         total_log = n * avg_log_u
+
+        # Bucket 5 user-side aggregates — looked up once per user (full-history
+        # aggregates, identical across rollback positions). FeatureStore guarantees
+        # an entry exists for every kept user, but `.get(uid, fallback)` keeps the
+        # code safe against any future schema drift.
+        user_b5_row = np.array([
+            fs['user_to_mean_price_bucket' ].get(uid, 0.0),
+            fs['user_to_mean_year_numeric' ].get(uid, 0.0),
+            fs['user_to_median_log_playtime'].get(uid, 0.0),
+            fs['user_to_mean_log_count'    ].get(uid, 0.0),
+            fs['user_to_mean_sentiment'    ].get(uid, SENTIMENT_UNKNOWN_FILL),
+        ], dtype=np.float32)
 
         # Multiple independent shuffles per user (matches CG's N_SHUFFLES=3 for train).
         # Each shuffle produces genuinely different (context, target) pairs while
@@ -246,6 +284,7 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
                 label_idx_arr[ex]  = history[pos]
                 user_avg_log[ex]   = avg_log_u
                 user_int_count[ex] = n
+                X_user_b5[ex]      = user_b5_row
 
                 ex += 1
 
@@ -261,6 +300,7 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
         'X_hist_full':                      X_hist_full[:ex],
         'X_hist_playtime_weights':          X_hist_pw[:ex],
         'X_hist_liked_playtime_weights':    X_hist_liked_pw[:ex],
+        'X_user_b5':                        X_user_b5[:ex],            # (n, 5)
     }
 
 
@@ -287,6 +327,11 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
       genre_overlap_recent3_label, ...negs    — weighted genre overlap, last-3-liked (B-4a)
       tag_overlap_recent3_label,   ...negs    — weighted tag overlap, last-3-liked   (B-4b)
       dev_affinity_recent3_label,  ...negs    — playtime-weighted dev, last-3-liked  (B-4c)
+      price_match_label,           ...negs    — abs price-bucket diff                (B-7a)
+      era_gap_label,               ...negs    — abs year diff                        (B-7b)
+      playtime_cal_median_label,   ...negs    — SIGNED median-log-playtime diff      (B-7c)
+      popularity_match_label,      ...negs    — abs log-count diff                   (B-7d)
+      sentiment_match_label,       ...negs    — abs sentiment-ordinal diff           (B-7e)
     """
     n     = arrays['X_hist_full'].shape[0]
     n_neg = top_k - 1
@@ -299,6 +344,7 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     X_hist_full       = torch.from_numpy(arrays['X_hist_full']).long()
     X_hist_pw         = torch.from_numpy(arrays['X_hist_playtime_weights'])
     label_idx         = torch.from_numpy(arrays['label_item_idx']).long()
+    X_user_b5_t       = torch.from_numpy(arrays['X_user_b5'])      # (N, 5) float32
 
     neg_item_idxs      = np.zeros((n, n_neg), dtype=np.int32)
     cg_label_rank      = np.zeros(n,          dtype=np.int32)
@@ -327,6 +373,18 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     tag_ov_r3_negs     = np.zeros((n, n_neg), dtype=np.float32)
     dev_aff_r3_label   = np.zeros(n,          dtype=np.float32)
     dev_aff_r3_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    # Bucket 5 — numeric-match scalars (5 features × {label, negs} = 10 arrays).
+    # Raw values; the model's Z-score buffers normalize at forward time.
+    price_match_label  = np.zeros(n,          dtype=np.float32)
+    price_match_negs   = np.zeros((n, n_neg), dtype=np.float32)
+    era_gap_label      = np.zeros(n,          dtype=np.float32)
+    era_gap_negs       = np.zeros((n, n_neg), dtype=np.float32)
+    ptcal_med_label    = np.zeros(n,          dtype=np.float32)
+    ptcal_med_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    pop_match_label    = np.zeros(n,          dtype=np.float32)
+    pop_match_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    sent_match_label   = np.zeros(n,          dtype=np.float32)
+    sent_match_negs    = np.zeros((n, n_neg), dtype=np.float32)
 
     # Tag matrix on device once. Shape: (n_items+1, n_tags) — pad row appended for safe indexing.
     n_tags = fs['n_tags']
@@ -375,6 +433,25 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         tag_count   =tag_count_dev,
         game_dev_idx=game_dev_dev,
         dev_pad_idx =n_devs,
+    )
+
+    # Bucket 5 per-game scalars on device. Pad row (last row, n_items index) = 0;
+    # cand_b never references it (cand indices stay in [0, n_items)). Same shape
+    # the model registers under in train._buffers_from_fs — both call sites use
+    # `numeric_match_quintuple` so the parquet write and the train-time on-the-fly
+    # compute are bit-identical by construction.
+    def _to_padded(arr_1d: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(np.concatenate([
+            arr_1d.astype(np.float32),
+            np.zeros(1, dtype=np.float32),
+        ])).to(device)
+
+    b5_buffers = Bucket5GameBuffers(
+        price_bucket    =_to_padded(fs['game_price_bucket']),
+        year_numeric    =_to_padded(fs['game_year_numeric']),
+        median_log_hours=_to_padded(fs['game_median_log_hours']),
+        log_count       =_to_padded(fs['game_log_count']),
+        sentiment       =_to_padded(fs['game_sentiment']),
     )
 
     for s in tqdm(range(0, n, batch_size), desc="Scoring candidates"):
@@ -462,6 +539,23 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
                       dev_aff_r3_label,  dev_aff_r3_negs,
                       h_recent3, h_recent3_pw)
 
+        # ── Bucket 5 — numeric-match quintuple (scalar arithmetic, no history slice) ─
+        user_b5_b = X_user_b5_t[s:e].to(device)                                       # (B, 5)
+        price_match, era_gap, ptcal_med, pop_match, sent_match = numeric_match_quintuple(
+            b5_buffers, user_b5_b, cand_b)
+
+        def _write_b5_pair(label_arr, negs_arr, feat: torch.Tensor):
+            """Unpack a (B, 1 + n_neg) numeric-match feature tensor into label/negs arrays."""
+            f_np = feat.cpu().numpy()
+            label_arr[s:e] = f_np[:, 0]
+            negs_arr[s:e]  = f_np[:, 1:]
+
+        _write_b5_pair(price_match_label, price_match_negs, price_match)
+        _write_b5_pair(era_gap_label,     era_gap_negs,     era_gap)
+        _write_b5_pair(ptcal_med_label,   ptcal_med_negs,   ptcal_med)
+        _write_b5_pair(pop_match_label,   pop_match_negs,   pop_match)
+        _write_b5_pair(sent_match_label,  sent_match_negs,  sent_match)
+
     return {
         'neg_item_idxs':                neg_item_idxs,
         'cg_label_rank':                cg_label_rank,
@@ -490,6 +584,17 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         'tag_overlap_recent3_negs':     tag_ov_r3_negs,
         'dev_affinity_recent3_label':   dev_aff_r3_label,
         'dev_affinity_recent3_negs':    dev_aff_r3_negs,
+        # Bucket 5 (numeric-match quintuple)
+        'price_match_label':            price_match_label,
+        'price_match_negs':             price_match_negs,
+        'era_gap_label':                era_gap_label,
+        'era_gap_negs':                 era_gap_negs,
+        'playtime_cal_median_label':    ptcal_med_label,
+        'playtime_cal_median_negs':     ptcal_med_negs,
+        'popularity_match_label':       pop_match_label,
+        'popularity_match_negs':        pop_match_negs,
+        'sentiment_match_label':        sent_match_label,
+        'sentiment_match_negs':         sent_match_negs,
     }
 
 
@@ -606,6 +711,17 @@ def _build_dataframe(arrays: dict, scoring: dict) -> pd.DataFrame:
         'tag_overlap_recent3_negs':         list(scoring['tag_overlap_recent3_negs']),
         'dev_affinity_recent3_label':       scoring['dev_affinity_recent3_label'],
         'dev_affinity_recent3_negs':        list(scoring['dev_affinity_recent3_negs']),
+        # Cross features — Bucket 5 (numeric-match quintuple)
+        'price_match_label':                scoring['price_match_label'],
+        'price_match_negs':                 list(scoring['price_match_negs']),
+        'era_gap_label':                    scoring['era_gap_label'],
+        'era_gap_negs':                     list(scoring['era_gap_negs']),
+        'playtime_cal_median_label':        scoring['playtime_cal_median_label'],
+        'playtime_cal_median_negs':         list(scoring['playtime_cal_median_negs']),
+        'popularity_match_label':           scoring['popularity_match_label'],
+        'popularity_match_negs':            list(scoring['popularity_match_negs']),
+        'sentiment_match_label':            scoring['sentiment_match_label'],
+        'sentiment_match_negs':             list(scoring['sentiment_match_negs']),
         # User-side history
         'user_avg_log_playtime':            arrays['user_avg_log_playtime'],
         'user_interaction_count':           arrays['user_interaction_count'].astype(np.int32),
@@ -614,6 +730,10 @@ def _build_dataframe(arrays: dict, scoring: dict) -> pd.DataFrame:
         'X_hist_full':                      list(arrays['X_hist_full'].astype(np.int32)),
         'X_hist_playtime_weights':          list(arrays['X_hist_playtime_weights']),
         'X_hist_liked_playtime_weights':    list(arrays['X_hist_liked_playtime_weights']),
+        # User-side Bucket 5 aggregates (5 scalars per row, constant per user). Needed
+        # at train time for sampled random negatives — they aren't covered by the per-cand
+        # precomputed cross features above.
+        'X_user_b5':                        list(arrays['X_user_b5']),
     })
 
 

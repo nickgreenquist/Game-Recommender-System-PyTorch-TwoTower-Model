@@ -1,28 +1,28 @@
 """
 Shared compute utilities for wide-path cross features.
 
-All overlap-style cross features share the same shape — a weighted reduction over
-a slice of the user's interaction history against a per-item categorical buffer
-(binary one-hot, or dev-index lookup), evaluated for each candidate. The functions
-here do NOT pool embeddings — they reduce per-item categorical signals weighted by
-playtime, producing one scalar per (history slice, candidate) pair.
+Two families of utilities live here:
 
-The functions are parameterized on **history_indices** and **history_weights** so
-the same compute path serves all planned history variants (plan §9):
+1. **Categorical-overlap reductions** (`weighted_overlap`, `dev_affinity`,
+   `categorical_overlap_triple`, `last_n_history`). Cover Buckets 1+2 cross
+   features — a weighted reduction over a slice of the user's interaction history
+   against a per-item categorical buffer (binary one-hot or dev-index lookup),
+   evaluated for each candidate. Parameterized on `(history_indices,
+   history_weights)` so the same compute path serves all planned history
+   variants:
 
-  - Bucket 1 ✓ (full history):  (X_hist_full,      X_hist_playtime_weights)
-  - Bucket 2 ✓ (liked history): (X_hist_liked,     X_hist_liked_playtime_weights)
-  - Bucket 2 ✓ (last-3 liked):  (last 3 non-pad of X_hist_liked, re-normalized)
-  - Bucket 4  (dev-catalog × 3 slices): swap item-side buffers, reuse slices above
+       - Bucket 1 ✓ (full history):  (X_hist_full,  X_hist_playtime_weights)
+       - Bucket 2 ✓ (liked):         (X_hist_liked, X_hist_liked_playtime_weights)
+       - Bucket 2 ✓ (last-3 liked):  (last 3 non-pad of X_hist_liked, re-normalized)
 
-(Bucket 3 — disliked slice — was tried and dropped: Steam's "disliked" partition
-relies on noisy heuristics since the recommend signal is sparse, and the 3 disliked
-columns slightly regressed vs Bucket 2 across every headline metric.)
+   (Buckets 3 and 4 were tried with this family and dropped — see plan §8/§9.)
 
-Each new slice requires a (history_indices, history_weights) tensor pair. The
-three categorical-overlap features for a slice are bundled in
-`categorical_overlap_triple(buffers, slice_indices, slice_weights, cand_idx)`
-so every slice computes its 3 features in one line.
+2. **Scalar numeric-match quintuple** (`numeric_match_quintuple`,
+   `Bucket5GameBuffers`, the `B5_*` field indices). Covers Bucket 5 — five
+   per-(user, candidate) differences on numeric stats (price, year, median log
+   playtime, popularity, sentiment). No history reduction here; the user-side
+   values are full-history aggregates precomputed once per user and passed in as
+   a `(B, 5)` tensor.
 
 All functions expect tensors already on the same device, and are batched over (B).
 """
@@ -197,3 +197,98 @@ def categorical_overlap_triple(buffers:          OverlapBuffers,
                             history_weights=history_weights,
                             cand_idx=cand_idx)
     return genre_ov, tag_ov, dev_aff
+
+
+# ── Bucket 5 — Numeric Matching ──────────────────────────────────────────────
+#
+# Scalar-arithmetic cross features. Each feature is one subtract on two scalars
+# (one user-side aggregate, one per-candidate static), with abs or signed reduction.
+# No history slicing — user-side values are precomputed once per user (full-history
+# aggregates living in FeatureStore as user_to_mean_* / user_to_median_log_playtime)
+# and passed in here as a (B, 5) tensor.
+#
+# Indices into the (B, 5) user-side tensor. Order MUST stay stable — used by
+# ranker/precompute.py, ranker/dataset.py, ranker/train.py, ranker/canary.py to
+# pack/unpack consistently. The matching FeatureStore field names below must
+# track these in lockstep.
+
+B5_USER_MEAN_PRICE        = 0
+B5_USER_MEAN_YEAR         = 1
+B5_USER_MEDIAN_LOG_PT     = 2
+B5_USER_MEAN_LOG_COUNT    = 3
+B5_USER_MEAN_SENTIMENT    = 4
+B5_USER_FIELDS = (                        # FeatureStore dict keys, ordered to match B5_USER_*
+    'user_to_mean_price_bucket',
+    'user_to_mean_year_numeric',
+    'user_to_median_log_playtime',
+    'user_to_mean_log_count',
+    'user_to_mean_sentiment',
+)
+
+
+class Bucket5GameBuffers(NamedTuple):
+    """Per-item static scalars for Bucket 5 numeric-match cross features.
+
+    Each shaped (n_items+1,) float32 with pad row appended (pad value = 0; never
+    indexed since cand_idx stays in [0, n_items)). Registered as non-persistent
+    buffers on the ranker (rebuilt from FeatureStore on every load), see
+    ranker/train.py:_buffers_from_fs / ranker/model.py constructor.
+
+    `price_bucket` is float-cast from `game_price_idx` (int64 on the model for
+    the Embedding lookup) at use time — no separate buffer.
+    """
+    price_bucket:     torch.Tensor     # (n_items+1,) float32 — 0-8 price bucket as float
+    year_numeric:     torch.Tensor     # (n_items+1,) float32 — release year (e.g. 2018.0)
+    median_log_hours: torch.Tensor     # (n_items+1,) float32 — log1p(median_hours)
+    log_count:        torch.Tensor     # (n_items+1,) float32 — log1p(interaction_count)
+    sentiment:        torch.Tensor     # (n_items+1,) float32 — sentiment ordinal 0-7
+
+
+def numeric_match_quintuple(buffers:   Bucket5GameBuffers,
+                            user_b5:   torch.Tensor,    # (B, 5) float32 — user-side aggregates
+                            cand_idx:  torch.Tensor,    # (B, n_cand) int64
+                            ) -> tuple[torch.Tensor, torch.Tensor,
+                                       torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    The five Bucket 5 numeric-match cross features for a batch. Returns:
+
+      (price_match, era_gap, playtime_calibration_median,
+       popularity_match, sentiment_match)
+
+    each shaped (B, n_cand) float32.
+
+    Match semantics:
+      - price_match, era_gap, popularity_match, sentiment_match : abs(user - item)
+      - playtime_calibration_median                            : signed (user - item)
+
+    Pre-Z-score values (raw scalars). The model applies Z-score inside score_pairs /
+    score_pairs_batched before head concat — keep this util free of normalization
+    so precompute writes the raw values to parquet (Z-score buffers are populated
+    AFTER precompute, from train-split parquet stats).
+
+    Used by:
+      - ranker/precompute.py — once per row, raw values written to parquet
+      - ranker/train.py      — once per sampled batch, on-the-fly for random negs
+      - ranker/canary.py     — once per synthetic user
+    """
+    # Per-cand item scalars: gather (B, n_cand)
+    cand_price   = buffers.price_bucket[cand_idx]
+    cand_year    = buffers.year_numeric[cand_idx]
+    cand_median  = buffers.median_log_hours[cand_idx]
+    cand_count   = buffers.log_count[cand_idx]
+    cand_sent    = buffers.sentiment[cand_idx]
+
+    # User-side scalars: (B, 1) — broadcasts to (B, n_cand)
+    u_price   = user_b5[:, B5_USER_MEAN_PRICE     ].unsqueeze(-1)
+    u_year    = user_b5[:, B5_USER_MEAN_YEAR      ].unsqueeze(-1)
+    u_median  = user_b5[:, B5_USER_MEDIAN_LOG_PT  ].unsqueeze(-1)
+    u_count   = user_b5[:, B5_USER_MEAN_LOG_COUNT ].unsqueeze(-1)
+    u_sent    = user_b5[:, B5_USER_MEAN_SENTIMENT ].unsqueeze(-1)
+
+    price_match           = (u_price  - cand_price ).abs()
+    era_gap               = (u_year   - cand_year  ).abs()
+    playtime_cal_median   = (u_median - cand_median)            # signed
+    popularity_match      = (u_count  - cand_count ).abs()
+    sentiment_match       = (u_sent   - cand_sent  ).abs()
+
+    return price_match, era_gap, playtime_cal_median, popularity_match, sentiment_match

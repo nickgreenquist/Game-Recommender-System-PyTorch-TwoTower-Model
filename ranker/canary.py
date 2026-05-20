@@ -23,10 +23,14 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from ranker.cross_features import (OverlapBuffers, categorical_overlap_triple,
-                                     last_n_history)
+from ranker.cross_features import (B5_USER_MEAN_LOG_COUNT, B5_USER_MEAN_PRICE,
+                                     B5_USER_MEAN_SENTIMENT, B5_USER_MEAN_YEAR,
+                                     B5_USER_MEDIAN_LOG_PT, Bucket5GameBuffers,
+                                     OverlapBuffers, categorical_overlap_triple,
+                                     last_n_history, numeric_match_quintuple)
 from ranker.dataset import compute_cross_features
 from ranker.train import _ALPHA_TO_CG_GLOB, build_ranker, get_config, get_device
+from src.features import SENTIMENT_UNKNOWN_FILL
 from src.dataset import MAX_HISTORY_LEN
 from src.evaluate import (USER_TYPE_TO_DISLIKED_GAMES,
                            USER_TYPE_TO_FAVORITE_GAMES,
@@ -45,6 +49,11 @@ from src.train import (build_model as build_cg_model,
 TOP_K_CG              = 100      # candidates from CG to rerank (matches precompute)
 TOP_N_DISPLAY_DEFAULT = 10
 DEFAULT_CANARIES      = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
+# Width of the cross_features tensor the canary code below computes. Bump this in
+# lockstep with the cross-feature compute path when a new bucket lands — the
+# alignment helper in run_canary uses it to decide slice vs zero-pad when a
+# historical checkpoint expects a different n_cross_features.
+CANARY_COMPUTED_CROSS_FEATURES = 15      # Bucket 5 roster (tag_cosine + 9 overlaps + 5 numeric)
 
 
 # ── Resolve checkpoints ──────────────────────────────────────────────────────
@@ -176,7 +185,10 @@ def _build_synthetic_user_inputs(fs: dict, user_type: str, pad_idx: int):
         'X_hist_playtime_weights':          pad_weights(full_pw).reshape(1, -1),
         'X_hist_liked_playtime_weights':    pad_weights(liked_pw).reshape(1, -1),           # (1, H) ← Bucket 2
     }
-    return user_inputs, fav_titles, anchor_titles, dis_titles, full_ids, full_pw
+    # raw_pw (un-normalized SIMULATED_* log-hours per full-history position) is the
+    # source for the synthetic user_median_log_playtime — Bucket 5 needs the raw
+    # values, not the normalized weights.
+    return user_inputs, fav_titles, anchor_titles, dis_titles, full_ids, full_pw, raw_pw
 
 
 # ── Tag cosine for a synthetic canary against candidate items ──────────────
@@ -197,6 +209,41 @@ def _synthetic_tag_cosine(ranker, full_ids: list, full_pw: list, cand_idx: torch
     user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
     cand_tag_norm = ranker.game_tag_matrix_l2[cand_idx]                                # (n_cand, n_tags)
     return (user_tag_norm * cand_tag_norm).sum(dim=1)                                  # (n_cand,)
+
+
+# ── Synthetic user-side Bucket 5 scalars ────────────────────────────────────
+
+def _build_synthetic_b5_scalars(ranker, full_ids: list, full_raw_pw: list,
+                                device: torch.device) -> torch.Tensor:
+    """
+    Build the (1, 5) Bucket 5 user-side scalar tensor for a synthetic canary user.
+
+    Mirrors features.load_features per-user aggregation logic: plain mean over the
+    user's full history for price / year / sentiment / log_count; median of raw
+    log-hours for playtime. Reads per-game scalars from the ranker's registered
+    buffers (game_price_idx / game_year_numeric / game_log_count / game_sentiment),
+    so synthetic canary values use exactly the same per-game numerics the model
+    saw during training.
+    """
+    n_items = int(ranker.game_pad_idx)
+    valid   = [i for i in full_ids if 0 <= i < n_items]
+    user_b5 = torch.zeros(1, 5, device=device)
+    if not valid:
+        # Empty history → 0s except sentiment fallback (parallel to features.load_features).
+        user_b5[0, B5_USER_MEAN_SENTIMENT] = SENTIMENT_UNKNOWN_FILL
+        return user_b5
+
+    v_t = torch.tensor(valid, dtype=torch.long, device=device)
+    user_b5[0, B5_USER_MEAN_PRICE]      = ranker.game_price_idx[v_t].float().mean()
+    user_b5[0, B5_USER_MEAN_YEAR]       = ranker.game_year_numeric[v_t].mean()
+    user_b5[0, B5_USER_MEAN_LOG_COUNT]  = ranker.game_log_count[v_t].mean()
+    user_b5[0, B5_USER_MEAN_SENTIMENT]  = ranker.game_sentiment[v_t].mean()
+    # full_raw_pw holds SIMULATED_*_LOG_HOURS per history position (FAV=10 / ANCHOR=2 /
+    # DISLIKE=0.5). For canary the median of these simulated log values stands in for
+    # `median(log1p(hours))` — Z-scored at the model so the unit isn't load-bearing.
+    if full_raw_pw:
+        user_b5[0, B5_USER_MEDIAN_LOG_PT] = float(np.median(full_raw_pw))
+    return user_b5
 
 
 # ── Main canary loop ────────────────────────────────────────────────────────
@@ -261,7 +308,7 @@ def run_canary(cg_checkpoint: str | None = None,
     if os.path.exists(cfg_path):
         with open(cfg_path) as f:
             saved = json.load(f)
-        for k in ('hidden_dims', 'dropout', 'n_cross_features',
+        for k in ('hidden_dims', 'dropout', 'n_cross_features', 'n_wide_normalized',
                   'item_id_emb_dim', 'item_genre_emb_dim', 'item_tag_emb_dim',
                   'developer_emb_dim', 'year_emb_dim', 'price_emb_dim',
                   'user_genre_emb_dim', 'user_tag_emb_dim',
@@ -277,12 +324,17 @@ def run_canary(cg_checkpoint: str | None = None,
          f"n_cross_features={cfg.get('n_cross_features', 0)}")
 
     # Canary's cross-feature compute path produces a fixed-width tensor matching the
-    # canary code's CURRENT bucket era. Historical checkpoints trained with a different
-    # n_cross_features (Phase A: 1, Bucket 1: 4, dropped trials at 13 / 16) won't match
-    # without alignment. Slice for shorter (column ordering is stable — keep the first N).
-    # Pad with zeros for longer (we can't reproduce dropped buckets' features here; the
-    # head's weights for those slots get fed zero, which BIASES the output — flag loudly).
-    canary_computed_cross = 10   # current canary.py compute path (Bucket 2 roster)
+    # canary code's CURRENT bucket era (Bucket 5 → 15 features). Historical checkpoints
+    # trained with a different n_cross_features (Phase A: 1, Bucket 1: 4, Bucket 2: 10,
+    # dropped trials at 13 / 16) won't match without alignment. Slice for shorter
+    # (column ordering is stable — keep the first N). Pad with zeros for longer (we
+    # can't reproduce dropped buckets' missing features here; the head's weights for
+    # those slots get fed zero, which BIASES the output — flag loudly).
+    #
+    # Derived from CANARY_COMPUTED_CROSS_FEATURES at module level so the constant is
+    # one edit away from the actual compute-path width and can't drift silently when a
+    # new bucket lands.
+    canary_computed_cross = CANARY_COMPUTED_CROSS_FEATURES
     model_expected_cross  = int(cfg.get('n_cross_features', 0))
     if model_expected_cross > canary_computed_cross:
         emit(f"⚠ ALIGNMENT WARNING: this canary code computes {canary_computed_cross} cross "
@@ -307,7 +359,7 @@ def run_canary(cg_checkpoint: str | None = None,
             user_emb  = _build_user_embedding(cg, fs, user_type)               # (1, output_dim)
             cg_scores = (V_all @ user_emb.T).squeeze(-1)                       # (n_items,)
 
-        ui, fav_titles, anchor_titles, dis_titles, full_ids, full_pw = \
+        ui, fav_titles, anchor_titles, dis_titles, full_ids, full_pw, full_raw_pw = \
             _build_synthetic_user_inputs(fs, user_type, pad_idx)
         exclude_titles = set(fav_titles) | set(anchor_titles) | set(dis_titles)
 
@@ -345,6 +397,15 @@ def run_canary(cg_checkpoint: str | None = None,
             game_dev_idx=ranker.game_dev_idx,
             dev_pad_idx =int(ranker.dev_pad_idx),
         )
+        # Bucket 5 — same bundle the training loop builds. price_bucket cast to float
+        # once per canary; cheap.
+        b5_buffers = Bucket5GameBuffers(
+            price_bucket    =ranker.game_price_idx.float(),
+            year_numeric    =ranker.game_year_numeric,
+            median_log_hours=ranker.game_median_log_hours,
+            log_count       =ranker.game_log_count,
+            sentiment       =ranker.game_sentiment,
+        )
 
         def _slice_triple(slice_indices, slice_weights):
             """Categorical overlap triple for a single history slice, squeezed back to (n_cand,)
@@ -380,9 +441,19 @@ def run_canary(cg_checkpoint: str | None = None,
             h_recent3, h_recent3_pw = last_n_history(h_lkd, h_lkd_pw, n=3, pad_idx=pad_idx_int)
             genre_ov_r3, tag_ov_r3, dev_aff_r3 = _slice_triple(h_recent3, h_recent3_pw)
 
+            # Bucket 5 — numeric-match quintuple. user_b5 is (1, 5); call returns
+            # tensors shaped (1, n_cand) each, squeezed to (n_cand,) for the head.
+            user_b5 = _build_synthetic_b5_scalars(ranker, full_ids, full_raw_pw, device)
+            price_m, era_g, ptcal_m, pop_m, sent_m = numeric_match_quintuple(
+                b5_buffers, user_b5, cand_t1)
+            price_m, era_g, ptcal_m, pop_m, sent_m = (
+                price_m.squeeze(0), era_g.squeeze(0), ptcal_m.squeeze(0),
+                pop_m.squeeze(0),   sent_m.squeeze(0))
+
             cross = compute_cross_features(tag_cos, genre_ov, tag_ov, dev_aff,
                                            genre_ov_l, tag_ov_l, dev_aff_l,
-                                           genre_ov_r3, tag_ov_r3, dev_aff_r3)
+                                           genre_ov_r3, tag_ov_r3, dev_aff_r3,
+                                           price_m, era_g, ptcal_m, pop_m, sent_m)
 
             # Align cross to the checkpoint's n_cross_features — see ALIGNMENT WARNING
             # above for the trade-offs. Stable column ordering means leading-N slice

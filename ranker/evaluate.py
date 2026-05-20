@@ -70,9 +70,9 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         item_concat = all_item_concat[cand_flat]                               # (B*n_cand, item_dim)
 
         # ── Cross features ──────────────────────────────────────────────────
-        # Bucket 2 (10 features): read precomputed values from parquet. On-the-fly
-        # compute in train._forward_batch is mathematically identical to these values
-        # (same categorical_overlap_triple + last_n_history utils on both sides).
+        # Bucket 5 (15 features): read precomputed values from parquet. On-the-fly
+        # compute in train._forward_batch is mathematically identical (same
+        # categorical_overlap_triple / last_n_history / numeric_match_quintuple utils).
         def _gather(label_col: np.ndarray, neg_col: np.ndarray) -> torch.Tensor:
             buf = np.empty((B, n_cand), dtype=np.float32)
             buf[:, 0]  = label_col[rows]
@@ -92,9 +92,16 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         genre_ov_r3_flat = _gather(dataset.genre_overlap_recent3_label,  dataset.genre_overlap_recent3_negs)
         tag_ov_r3_flat   = _gather(dataset.tag_overlap_recent3_label,    dataset.tag_overlap_recent3_negs)
         dev_aff_r3_flat  = _gather(dataset.dev_affinity_recent3_label,   dataset.dev_affinity_recent3_negs)
+        # Bucket 5 — numeric-match quintuple (RAW values; model Z-scores at forward time)
+        price_flat       = _gather(dataset.price_match_label,            dataset.price_match_negs)
+        era_flat         = _gather(dataset.era_gap_label,                dataset.era_gap_negs)
+        ptcal_flat       = _gather(dataset.playtime_cal_median_label,    dataset.playtime_cal_median_negs)
+        pop_flat         = _gather(dataset.popularity_match_label,       dataset.popularity_match_negs)
+        sent_flat        = _gather(dataset.sentiment_match_label,        dataset.sentiment_match_negs)
         cross = compute_cross_features(tag_cos_flat, genre_ov_flat, tag_ov_flat, dev_aff_flat,
                                        genre_ov_l_flat, tag_ov_l_flat, dev_aff_l_flat,
-                                       genre_ov_r3_flat, tag_ov_r3_flat, dev_aff_r3_flat)
+                                       genre_ov_r3_flat, tag_ov_r3_flat, dev_aff_r3_flat,
+                                       price_flat, era_flat, ptcal_flat, pop_flat, sent_flat)
 
         # ── Score: factorized MLP layer-1 over the (B, n_cand) layout ───────
         # See model.score_pairs_batched — math identity, runs user-side projection

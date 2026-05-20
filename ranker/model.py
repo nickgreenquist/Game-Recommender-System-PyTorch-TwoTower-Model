@@ -76,6 +76,15 @@ class WideDeepRanker(nn.Module):
                  game_year_idx:      torch.Tensor,  # (n_games+1,)          int64
                  game_dev_idx:       torch.Tensor,  # (n_games+1,)          int64
                  game_price_idx:     torch.Tensor,  # (n_games+1,)          int64
+                 # Bucket 5 — per-item numeric scalars for the 5 numeric-match cross features.
+                 # All (n_games+1,) float32 with pad row appended (pad value = 0; never indexed).
+                 # Consumed by ranker.cross_features.numeric_match_quintuple via the
+                 # Bucket5GameBuffers bundle. price_bucket cast to float at use time from
+                 # game_price_idx — no separate buffer.
+                 game_year_numeric:     torch.Tensor,  # (n_games+1,) float32 — release year as float
+                 game_median_log_hours: torch.Tensor,  # (n_games+1,) float32 — log1p(median_hours)
+                 game_log_count:        torch.Tensor,  # (n_games+1,) float32 — log1p(interaction_count)
+                 game_sentiment:        torch.Tensor,  # (n_games+1,) float32 — sentiment ordinal 0-7
                  # Sub-tower output dims (V5 CG defaults)
                  item_id_emb_dim:        int = 32,
                  item_genre_emb_dim:     int = 8,
@@ -94,6 +103,15 @@ class WideDeepRanker(nn.Module):
                  dropout:    float = 0.0,
                  # Wide bypass
                  n_cross_features: int = 0,
+                 # Wide-feature normalization — number of TRAILING cross-feature columns
+                 # that get Z-scored before head concat (`(x - mean) / std`). The
+                 # mean/std persistent buffers cover only these columns; columns
+                 # 0..n_cross_features - n_wide_normalized - 1 pass through raw (they
+                 # are bounded — cosines / Jaccard-style overlaps in [-1, 1] or [0, 1]
+                 # — so already comparable to the deep representation). For Bucket 5
+                 # this is 5 (Z-score the 5 numeric-match features in cols 10-14, leave
+                 # cols 0-9 raw). See plan §9 "Wide-feature normalization".
+                 n_wide_normalized: int = 0,
                  ):
         super().__init__()
         if hidden_dims is None:
@@ -104,9 +122,16 @@ class WideDeepRanker(nn.Module):
             # "per-tower projection + cosine."
             hidden_dims = [256, 128]
 
-        self.game_pad_idx     = n_games
-        self.dev_pad_idx      = n_developers
-        self.n_cross_features = n_cross_features
+        self.game_pad_idx      = n_games
+        self.dev_pad_idx       = n_developers
+        self.n_cross_features  = n_cross_features
+        # n_wide_normalized cannot exceed n_cross_features (we Z-score the trailing
+        # `n_wide_normalized` columns; if it's > n_cross_features the slice would
+        # include the deep_out columns and corrupt the head input).
+        assert 0 <= n_wide_normalized <= n_cross_features, (
+            f"n_wide_normalized={n_wide_normalized} must be in [0, n_cross_features={n_cross_features}]"
+        )
+        self.n_wide_normalized = n_wide_normalized
 
         # ── Buffers (non-persistent: rebuilt from FeatureStore on every load) ─
         # game_tag_matrix (RAW) feeds user_tag_tower and item_tag_tower — both warm-started
@@ -132,6 +157,15 @@ class WideDeepRanker(nn.Module):
         # ranker.cross_features.dev_affinity — see train._forward_batch.
         self.register_buffer('game_dev_idx',       game_dev_idx,       persistent=False)
         self.register_buffer('game_price_idx',     game_price_idx,     persistent=False)
+        # Bucket 5 numeric-match buffers (4 new) — see Bucket5GameBuffers in
+        # ranker/cross_features.py for the consumer-side contract. Non-persistent
+        # for the same reason as the other game_* buffers: rebuilt from FeatureStore
+        # on load, so they never bloat `model.pth`. game_price_idx above is reused
+        # for the price-side of price_match (cast to float at use).
+        self.register_buffer('game_year_numeric',     game_year_numeric,     persistent=False)
+        self.register_buffer('game_median_log_hours', game_median_log_hours, persistent=False)
+        self.register_buffer('game_log_count',        game_log_count,        persistent=False)
+        self.register_buffer('game_sentiment',        game_sentiment,        persistent=False)
 
         # ── Embedding lookups (all CG-warm-startable) ───────────────────────
         self.item_id_lookup    = nn.Embedding(n_games + 1,       item_id_emb_dim,
@@ -193,6 +227,18 @@ class WideDeepRanker(nn.Module):
 
         # ── Head: deep representation + cross-feature wide bypass ────────────
         self.head = nn.Linear(hidden_dims[-1] + n_cross_features, 1)
+
+        # ── Wide-feature Z-score normalization (Bucket 5+ scalars) ───────────
+        # Persistent buffers (saved in `state_dict` and reloaded on checkpoint load —
+        # MUST be persistent, otherwise an inference-time load resets to 0/1 and the
+        # wide head is silently mis-fed). Initialized to identity (mean=0, std=1)
+        # so a freshly-constructed model behaves as a no-op until train.populate_wide_norm_buffers
+        # fills them with single-pass train-parquet statistics. Applied inside
+        # score_pairs / score_pairs_batched to the trailing n_wide_normalized columns.
+        self.register_buffer('wide_norm_mean',
+                              torch.zeros(n_wide_normalized, dtype=torch.float32))
+        self.register_buffer('wide_norm_std',
+                              torch.ones(n_wide_normalized,  dtype=torch.float32))
 
         # Public dims (used by train.py for the summary line)
         self.user_concat_dim = user_concat_dim
@@ -304,6 +350,19 @@ class WideDeepRanker(nn.Module):
 
     # ── Score pairs ──────────────────────────────────────────────────────────
 
+    def _normalize_wide(self, cross_features: torch.Tensor) -> torch.Tensor:
+        """Apply Z-score to the trailing `n_wide_normalized` columns of cross_features.
+
+        Leading columns (cosines / Jaccard-style overlaps) pass through unchanged.
+        Returns a fresh tensor when normalization is active, else the input as-is.
+        """
+        if self.n_wide_normalized == 0:
+            return cross_features
+        n = self.n_wide_normalized
+        head = cross_features[..., :-n]
+        tail = (cross_features[..., -n:] - self.wide_norm_mean) / self.wide_norm_std
+        return torch.cat([head, tail], dim=-1)
+
     def score_pairs(self,
                     user_concat:    torch.Tensor,
                     item_concat:    torch.Tensor,
@@ -320,7 +379,7 @@ class WideDeepRanker(nn.Module):
         """
         deep_out = self.deep(torch.cat([user_concat, item_concat], dim=1))
         if self.n_cross_features > 0:
-            combined = torch.cat([deep_out, cross_features], dim=1)
+            combined = torch.cat([deep_out, self._normalize_wide(cross_features)], dim=1)
         else:
             combined = deep_out
         return self.head(combined).squeeze(-1)
@@ -366,7 +425,7 @@ class WideDeepRanker(nn.Module):
             x = layer(x)
 
         if self.n_cross_features > 0:
-            combined = torch.cat([x, cross_features], dim=1)
+            combined = torch.cat([x, self._normalize_wide(cross_features)], dim=1)
         else:
             combined = x
         scores = self.head(combined).squeeze(-1)  # (B*n_cand,)

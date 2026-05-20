@@ -25,6 +25,23 @@ MAX_PLAYTIME_PER_USER          = 10_000   # removes bots / outliers
 MIN_HOURS_PER_GAME             = 0.1      # playtime_forever >= 6 minutes
 MIN_TAG_COUNT                  = 50       # tag must appear in this many corpus games
 
+# Steam community sentiment string → 0-7 ordinal. Bucket 5 sentiment_match cross
+# feature reads this. Unknown/non-standard strings (e.g. "9 user reviews") and
+# missing values are stored as -1 here and filled with the corpus median in
+# features.load_features so the Z-scored cross feature reads "no signal" on them.
+SENTIMENT_TO_ORDINAL = {
+    'Overwhelmingly Negative': 0,
+    'Very Negative':           1,
+    'Mostly Negative':         2,
+    'Negative':                2,   # plain "Negative" → align with Mostly Negative
+    'Mixed':                   3,
+    'Mostly Positive':         4,
+    'Positive':                5,
+    'Very Positive':           6,
+    'Overwhelmingly Positive': 7,
+}
+SENTIMENT_UNKNOWN = -1
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -141,17 +158,22 @@ def run_games(data_dir: str = 'data') -> None:
         genres = [g for g in (game.get('genres') or []) if g]
         tags   = [t for t in (game.get('tags')   or []) if t]
         rows.append({
-            'item_id':      gid,
-            'title':        game.get('app_name') or game.get('title', ''),
-            'developer':    (game.get('developer') or '').strip(),
-            'publisher':    (game.get('publisher') or '').strip(),
-            'genres':       genres,
-            'tags':         tags,
-            'year':         _parse_year(game.get('release_date', '')),
-            'price':        game.get('price'),
-            'price_bucket': _parse_price_bucket(game.get('price')),
-            'n_users':      game_user_counts.get(gid, 0),
-            'median_hours': game_medians.get(gid, 0.0),
+            'item_id':           gid,
+            'title':             game.get('app_name') or game.get('title', ''),
+            'developer':         (game.get('developer') or '').strip(),
+            'publisher':         (game.get('publisher') or '').strip(),
+            'genres':            genres,
+            'tags':              tags,
+            'year':              _parse_year(game.get('release_date', '')),
+            'price':             game.get('price'),
+            'price_bucket':      _parse_price_bucket(game.get('price')),
+            'n_users':           game_user_counts.get(gid, 0),
+            'median_hours':      game_medians.get(gid, 0.0),
+            # Bucket 5 — sentiment ordinal 0-7 (see SENTIMENT_TO_ORDINAL above).
+            # Stored as -1 for unknown / non-standard strings; features.load_features
+            # fills with the corpus median so Z-scored cross features read no signal.
+            'sentiment_ordinal': SENTIMENT_TO_ORDINAL.get(
+                (game.get('sentiment') or '').strip(), SENTIMENT_UNKNOWN),
         })
 
     found_ids = {r['item_id'] for r in rows}
@@ -163,6 +185,10 @@ def run_games(data_dir: str = 'data') -> None:
 
     games_df = pd.DataFrame(rows)
     games_df['price'] = games_df['price'].astype(str)  # mixed float/str — normalize for parquet
+
+    n_with_sentiment = int((games_df['sentiment_ordinal'] >= 0).sum())
+    print(f"  Sentiment ordinals: {n_with_sentiment:,}/{len(games_df):,} games have known sentiment "
+          f"({100 * n_with_sentiment / max(len(games_df), 1):.1f}%)")
 
     # ── Tag scores ──
     print("\n── Building tag scores (TF-IDF with inverse-position TF) ──")

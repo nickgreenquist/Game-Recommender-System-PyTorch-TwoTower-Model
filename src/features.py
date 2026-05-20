@@ -24,6 +24,11 @@ VAL_SPLIT_SEED     = 42
 MAX_HISTORY_LEN    = 200    # cap per-user play history (avg-pool handles any length, but caps memory)
 N_PRICE_BUCKETS    = 9      # fixed: Free <$5 $5-10 $10-20 $20-30 $30-40 $40-60 >$60 Unknown
 
+# Bucket 5 — sentiment ordinal fallback for games without a known Steam sentiment string.
+# Centred on "Mixed" so the Z-scored sentiment_match cross feature reads as "no signal"
+# (close to corpus mean once the Z-score buffers are populated from training data).
+SENTIMENT_UNKNOWN_FILL = 3.0
+
 
 # ── Loaders ───────────────────────────────────────────────────────────────────
 
@@ -254,6 +259,40 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
     game_price_bucket  = np.array(games_sorted['price_bucket'].tolist(),  dtype=np.int64)
     game_median_hours  = np.array(games_sorted['median_hours'].tolist(),  dtype=np.float32)
 
+    # ── Bucket 5 — per-game numeric scalars for "Numeric Matching" cross features ──
+    # All derived from existing base_games + features_games columns, written to FeatureStore
+    # as (n_items,) float32 arrays parallel to the other game_* fields above. The ranker
+    # registers these as non-persistent buffers (rebuilt from FeatureStore on every load),
+    # see ranker/train.py:_buffers_from_fs.
+    base_games_for_fs = pd.read_parquet(os.path.join(data_dir, 'base_games.parquet'))
+    if 'sentiment_ordinal' not in base_games_for_fs.columns:
+        raise RuntimeError(
+            "base_games.parquet missing 'sentiment_ordinal' column "
+            "(Bucket 5 prerequisite). Rebuild with: python main.py preprocess games"
+        )
+    # Pull sentiment_ordinal + year by item_id (base_games row order isn't guaranteed
+    # to match features_games item_idx order — go through the id→value map).
+    iid_to_sentiment = dict(zip(base_games_for_fs['item_id'],
+                                base_games_for_fs['sentiment_ordinal']))
+    iid_to_year_str  = dict(zip(base_games_for_fs['item_id'], base_games_for_fs['year']))
+
+    sentiment_raw = np.array([iid_to_sentiment[iid] for iid in item_ids], dtype=np.int32)
+    game_sentiment = np.where(sentiment_raw >= 0,
+                              sentiment_raw.astype(np.float32),
+                              SENTIMENT_UNKNOWN_FILL).astype(np.float32)
+
+    year_int = np.array([int(iid_to_year_str[iid]) for iid in item_ids], dtype=np.int32)
+    known_year_mask = year_int > 0
+    if known_year_mask.any():
+        corpus_median_year = float(np.median(year_int[known_year_mask]))
+    else:
+        corpus_median_year = 2015.0
+    game_year_numeric = np.where(known_year_mask,
+                                 year_int.astype(np.float32),
+                                 corpus_median_year).astype(np.float32)
+
+    game_median_log_hours = np.log1p(game_median_hours).astype(np.float32)
+
     # User dicts
     train_users = users_df[users_df['split'] == 'train']['user_id'].tolist()
     val_users   = users_df[users_df['split'] == 'val']['user_id'].tolist()
@@ -288,6 +327,47 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
             if 0 <= idx < n_items:
                 game_interaction_counts[idx] += 1
 
+    # ── Bucket 5 — per-game popularity scalar (derives from interaction counts) ─
+    game_log_count = np.log1p(game_interaction_counts).astype(np.float32)
+
+    # ── Bucket 5 — per-user numeric aggregates ──────────────────────────────────
+    # Five floats per user, full-history aggregates (not rollback-prefix-only — matches
+    # existing `user_to_avg_log_playtime` convention, the only other per-user scalar
+    # consumed by the model). Used by ranker/precompute.py to build the
+    # `numeric_match_quintuple` cross feature values for each (label, neg) pair.
+    hours_by_user = (interactions_df
+                     .groupby('user_id')['hours']
+                     .apply(list)
+                     .to_dict())
+    user_to_mean_price_bucket, user_to_mean_year_numeric    = {}, {}
+    user_to_mean_sentiment,    user_to_mean_log_count       = {}, {}
+    user_to_median_log_playtime                              = {}
+    game_price_bucket_f = game_price_bucket.astype(np.float32)
+
+    for uid, history in user_to_play_history.items():
+        valid = [i for i in history if 0 <= i < n_items]
+        if valid:
+            v = np.asarray(valid, dtype=np.int64)
+            user_to_mean_price_bucket[uid] = float(game_price_bucket_f[v].mean())
+            user_to_mean_year_numeric[uid] = float(game_year_numeric[v].mean())
+            user_to_mean_sentiment[uid]    = float(game_sentiment[v].mean())
+            user_to_mean_log_count[uid]    = float(game_log_count[v].mean())
+        else:
+            # Fallback for users with empty history — `user_to_play_history` should
+            # always be non-empty for kept users, but be safe so a missing entry can't
+            # crash precompute. Use 0 / SENTIMENT_UNKNOWN_FILL — Z-scoring will
+            # re-center these to ~0 after the buffer-populate step.
+            user_to_mean_price_bucket[uid] = 0.0
+            user_to_mean_year_numeric[uid] = 0.0
+            user_to_mean_sentiment[uid]    = SENTIMENT_UNKNOWN_FILL
+            user_to_mean_log_count[uid]    = 0.0
+
+        hours = hours_by_user.get(uid, [])
+        if hours:
+            user_to_median_log_playtime[uid] = float(np.median(np.log1p(np.asarray(hours))))
+        else:
+            user_to_median_log_playtime[uid] = 0.0
+
     fs = {
         # Corpus
         'item_ids':           item_ids,
@@ -317,6 +397,15 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         'game_median_hours':         game_median_hours,
         'game_interaction_counts':   game_interaction_counts,
 
+        # Bucket 5 — per-game numeric scalars (4 new). All (n_items,) float32, parallel
+        # to the other game_* arrays. Ranker registers as non-persistent buffers (with a
+        # pad row appended) in train._buffers_from_fs. game_price_bucket above is reused
+        # for the price-side of price_match (cast to float at use time).
+        'game_year_numeric':         game_year_numeric,
+        'game_median_log_hours':     game_median_log_hours,
+        'game_log_count':            game_log_count,
+        'game_sentiment':            game_sentiment,
+
         # User split
         'train_users':        train_users,
         'val_users':          val_users,
@@ -326,6 +415,14 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         'user_to_play_weights':      user_to_play_weights,
         'user_to_avg_log_playtime':  user_to_avg_log_playtime,
         'user_to_recommend_history': user_to_recommend_history,
+
+        # Bucket 5 — per-user numeric aggregates (5 new). Consumed by ranker/precompute.py
+        # to compute the 5 numeric-match cross features for each (label, neg) candidate.
+        'user_to_mean_price_bucket':   user_to_mean_price_bucket,
+        'user_to_mean_year_numeric':   user_to_mean_year_numeric,
+        'user_to_mean_sentiment':      user_to_mean_sentiment,
+        'user_to_mean_log_count':      user_to_mean_log_count,
+        'user_to_median_log_playtime': user_to_median_log_playtime,
     }
 
     print(f"\n  FeatureStore: {n_items:,} games | {n_genres} genres | {n_tags} tags | "
