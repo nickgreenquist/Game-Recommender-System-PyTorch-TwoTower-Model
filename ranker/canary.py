@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ranker.cross_features import (OverlapBuffers, categorical_overlap_triple,
                                      last_n_history)
 from ranker.dataset import compute_cross_features
-from ranker.train import build_ranker, get_config, get_device
+from ranker.train import _ALPHA_TO_CG_GLOB, build_ranker, get_config, get_device
 from src.dataset import MAX_HISTORY_LEN
 from src.evaluate import (USER_TYPE_TO_DISLIKED_GAMES,
                            USER_TYPE_TO_FAVORITE_GAMES,
@@ -49,11 +49,34 @@ DEFAULT_CANARIES      = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
 
 # ── Resolve checkpoints ──────────────────────────────────────────────────────
 
-def _resolve_cg_checkpoint() -> str:
-    matches = sorted(glob.glob(
-        'saved_models/PROD_best_triple_full_softmax_popularity_alpha_*.pth'))
+def _resolve_cg_checkpoint(alpha: float = 0.0) -> str:
+    """Resolve the CG checkpoint whose training α matches the ranker's α.
+
+    Defaults to α=0 (the offline-metrics throwaway CG). Pass `alpha` to match the
+    ranker being canary'd — α=0 ranker should compare against α=0 CG, α=0.4 ranker
+    against the α=0.4 PROD CG. Mismatched α makes the side-by-side useless: the
+    α=0 ranker is trained without popularity suppression, and putting it next to
+    an α=0.4 CG measures "what popularity tax does the CG impose" rather than
+    "did the ranker's reranking add value."
+
+    Uses the same α→glob map (ranker.train._ALPHA_TO_CG_GLOB) that precompute and
+    warm-start use, so all three call sites agree on which CG file is the right
+    α match.
+    """
+    pattern = _ALPHA_TO_CG_GLOB.get(alpha)
+    if pattern is None:
+        supported = sorted(_ALPHA_TO_CG_GLOB.keys())
+        raise ValueError(
+            f"No CG checkpoint convention for ranker α={alpha}. "
+            f"Supported: {supported}. Either train a matching CG and add it to "
+            f"ranker.train._ALPHA_TO_CG_GLOB, or pass an explicit cg_checkpoint."
+        )
+    matches = sorted(glob.glob(pattern))
     if not matches:
-        raise FileNotFoundError("No PROD CG checkpoint found in saved_models/")
+        raise FileNotFoundError(
+            f"No CG checkpoint matched α={alpha} glob '{pattern}'. "
+            "Either train one, or pass an explicit cg_checkpoint to canary."
+        )
     return matches[-1]
 
 
@@ -62,6 +85,17 @@ def _resolve_ranker_checkpoint() -> str:
     if not matches:
         raise FileNotFoundError("No ranker checkpoint found in saved_models/ranker/")
     return max(matches, key=os.path.getmtime)
+
+
+def _read_ranker_alpha(ranker_checkpoint: str) -> float:
+    """Read `popularity_alpha` from a ranker checkpoint's _config.json sidecar.
+    Returns 0.0 if the sidecar is missing or the key is absent — same default the
+    ranker's get_config() uses."""
+    cfg_path = os.path.splitext(ranker_checkpoint)[0] + '_config.json'
+    if not os.path.exists(cfg_path):
+        return 0.0
+    with open(cfg_path) as f:
+        return float(json.load(f).get('popularity_alpha', 0.0))
 
 
 # ── Synthetic user-side inputs (mirrors src/evaluate._build_user_embedding) ─
@@ -181,7 +215,12 @@ def run_canary(cg_checkpoint: str | None = None,
     canaries = canaries or DEFAULT_CANARIES
 
     ranker_checkpoint = ranker_checkpoint or _resolve_ranker_checkpoint()
-    cg_checkpoint     = cg_checkpoint     or _resolve_cg_checkpoint()
+    # Resolve CG by the ranker's training α — otherwise the side-by-side compares
+    # an α=0 ranker against an α=0.4 CG (or vice versa), which mostly measures the
+    # CG's popularity-suppression tax rather than the ranker's reranking lift.
+    # An explicit cg_checkpoint argument still wins for one-off comparisons.
+    ranker_alpha      = _read_ranker_alpha(ranker_checkpoint)
+    cg_checkpoint     = cg_checkpoint     or _resolve_cg_checkpoint(ranker_alpha)
     if output_file is None:
         base = os.path.splitext(os.path.basename(ranker_checkpoint))[0]
         output_file = f"ranker/canary_results/{base}.txt"
@@ -194,6 +233,7 @@ def run_canary(cg_checkpoint: str | None = None,
 
     emit(f"CG checkpoint:     {cg_checkpoint}")
     emit(f"Ranker checkpoint: {ranker_checkpoint}")
+    emit(f"α match:           ranker α={ranker_alpha} → CG α={ranker_alpha} (parity)")
     emit(f"Top-N per canary:  {top_n}    Top-K from CG: {TOP_K_CG}")
     emit(f"Canaries:          {len(canaries)}")
     emit('')
@@ -235,6 +275,26 @@ def run_canary(cg_checkpoint: str | None = None,
     ranker.eval()
     emit(f"Ranker: popularity_alpha={cfg.get('popularity_alpha', 0.0)}  "
          f"n_cross_features={cfg.get('n_cross_features', 0)}")
+
+    # Canary's cross-feature compute path produces a fixed-width tensor matching the
+    # canary code's CURRENT bucket era. Historical checkpoints trained with a different
+    # n_cross_features (Phase A: 1, Bucket 1: 4, dropped trials at 13 / 16) won't match
+    # without alignment. Slice for shorter (column ordering is stable — keep the first N).
+    # Pad with zeros for longer (we can't reproduce dropped buckets' features here; the
+    # head's weights for those slots get fed zero, which BIASES the output — flag loudly).
+    canary_computed_cross = 10   # current canary.py compute path (Bucket 2 roster)
+    model_expected_cross  = int(cfg.get('n_cross_features', 0))
+    if model_expected_cross > canary_computed_cross:
+        emit(f"⚠ ALIGNMENT WARNING: this canary code computes {canary_computed_cross} cross "
+             f"features but the checkpoint was trained with {model_expected_cross}. The extra "
+             f"{model_expected_cross - canary_computed_cross} columns will be zero-padded — "
+             f"the model's head weights for those slots see zero instead of trained-real values, "
+             f"so the ranker scores below are BIASED relative to a true reproduction. The "
+             f"top-N ordering is still indicative of the model's behavior on the in-canary "
+             f"features but should not be treated as a faithful re-run of the original canary.")
+    elif model_expected_cross < canary_computed_cross:
+        emit(f"Note: canary computes {canary_computed_cross} cross features; checkpoint expects "
+             f"{model_expected_cross}. Slicing to first {model_expected_cross} (stable column order).")
     emit('')
 
     for user_type in canaries:
@@ -323,6 +383,19 @@ def run_canary(cg_checkpoint: str | None = None,
             cross = compute_cross_features(tag_cos, genre_ov, tag_ov, dev_aff,
                                            genre_ov_l, tag_ov_l, dev_aff_l,
                                            genre_ov_r3, tag_ov_r3, dev_aff_r3)
+
+            # Align cross to the checkpoint's n_cross_features — see ALIGNMENT WARNING
+            # above for the trade-offs. Stable column ordering means leading-N slice
+            # gives the right subset for older (1, 4) checkpoints; zero-pad fills missing
+            # slots for newer (13, 16) dropped-bucket checkpoints.
+            if model_expected_cross != canary_computed_cross:
+                if model_expected_cross < canary_computed_cross:
+                    cross = cross[..., :model_expected_cross]
+                else:
+                    pad = torch.zeros(*cross.shape[:-1],
+                                       model_expected_cross - canary_computed_cross,
+                                       device=cross.device, dtype=cross.dtype)
+                    cross = torch.cat([cross, pad], dim=-1)
 
             ranker_scores = ranker.score_pairs(user_concat_exp, item_concat, cross)
 
