@@ -293,6 +293,42 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
 
     game_median_log_hours = np.log1p(game_median_hours).astype(np.float32)
 
+    # ── Bucket 6 — per-game tag/dev rarity buffers for "Niche Feature Crosses" ─
+    # All derived from existing FeatureStore inputs (game_tag_matrix + game_developer_idx),
+    # written as float32 arrays parallel to the other game_* fields. The ranker registers
+    # these as non-persistent buffers (rebuilt from FeatureStore on every load) — see
+    # ranker/train.py:_buffers_from_fs.
+    #
+    # tag_idf is pure IDF per tag (log(N / df)) computed once from corpus tag presence;
+    # game_tag_matrix above is RAW TF-IDF (positional × IDF) and shouldn't be substituted
+    # for plain IDF here — the niche features want rarity weights independent of how each
+    # game listed its tags.
+    tag_binary_for_idf = (game_tag_matrix > 0).astype(np.float32)            # (n_items, n_tags)
+    tag_df             = tag_binary_for_idf.sum(axis=0)                       # (n_tags,) document frequency
+    # Standard IDF with +1 floor on df (every kept tag has MIN_TAG_COUNT presence in preprocess,
+    # so df is already ≥ 50 in practice — the floor is paranoid but cheap).
+    tag_idf = np.log(n_items / np.maximum(tag_df, 1.0)).astype(np.float32)    # (n_tags,)
+
+    # Shape A buffer for Bucket 6's IDF-overlap features: row-wise IDF-weighted binary tag
+    # vector (game_tag_binary * tag_idf[None, :]). Plays the role of game_tag_binary in
+    # `weighted_overlap`, with an analogous count denominator = sum of the row's IDF values.
+    game_tag_binary_idf = (tag_binary_for_idf * tag_idf[None, :]).astype(np.float32)
+
+    # Shape B per-game scalars (3 niche scalars). Mean/max IDF over an item's tags; the
+    # "mean over tags present" uses safe-divide so tag-less items get 0 (harmless — they
+    # also have zero IDF mass).
+    tag_present_per_game = np.maximum(tag_binary_for_idf.sum(axis=1), 1.0)    # (n_items,) clamp(min=1)
+    game_tag_mean_idf    = (game_tag_binary_idf.sum(axis=1) / tag_present_per_game).astype(np.float32)
+    game_tag_max_idf     = game_tag_binary_idf.max(axis=1).astype(np.float32)
+
+    # Per-developer corpus catalog size, then per-game lookup → log1p. Pad row appended
+    # later (in ranker/train._buffers_from_fs). Unknown-dev games (developer_idx==0) all
+    # share the same "unknown" bucket — its catalog count is whatever sum of unknown-dev
+    # games we have, so the scalar still has signal (heavy-unknown ≈ lots of small-studio
+    # games the developer-string wasn't normalized for).
+    dev_catalog_counts = np.bincount(game_developer_idx, minlength=n_developers + 1).astype(np.float32)
+    game_dev_log_catalog_size = np.log1p(dev_catalog_counts[game_developer_idx]).astype(np.float32)
+
     # User dicts
     train_users = users_df[users_df['split'] == 'train']['user_id'].tolist()
     val_users   = users_df[users_df['split'] == 'val']['user_id'].tolist()
@@ -405,6 +441,16 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         'game_median_log_hours':     game_median_log_hours,
         'game_log_count':            game_log_count,
         'game_sentiment':            game_sentiment,
+
+        # Bucket 6 — per-game rarity buffers for "Niche Feature Crosses" (5 new). All
+        # parallel to the other game_* arrays; ranker registers as non-persistent
+        # buffers (with pad rows appended) in train._buffers_from_fs. tag_idf is shape
+        # (n_tags,) and stored alongside in case future buckets want it directly.
+        'tag_idf':                       tag_idf,
+        'game_tag_binary_idf':           game_tag_binary_idf,
+        'game_tag_mean_idf':             game_tag_mean_idf,
+        'game_tag_max_idf':              game_tag_max_idf,
+        'game_dev_log_catalog_size':     game_dev_log_catalog_size,
 
         # User split
         'train_users':        train_users,

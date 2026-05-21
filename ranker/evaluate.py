@@ -70,9 +70,10 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         item_concat = all_item_concat[cand_flat]                               # (B*n_cand, item_dim)
 
         # ── Cross features ──────────────────────────────────────────────────
-        # Bucket 5 (15 features): read precomputed values from parquet. On-the-fly
+        # Bucket 6 (23 features): read precomputed values from parquet. On-the-fly
         # compute in train._forward_batch is mathematically identical (same
-        # categorical_overlap_triple / last_n_history / numeric_match_quintuple utils).
+        # categorical_overlap_triple / last_n_history / numeric_match_quintuple /
+        # weighted_overlap + niche_scalar_triple utils).
         def _gather(label_col: np.ndarray, neg_col: np.ndarray) -> torch.Tensor:
             buf = np.empty((B, n_cand), dtype=np.float32)
             buf[:, 0]  = label_col[rows]
@@ -98,10 +99,23 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         ptcal_flat       = _gather(dataset.playtime_cal_median_label,    dataset.playtime_cal_median_negs)
         pop_flat         = _gather(dataset.popularity_match_label,       dataset.popularity_match_negs)
         sent_flat        = _gather(dataset.sentiment_match_label,        dataset.sentiment_match_negs)
+        # Bucket 6 — niche feature crosses (8 features; RAW values, same Z-score story)
+        tag_ov_idf_f_flat = _gather(dataset.tag_overlap_idf_full_label,    dataset.tag_overlap_idf_full_negs)
+        tag_ov_idf_l_flat = _gather(dataset.tag_overlap_idf_liked_label,   dataset.tag_overlap_idf_liked_negs)
+        niche_tag_f_flat  = _gather(dataset.niche_tag_match_full_label,    dataset.niche_tag_match_full_negs)
+        niche_tag_l_flat  = _gather(dataset.niche_tag_match_liked_label,   dataset.niche_tag_match_liked_negs)
+        max_tag_f_flat    = _gather(dataset.max_tag_idf_match_full_label,  dataset.max_tag_idf_match_full_negs)
+        max_tag_l_flat    = _gather(dataset.max_tag_idf_match_liked_label, dataset.max_tag_idf_match_liked_negs)
+        niche_dev_f_flat  = _gather(dataset.niche_dev_match_full_label,    dataset.niche_dev_match_full_negs)
+        niche_dev_l_flat  = _gather(dataset.niche_dev_match_liked_label,   dataset.niche_dev_match_liked_negs)
         cross = compute_cross_features(tag_cos_flat, genre_ov_flat, tag_ov_flat, dev_aff_flat,
                                        genre_ov_l_flat, tag_ov_l_flat, dev_aff_l_flat,
                                        genre_ov_r3_flat, tag_ov_r3_flat, dev_aff_r3_flat,
-                                       price_flat, era_flat, ptcal_flat, pop_flat, sent_flat)
+                                       price_flat, era_flat, ptcal_flat, pop_flat, sent_flat,
+                                       tag_ov_idf_f_flat, tag_ov_idf_l_flat,
+                                       niche_tag_f_flat,  niche_tag_l_flat,
+                                       max_tag_f_flat,    max_tag_l_flat,
+                                       niche_dev_f_flat,  niche_dev_l_flat)
 
         # ── Score: factorized MLP layer-1 over the (B, n_cand) layout ───────
         # See model.score_pairs_batched — math identity, runs user-side projection

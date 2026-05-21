@@ -26,8 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from ranker.cross_features import (B5_USER_MEAN_LOG_COUNT, B5_USER_MEAN_PRICE,
                                      B5_USER_MEAN_SENTIMENT, B5_USER_MEAN_YEAR,
                                      B5_USER_MEDIAN_LOG_PT, Bucket5GameBuffers,
-                                     OverlapBuffers, categorical_overlap_triple,
-                                     last_n_history, numeric_match_quintuple)
+                                     NicheBuffers, OverlapBuffers,
+                                     categorical_overlap_triple, last_n_history,
+                                     niche_scalar_triple, numeric_match_quintuple,
+                                     weighted_overlap)
 from ranker.dataset import compute_cross_features
 from ranker.train import _ALPHA_TO_CG_GLOB, build_ranker, get_config, get_device
 from src.features import SENTIMENT_UNKNOWN_FILL
@@ -53,7 +55,7 @@ DEFAULT_CANARIES      = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
 # lockstep with the cross-feature compute path when a new bucket lands — the
 # alignment helper in run_canary uses it to decide slice vs zero-pad when a
 # historical checkpoint expects a different n_cross_features.
-CANARY_COMPUTED_CROSS_FEATURES = 15      # Bucket 5 roster (tag_cosine + 9 overlaps + 5 numeric)
+CANARY_COMPUTED_CROSS_FEATURES = 23      # Bucket 6 roster (tag_cosine + 9 overlaps + 5 numeric + 8 niche)
 
 
 # ── Resolve checkpoints ──────────────────────────────────────────────────────
@@ -406,6 +408,16 @@ def run_canary(cg_checkpoint: str | None = None,
             log_count       =ranker.game_log_count,
             sentiment       =ranker.game_sentiment,
         )
+        # Bucket 6 — same bundle the training loop builds. All 5 buffers are
+        # already on the ranker (registered non-persistent, restored from FeatureStore
+        # at construction). No casts needed.
+        niche_buffers = NicheBuffers(
+            tag_binary_idf       =ranker.game_tag_binary_idf,
+            tag_count_idf        =ranker.game_tag_count_idf,
+            tag_mean_idf         =ranker.game_tag_mean_idf,
+            tag_max_idf          =ranker.game_tag_max_idf,
+            dev_log_catalog_size =ranker.game_dev_log_catalog_size,
+        )
 
         def _slice_triple(slice_indices, slice_weights):
             """Categorical overlap triple for a single history slice, squeezed back to (n_cand,)
@@ -450,10 +462,36 @@ def run_canary(cg_checkpoint: str | None = None,
                 price_m.squeeze(0), era_g.squeeze(0), ptcal_m.squeeze(0),
                 pop_m.squeeze(0),   sent_m.squeeze(0))
 
+            # Bucket 6 — 8 niche feature crosses (4 concepts × {full, liked}). Each
+            # full/liked call shares the same NicheBuffers; only history slice differs.
+            # IDF overlap (Shape A) reuses `weighted_overlap` with the IDF buffers.
+            tag_ov_idf_f = weighted_overlap(niche_buffers.tag_binary_idf,
+                                             niche_buffers.tag_count_idf,
+                                             history_indices=h_full, history_weights=h_pw,
+                                             cand_idx=cand_t1).squeeze(0)
+            tag_ov_idf_l = weighted_overlap(niche_buffers.tag_binary_idf,
+                                             niche_buffers.tag_count_idf,
+                                             history_indices=h_lkd, history_weights=h_lkd_pw,
+                                             cand_idx=cand_t1).squeeze(0)
+            niche_tag_f, max_tag_f, niche_dev_f = niche_scalar_triple(niche_buffers,
+                                             history_indices=h_full, history_weights=h_pw,
+                                             cand_idx=cand_t1)
+            niche_tag_l, max_tag_l, niche_dev_l = niche_scalar_triple(niche_buffers,
+                                             history_indices=h_lkd, history_weights=h_lkd_pw,
+                                             cand_idx=cand_t1)
+            niche_tag_f, max_tag_f, niche_dev_f = (
+                niche_tag_f.squeeze(0), max_tag_f.squeeze(0), niche_dev_f.squeeze(0))
+            niche_tag_l, max_tag_l, niche_dev_l = (
+                niche_tag_l.squeeze(0), max_tag_l.squeeze(0), niche_dev_l.squeeze(0))
+
             cross = compute_cross_features(tag_cos, genre_ov, tag_ov, dev_aff,
                                            genre_ov_l, tag_ov_l, dev_aff_l,
                                            genre_ov_r3, tag_ov_r3, dev_aff_r3,
-                                           price_m, era_g, ptcal_m, pop_m, sent_m)
+                                           price_m, era_g, ptcal_m, pop_m, sent_m,
+                                           tag_ov_idf_f, tag_ov_idf_l,
+                                           niche_tag_f,  niche_tag_l,
+                                           max_tag_f,    max_tag_l,
+                                           niche_dev_f,  niche_dev_l)
 
             # Align cross to the checkpoint's n_cross_features — see ALIGNMENT WARNING
             # above for the trade-offs. Stable column ordering means leading-N slice

@@ -1,7 +1,7 @@
 """
 Shared compute utilities for wide-path cross features.
 
-Two families of utilities live here:
+Three families of utilities live here:
 
 1. **Categorical-overlap reductions** (`weighted_overlap`, `dev_affinity`,
    `categorical_overlap_triple`, `last_n_history`). Cover Buckets 1+2 cross
@@ -17,12 +17,25 @@ Two families of utilities live here:
 
    (Buckets 3 and 4 were tried with this family and dropped — see plan §8/§9.)
 
+   Bucket 6 (Niche Feature Crosses) reuses `weighted_overlap` for its IDF-reweighted
+   tag overlap (Shape A) — just pass IDF-weighted buffers (`game_tag_binary_idf`
+   and the matching count vector) in place of the raw binary ones. No new util.
+
 2. **Scalar numeric-match quintuple** (`numeric_match_quintuple`,
    `Bucket5GameBuffers`, the `B5_*` field indices). Covers Bucket 5 — five
    per-(user, candidate) differences on numeric stats (price, year, median log
    playtime, popularity, sentiment). No history reduction here; the user-side
    values are full-history aggregates precomputed once per user and passed in as
    a `(B, 5)` tensor.
+
+3. **Niche scalar triple** (`niche_scalar_triple`, `NicheBuffers`). Covers
+   Bucket 6's Shape B features — three per-(user, candidate) differences on
+   rarity scalars (mean tag IDF, max tag IDF, log dev catalog size). Unlike
+   Bucket 5, the user-side scalars are computed PER ROLLBACK CONTEXT here (Pattern
+   A): reduce the per-game scalar over the slice's history positions with
+   history_weights, then `|user_aggregate − item_scalar|`. Called once per slice
+   (full + liked) → 6 features total in Bucket 6 (2 IDF overlap + 6 niche
+   scalars = 8 features).
 
 All functions expect tensors already on the same device, and are batched over (B).
 """
@@ -292,3 +305,105 @@ def numeric_match_quintuple(buffers:   Bucket5GameBuffers,
     sentiment_match       = (u_sent   - cand_sent  ).abs()
 
     return price_match, era_gap, playtime_cal_median, popularity_match, sentiment_match
+
+
+# ── Bucket 6 — Niche Feature Crosses (Shape A + Shape B) ────────────────────
+#
+# Bucket 6 ships 8 features = 4 concepts × 2 history slices ({full, liked}):
+#   - IDF Tag Overlap (Shape A — reuses `weighted_overlap` with NicheBuffers'
+#     `game_tag_binary_idf` + `game_tag_count_idf` in place of the raw binary
+#     buffers). 2 features (full, liked slices).
+#   - Niche Tag Match, Max Tag IDF Match, Niche Dev Match (Shape B — computed
+#     here by `niche_scalar_triple`). 3 features × 2 slices = 6 features.
+#
+# Shape B user-side is computed PER CONTEXT (Pattern A) — different from
+# Bucket 5's static-per-user (Pattern B). The rationale: niche-ness is
+# plausibly context-dependent (user might normally play Action but be currently
+# on a Roguelike kick — full-history niche differs from liked-history niche).
+# Implementation: reduce per-game scalars over the history slice via the same
+# `(history_indices * history_weights)` recipe `weighted_overlap` uses, then
+# scalar-subtract against the candidate's per-item scalar.
+
+class NicheBuffers(NamedTuple):
+    """Bundle of per-item static buffers needed by Bucket 6's Shape A overlap
+    (`weighted_overlap` with the IDF-weighted tag buffers) and Shape B scalar
+    crosses (`niche_scalar_triple`).
+
+    Registered as non-persistent buffers on the ranker (rebuilt from FeatureStore
+    on every load — see `ranker/train.py:_buffers_from_fs`), or built device-side
+    on the caller (precompute does this locally). Either way, pass the bundle
+    through and the Bucket 6 utils get all the inputs they need.
+
+    Pad row appended to every buffer (pad value = 0 for the scalars; all-zero row
+    for the matrix). Pad row is never indexed by `cand_idx` (which stays in
+    `[0, n_items)`), and pad positions in `history_indices` look up the zero row
+    and contribute zero to weighted reductions.
+    """
+    tag_binary_idf:        torch.Tensor    # (n_items+1, n_tags) float32 — game_tag_binary * tag_idf[None, :]
+    tag_count_idf:         torch.Tensor    # (n_items+1,)        float32 — per-item sum of tag_binary_idf, clamp(min=eps) for safe-divide
+    tag_mean_idf:          torch.Tensor    # (n_items+1,)        float32 — mean IDF over the item's tags
+    tag_max_idf:           torch.Tensor    # (n_items+1,)        float32 — max IDF over the item's tags
+    dev_log_catalog_size:  torch.Tensor    # (n_items+1,)        float32 — log1p(# corpus games by this game's dev)
+
+
+def niche_scalar_triple(buffers:          NicheBuffers,
+                        history_indices:  torch.Tensor,   # (B, H) int64
+                        history_weights:  torch.Tensor,   # (B, H) float32 — sums to 1 over non-pad
+                        cand_idx:         torch.Tensor,   # (B, n_cand) int64
+                        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    The three Bucket 6 Shape B niche scalar crosses for a single history slice.
+    Returns:
+
+      (niche_tag_match, max_tag_idf_match, niche_dev_match)
+
+    each shaped (B, n_cand) float32.
+
+    Formulas (user-side aggregates are weighted reductions over the slice — same
+    `(scalar[hist_indices] * history_weights).sum(dim=1)` recipe `weighted_overlap`
+    uses internally, just over a 1-D scalar buffer instead of a 2-D categorical
+    buffer; the weighted-max variant uses `.max()` over the same product):
+
+      u_mean_tag_idf[b]   = Σ_i h_w[b, i] · tag_mean_idf[hist[b, i]]
+      u_max_tag_idf[b]    = max_i  h_w[b, i] · tag_max_idf[hist[b, i]]   ← weighted max
+      u_dev_log[b]        = Σ_i h_w[b, i] · dev_log_catalog_size[hist[b, i]]
+
+      niche_tag_match    = |u_mean_tag_idf  - tag_mean_idf[cand]|
+      max_tag_idf_match  = |u_max_tag_idf   - tag_max_idf[cand]|
+      niche_dev_match    = |u_dev_log       - dev_log_catalog_size[cand]|
+
+    All three are abs (symmetric — closer = better match either way; no asymmetry
+    to learn). Pre-Z-score values; the model Z-scores inside score_pairs /
+    score_pairs_batched (cols 17-22 of the Bucket 6 roster fall in `wide_norm`
+    territory — `n_wide_normalized` grows 5 → 13). Pad positions in
+    history_indices look up the buffers' zero pad rows and contribute zero;
+    history_weights at pad is 0 so the weighted max also picks non-pad values.
+
+    Used by:
+      - ranker/precompute.py — once per slice (full + liked), raw values written to parquet
+      - ranker/train.py      — once per slice per sampled batch, on-the-fly for random negs
+      - ranker/canary.py     — once per slice per synthetic user
+    """
+    # Gather per-history-position scalars: (B, H) for each of the 3 reductions.
+    hist_mean_idf = buffers.tag_mean_idf        [history_indices]   # (B, H)
+    hist_max_idf  = buffers.tag_max_idf         [history_indices]   # (B, H)
+    hist_dev_log  = buffers.dev_log_catalog_size[history_indices]   # (B, H)
+
+    # User-side reductions: weighted sum for mean / dev, weighted max for max.
+    # history_weights sums to 1 over non-pad → mean / dev are bona-fide weighted
+    # averages. Weighted max uses (h_w * scalar) so pad positions (h_w=0) drop out
+    # of the max naturally.
+    u_mean_tag_idf = (hist_mean_idf * history_weights).sum(dim=1, keepdim=True)   # (B, 1)
+    u_max_tag_idf  = (hist_max_idf  * history_weights).max(dim=1, keepdim=True).values
+    u_dev_log      = (hist_dev_log  * history_weights).sum(dim=1, keepdim=True)   # (B, 1)
+
+    # Candidate-side scalars: (B, n_cand) for each.
+    cand_mean_idf = buffers.tag_mean_idf        [cand_idx]   # (B, n_cand)
+    cand_max_idf  = buffers.tag_max_idf         [cand_idx]
+    cand_dev_log  = buffers.dev_log_catalog_size[cand_idx]
+
+    niche_tag_match    = (u_mean_tag_idf - cand_mean_idf).abs()
+    max_tag_idf_match  = (u_max_tag_idf  - cand_max_idf ).abs()
+    niche_dev_match    = (u_dev_log      - cand_dev_log ).abs()
+
+    return niche_tag_match, max_tag_idf_match, niche_dev_match

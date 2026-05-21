@@ -37,9 +37,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from ranker.cross_features import (Bucket5GameBuffers, OverlapBuffers,
-                                     categorical_overlap_triple, last_n_history,
-                                     numeric_match_quintuple)
+from ranker.cross_features import (Bucket5GameBuffers, NicheBuffers,
+                                     OverlapBuffers, categorical_overlap_triple,
+                                     last_n_history, niche_scalar_triple,
+                                     numeric_match_quintuple, weighted_overlap)
 from ranker.dataset import (CANDIDATES_PER_ROW, compute_cross_features,
                              load_splits, sample_batch)
 from ranker.evaluate import (cg_baseline, compute_label_ranks,
@@ -134,32 +135,41 @@ def get_config() -> dict:
         'hidden_dims':        [256, 128],
         'dropout':            0.0,
 
-        # Wide bypass — Bucket 5 (15 features total). Column order in compute_cross_features
+        # Wide bypass — Bucket 6 (23 features total). Column order in compute_cross_features
         # is stable, do not reorder — checkpoints depend on it:
-        #    0 tag_cosine (B-0)              ← Phase A
-        #    1 genre_overlap (B-1)           ← Bucket 1 (full-history slice)
-        #    2 tag_overlap (B-1b)            ← Bucket 1
-        #    3 dev_affinity (B-2)            ← Bucket 1
-        #    4 genre_overlap_liked (B-3a)    ← Bucket 2A (liked-only slice)
-        #    5 tag_overlap_liked (B-3b)      ← Bucket 2A
-        #    6 dev_affinity_liked (B-3c)     ← Bucket 2A
-        #    7 genre_overlap_recent3 (B-4a)  ← Bucket 2B (last-3-liked window)
-        #    8 tag_overlap_recent3 (B-4b)    ← Bucket 2B
-        #    9 dev_affinity_recent3 (B-4c)   ← Bucket 2B
-        #   10 price_match (B-7a)            ← Bucket 5 (numeric matching, Z-scored)
-        #   11 era_gap (B-7b)                ← Bucket 5
-        #   12 playtime_cal_median (B-7c)    ← Bucket 5 (SIGNED)
-        #   13 popularity_match (B-7d)       ← Bucket 5
-        #   14 sentiment_match (B-7e)        ← Bucket 5
-        # Bucket 3 (disliked slice) and Bucket 4 (dev-catalog) were tried + dropped —
-        # see plan §9 + git log.
-        'n_cross_features':   15,
-        # Bucket 5 — the trailing 5 cross-feature columns (10-14) get Z-scored by the
+        #    0 tag_cosine (B-0)               ← Phase A
+        #    1 genre_overlap (B-1)            ← Bucket 1 (full-history slice)
+        #    2 tag_overlap (B-1b)             ← Bucket 1
+        #    3 dev_affinity (B-2)             ← Bucket 1
+        #    4 genre_overlap_liked (B-3a)     ← Bucket 2A (liked-only slice)
+        #    5 tag_overlap_liked (B-3b)       ← Bucket 2A
+        #    6 dev_affinity_liked (B-3c)      ← Bucket 2A
+        #    7 genre_overlap_recent3 (B-4a)   ← Bucket 2B (last-3-liked window)
+        #    8 tag_overlap_recent3 (B-4b)     ← Bucket 2B
+        #    9 dev_affinity_recent3 (B-4c)    ← Bucket 2B
+        #   10 price_match (B-7a)             ← Bucket 5 (numeric matching, Z-scored)
+        #   11 era_gap (B-7b)                 ← Bucket 5
+        #   12 playtime_cal_median (B-7c)     ← Bucket 5 (SIGNED)
+        #   13 popularity_match (B-7d)        ← Bucket 5
+        #   14 sentiment_match (B-7e)         ← Bucket 5
+        #   15 tag_overlap_idf_full (B-9a)    ← Bucket 6 (Shape A, IDF overlap)
+        #   16 tag_overlap_idf_liked (B-9b)   ← Bucket 6
+        #   17 niche_tag_match_full (B-9c)    ← Bucket 6 (Shape B, scalar arithmetic)
+        #   18 niche_tag_match_liked (B-9d)   ← Bucket 6
+        #   19 max_tag_idf_match_full (B-9e)  ← Bucket 6
+        #   20 max_tag_idf_match_liked (B-9f) ← Bucket 6
+        #   21 niche_dev_match_full (B-9g)    ← Bucket 6
+        #   22 niche_dev_match_liked (B-9h)   ← Bucket 6
+        # Bucket 3 (disliked slice) and Bucket 4 (dev-catalog) were tried + dropped;
+        # Bucket 7 (item-intrinsic priors) was dropped in planning and its 2 keep-able
+        # features were absorbed into Bucket 6 as proper crosses — see plan §9.
+        'n_cross_features':   23,
+        # Bucket 6 — the trailing 13 cross-feature columns (10-22) get Z-scored by the
         # model's persistent `wide_norm_mean` / `wide_norm_std` buffers; cols 0-9 are
         # already bounded in [-1, 1] / [0, 1] and pass through raw. Populated by
         # populate_wide_norm_buffers below once the model is built and the train
-        # dataset is loaded.
-        'n_wide_normalized':  5,
+        # dataset is loaded. Was 5 in Bucket 5; +8 for Bucket 6's 8 features.
+        'n_wide_normalized':  13,
 
         # Menon α — plan §8 default: 0 (ranker α=0 vs CG α=0). The 0.4 path is optional.
         'popularity_alpha':   0.0,
@@ -242,6 +252,18 @@ def _buffers_from_fs(fs: dict) -> dict:
     log_count_b        = _pad_1d_float(fs['game_log_count'])
     sentiment_b        = _pad_1d_float(fs['game_sentiment'])
 
+    # Bucket 6 — 5 per-game rarity buffers. game_tag_binary_idf is the (n_items+1, n_tags)
+    # matrix companion to game_tag_binary (plays the same role in `weighted_overlap`, just
+    # IDF-weighted); the other 4 are scalars analogous to the Bucket 5 quintet. Same
+    # pad/zero-row convention. game_tag_count_idf clamps to 1.0 to avoid div-by-zero in
+    # `weighted_overlap`'s denominator (some pad/sparse rows may have zero IDF mass).
+    tag_binary_idf_b = np.vstack([fs['game_tag_binary_idf'],
+                                   np.zeros((1, n_tags), dtype=np.float32)])
+    tag_count_idf_b  = np.maximum(tag_binary_idf_b.sum(axis=1), 1.0).astype(np.float32)
+    tag_mean_idf_b           = _pad_1d_float(fs['game_tag_mean_idf'])
+    tag_max_idf_b            = _pad_1d_float(fs['game_tag_max_idf'])
+    dev_log_catalog_size_b   = _pad_1d_float(fs['game_dev_log_catalog_size'])
+
     return {
         'game_tag_matrix':        torch.from_numpy(tag_matrix),
         'game_tag_matrix_l2':     torch.from_numpy(tag_matrix_l2),
@@ -257,6 +279,11 @@ def _buffers_from_fs(fs: dict) -> dict:
         'game_median_log_hours':  torch.from_numpy(median_log_hours_b),
         'game_log_count':         torch.from_numpy(log_count_b),
         'game_sentiment':         torch.from_numpy(sentiment_b),
+        'game_tag_binary_idf':        torch.from_numpy(tag_binary_idf_b),
+        'game_tag_count_idf':         torch.from_numpy(tag_count_idf_b),
+        'game_tag_mean_idf':          torch.from_numpy(tag_mean_idf_b),
+        'game_tag_max_idf':           torch.from_numpy(tag_max_idf_b),
+        'game_dev_log_catalog_size':  torch.from_numpy(dev_log_catalog_size_b),
     }
 
 
@@ -376,6 +403,12 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
         game_median_log_hours=bufs['game_median_log_hours'],
         game_log_count=bufs['game_log_count'],
         game_sentiment=bufs['game_sentiment'],
+        # Bucket 6 — 1 matrix + 4 scalar rarity buffers (Z-scored at forward time).
+        game_tag_binary_idf=bufs['game_tag_binary_idf'],
+        game_tag_count_idf=bufs['game_tag_count_idf'],
+        game_tag_mean_idf=bufs['game_tag_mean_idf'],
+        game_tag_max_idf=bufs['game_tag_max_idf'],
+        game_dev_log_catalog_size=bufs['game_dev_log_catalog_size'],
         item_id_emb_dim=config['item_id_emb_dim'],
         item_genre_emb_dim=config['item_genre_emb_dim'],
         item_tag_emb_dim=config['item_tag_emb_dim'],
@@ -403,23 +436,35 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
 
 # ── Wide-feature Z-score buffer populate (Bucket 5+ scalars) ────────────────
 
-# Bucket 5 cross-feature parquet column names. Order MUST match B5_USER_* /
-# compute_cross_features column slots 10-14 — the model's wide_norm_mean[k] /
+# Buckets 5+6 cross-feature parquet column names. Order MUST match
+# compute_cross_features column slots 10-22 — the model's wide_norm_mean[k] /
 # wide_norm_std[k] line up with cross_features[..., 10 + k] at forward time.
+# Buckets 5 (cols 10-14, 5 features) + 6 (cols 15-22, 8 features) = 13 normalized
+# columns total. Cols 0-9 are bounded ([-1, 1] / [0, 1]) and pass through raw.
 _WIDE_NORM_PARQUET_COLS = (
+    # Bucket 5 — numeric matching (cols 10-14)
     'price_match_label',
     'era_gap_label',
     'playtime_cal_median_label',
     'popularity_match_label',
     'sentiment_match_label',
+    # Bucket 6 — niche feature crosses (cols 15-22)
+    'tag_overlap_idf_full_label',
+    'tag_overlap_idf_liked_label',
+    'niche_tag_match_full_label',
+    'niche_tag_match_liked_label',
+    'max_tag_idf_match_full_label',
+    'max_tag_idf_match_liked_label',
+    'niche_dev_match_full_label',
+    'niche_dev_match_liked_label',
 )
 
 
 def populate_wide_norm_buffers(model: WideDeepRanker, train_parquet_path: str) -> None:
     """One-time pre-train pass: populate model.wide_norm_mean / wide_norm_std from
-    train-parquet statistics on the Bucket 5 numeric-match columns.
+    train-parquet statistics on the Bucket 5 + Bucket 6 columns.
 
-    Computes mean/std across the LABEL column for each of the 5 features (using
+    Computes mean/std across the LABEL column for each of the 13 features (using
     label values rather than neg values is fine — both are drawn from the same
     candidate distribution, and using labels keeps the stats independent of the
     99-hard-neg pool composition).
@@ -431,7 +476,7 @@ def populate_wide_norm_buffers(model: WideDeepRanker, train_parquet_path: str) -
         return
     n = model.n_wide_normalized
     assert len(_WIDE_NORM_PARQUET_COLS) == n, (
-        f"Bucket 5 column list ({len(_WIDE_NORM_PARQUET_COLS)}) "
+        f"wide-norm column list ({len(_WIDE_NORM_PARQUET_COLS)}) "
         f"out of sync with model.n_wide_normalized ({n})"
     )
 
@@ -465,7 +510,14 @@ def train(checkpoint_dir: str | None = None) -> str:
         config['checkpoint_dir'] = checkpoint_dir
 
     print("Loading datasets ...")
-    train_ds, val_ds, fs = load_splits('data')
+    # train_ds skips eval-only columns (cross features + neg pool + cg_label_rank,
+    # ~40 GB saved) because sample_batch with n_hard_negs=0 only reads label_idx +
+    # user history + X_user_b5. The val_ds keeps mode='full' since training-time
+    # NDCG/MRR eval (evaluate.compute_label_ranks) reads the cross-feature columns.
+    # If the active config wants hard negs, fall back to full mode so sample_batch
+    # can read dataset.neg_idx.
+    train_mode = 'train_only' if int(config['n_hard_negs']) == 0 else 'full'
+    train_ds, val_ds, fs = load_splits('data', train_mode=train_mode)
 
     device = get_device()
     print(f"\nDevice: {device}")
@@ -495,9 +547,10 @@ def train(checkpoint_dir: str | None = None) -> str:
     print(f"  user_concat({model.user_concat_dim}) + item_concat({model.item_concat_dim}) "
           f"= deep_in({model.deep_in})")
     print(f"  → hidden={config['hidden_dims']} → head({config['hidden_dims'][-1]}+{n_cross}→1)")
-    print(f"  cross features ({n_cross}, Bucket 5): tag_cosine | "
+    print(f"  cross features ({n_cross}, Bucket 6): tag_cosine | "
           f"genre/tag/dev overlap (full | liked | recent-3-liked) | "
-          f"price/era/median-playtime/popularity/sentiment match (Z-scored)")
+          f"price/era/median-playtime/popularity/sentiment match (Z-scored) | "
+          f"tag IDF overlap + niche scalar triple × (full | liked) (Z-scored)")
     print(f"  ({n_params:,} trainable params)")
 
     # Bucket 5 — populate Z-score buffers from train-parquet stats. Single pass over
@@ -583,6 +636,17 @@ def train(checkpoint_dir: str | None = None) -> str:
         sentiment       =model.game_sentiment,
     )
 
+    # Bucket 6 — bundle the 5 per-item rarity buffers. Same shape precompute builds
+    # device-side; identical utils (`weighted_overlap` with IDF buffers + `niche_scalar_triple`)
+    # called from both sites so parquet values match on-the-fly compute bit-exactly.
+    niche_buffers = NicheBuffers(
+        tag_binary_idf       =model.game_tag_binary_idf,
+        tag_count_idf        =model.game_tag_count_idf,
+        tag_mean_idf         =model.game_tag_mean_idf,
+        tag_max_idf          =model.game_tag_max_idf,
+        dev_log_catalog_size =model.game_dev_log_catalog_size,
+    )
+
     def _forward_batch(batch):
         """Sampled-softmax forward. Returns (scores (B, n_cand), target (B,), cand_b (B, n_cand))."""
         (x_avg, h_lkd, h_lkd_pw, h_dis, h_full, h_pw, user_b5, cand_b, target_b) = batch
@@ -599,10 +663,11 @@ def train(checkpoint_dir: str | None = None) -> str:
         all_item_concat = model.item_embedding(all_item_ids)                       # (n_items, I)
         item_concat     = all_item_concat[cand_b.reshape(-1)]                      # (B*n_cand, I)
 
-        # Cross features on the fly for the sampled candidates. All 10 match
-        # precompute exactly — categorical_overlap_triple + last_n_history are the
-        # same utils called from precompute, so parquet values and train-time values
-        # are bit-identical by construction.
+        # Cross features on the fly for the sampled candidates. All 23 match
+        # precompute exactly — categorical_overlap_triple + last_n_history +
+        # numeric_match_quintuple + weighted_overlap + niche_scalar_triple are the same
+        # utils called from precompute, so parquet values and train-time values are
+        # bit-identical by construction.
         #
         # Strategy: compute the full (B, n_items+1) user-vs-corpus score matrix once
         # per feature via a dense matmul, then gather per (b, c). Cheaper than 3D
@@ -631,6 +696,26 @@ def train(checkpoint_dir: str | None = None) -> str:
         price_match, era_gap, ptcal_med, pop_match, sent_match = numeric_match_quintuple(
             b5_buffers, user_b5, cand_b)
 
+        # ── Bucket 6 — niche feature crosses (8 features = 4 concepts × {full, liked}) ──
+        # Shape A: IDF-reweighted tag overlap on each slice (reuse `weighted_overlap`
+        # with NicheBuffers' IDF-weighted tag matrix + matching count buffer).
+        # Shape B: 3-scalar niche cross (`niche_scalar_triple`) per slice. RAW values;
+        # the model Z-scores cols 15-22 at forward time.
+        tag_ov_idf_full = weighted_overlap(niche_buffers.tag_binary_idf,
+                                            niche_buffers.tag_count_idf,
+                                            history_indices=h_full, history_weights=h_pw,
+                                            cand_idx=cand_b)
+        tag_ov_idf_liked = weighted_overlap(niche_buffers.tag_binary_idf,
+                                             niche_buffers.tag_count_idf,
+                                             history_indices=h_lkd, history_weights=h_lkd_pw,
+                                             cand_idx=cand_b)
+        niche_tag_f, max_tag_idf_f, niche_dev_f = niche_scalar_triple(niche_buffers,
+                                            history_indices=h_full, history_weights=h_pw,
+                                            cand_idx=cand_b)
+        niche_tag_l, max_tag_idf_l, niche_dev_l = niche_scalar_triple(niche_buffers,
+                                            history_indices=h_lkd, history_weights=h_lkd_pw,
+                                            cand_idx=cand_b)
+
         cross = compute_cross_features(
             tag_cos.reshape(-1),
             genre_ov.reshape(-1),    tag_ov.reshape(-1),    dev_aff.reshape(-1),
@@ -638,6 +723,10 @@ def train(checkpoint_dir: str | None = None) -> str:
             genre_ov_r3.reshape(-1), tag_ov_r3.reshape(-1), dev_aff_r3.reshape(-1),
             price_match.reshape(-1), era_gap.reshape(-1),   ptcal_med.reshape(-1),
             pop_match.reshape(-1),   sent_match.reshape(-1),
+            tag_ov_idf_full.reshape(-1),  tag_ov_idf_liked.reshape(-1),
+            niche_tag_f.reshape(-1),      niche_tag_l.reshape(-1),
+            max_tag_idf_f.reshape(-1),    max_tag_idf_l.reshape(-1),
+            niche_dev_f.reshape(-1),      niche_dev_l.reshape(-1),
         )
         # score_pairs_batched factorizes the first MLP layer over the (B, n_cand) layout
         # — runs user-side projection on B rows (not B*n_cand) and avoids materializing

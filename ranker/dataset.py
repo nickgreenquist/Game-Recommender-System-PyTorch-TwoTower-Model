@@ -11,8 +11,9 @@ computes all cross features on the fly via ranker.cross_features utils (same cod
 path as precompute → bit-exact parquet identity), then calls compute_cross_features
 to stack them for the wide head.
 
-Active cross features (15 total — **Bucket 5** roster, plan §9). Bucket 3 (disliked
-slice) and Bucket 4 (dev-catalog) were tried and dropped — see plan §9 / git log.
+Active cross features (23 total — **Bucket 6** roster, plan §9). Bucket 3 (disliked
+slice), Bucket 4 (dev-catalog), and Bucket 7 (item-intrinsic priors) were tried and
+dropped / dropped in planning — see plan §9 / git log.
 
   Phase A:
     1. tag_cosine                  (B-0)  — raw TF-IDF cosine on user's full tag profile.
@@ -34,21 +35,32 @@ slice) and Bucket 4 (dev-catalog) were tried and dropped — see plan §9 / git 
    13. playtime_cal_median         (B-7c) — SIGNED median-log-playtime diff (user - item).
    14. popularity_match            (B-7d) — abs log-count diff.
    15. sentiment_match             (B-7e) — abs sentiment-ordinal diff.
+  Bucket 6 (niche feature crosses — 4 concepts × {full, liked} = 8 features):
+   16. tag_overlap_idf_full        (B-9a) — IDF-reweighted tag overlap, full slice.
+   17. tag_overlap_idf_liked       (B-9b) — IDF-reweighted tag overlap, liked slice.
+   18. niche_tag_match_full        (B-9c) — abs mean-tag-IDF diff, full slice.
+   19. niche_tag_match_liked       (B-9d) — abs mean-tag-IDF diff, liked slice.
+   20. max_tag_idf_match_full      (B-9e) — abs max-tag-IDF diff (weighted max), full.
+   21. max_tag_idf_match_liked     (B-9f) — abs max-tag-IDF diff (weighted max), liked.
+   22. niche_dev_match_full        (B-9g) — abs log-dev-catalog-size diff, full slice.
+   23. niche_dev_match_liked       (B-9h) — abs log-dev-catalog-size diff, liked slice.
 
-  Bucket 5 features are RAW values in the parquet — the model Z-scores them inside
-  score_pairs / score_pairs_batched using `wide_norm_mean` / `wide_norm_std` persistent
-  buffers, populated once on training start via ranker.train.populate_wide_norm_buffers.
+  Bucket 5 + 6 features are RAW values in the parquet — the model Z-scores them
+  (cols 10-22, n_wide_normalized=13) inside score_pairs / score_pairs_batched using
+  `wide_norm_mean` / `wide_norm_std` persistent buffers, populated once on training
+  start via ranker.train.populate_wide_norm_buffers.
 
 TRAIN: computed on the fly via ranker/cross_features.py utils (categorical_overlap_triple
-+ last_n_history + numeric_match_quintuple). EVAL / CANARY: read from parquet (or
-rebuilt via the same utils for synthetic canary users — see ranker/canary.py).
++ last_n_history + numeric_match_quintuple + weighted_overlap + niche_scalar_triple).
+EVAL / CANARY: read from parquet (or rebuilt via the same utils for synthetic canary
+users — see ranker/canary.py).
 """
 import os
 import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
+import pyarrow.parquet as pq
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -59,99 +71,177 @@ from src.features import load_features
 CANDIDATES_PER_ROW = 100   # 1 label + 99 hard negatives per row (matches precompute.TOP_K_CANDIDATES)
 
 
+# Column manifests for selective parquet loading. Splitting train vs eval columns
+# saves ~40 GB of RAM on the train dataset (where the eval columns are never
+# touched — see RankerDataset docstring for details).
+#
+# USER_AND_LABEL_COLS — needed by sample_batch (training + train-time val_loss):
+#   label_item_idx, user history arrays, X_user_b5.
+# EVAL_ONLY_COLS — needed by evaluate.compute_label_ranks only:
+#   neg_item_idxs, cg_label_rank, and all 23 × {label, negs} = 46 cross-feature columns.
+_USER_AND_LABEL_COLS = [
+    'label_item_idx',
+    'user_avg_log_playtime',
+    'X_hist_liked',
+    'X_hist_disliked',
+    'X_hist_full',
+    'X_hist_playtime_weights',
+    'X_hist_liked_playtime_weights',
+    'X_user_b5',
+]
+# Cross-feature column manifest — order matches ranker.dataset.compute_cross_features.
+# Used both to select what to read AND to set RankerDataset attribute names. Each
+# entry is (label_attr / col, negs_attr / col).
+_CROSS_FEATURE_COLS = [
+    ('tag_cosine_label',                 'tag_cosine_negs'),
+    ('genre_overlap_label',              'genre_overlap_negs'),
+    ('tag_overlap_label',                'tag_overlap_negs'),
+    ('dev_affinity_label',               'dev_affinity_negs'),
+    ('genre_overlap_liked_label',        'genre_overlap_liked_negs'),
+    ('tag_overlap_liked_label',          'tag_overlap_liked_negs'),
+    ('dev_affinity_liked_label',         'dev_affinity_liked_negs'),
+    ('genre_overlap_recent3_label',      'genre_overlap_recent3_negs'),
+    ('tag_overlap_recent3_label',        'tag_overlap_recent3_negs'),
+    ('dev_affinity_recent3_label',       'dev_affinity_recent3_negs'),
+    ('price_match_label',                'price_match_negs'),
+    ('era_gap_label',                    'era_gap_negs'),
+    ('playtime_cal_median_label',        'playtime_cal_median_negs'),
+    ('popularity_match_label',           'popularity_match_negs'),
+    ('sentiment_match_label',            'sentiment_match_negs'),
+    ('tag_overlap_idf_full_label',       'tag_overlap_idf_full_negs'),
+    ('tag_overlap_idf_liked_label',      'tag_overlap_idf_liked_negs'),
+    ('niche_tag_match_full_label',       'niche_tag_match_full_negs'),
+    ('niche_tag_match_liked_label',      'niche_tag_match_liked_negs'),
+    ('max_tag_idf_match_full_label',     'max_tag_idf_match_full_negs'),
+    ('max_tag_idf_match_liked_label',    'max_tag_idf_match_liked_negs'),
+    ('niche_dev_match_full_label',       'niche_dev_match_full_negs'),
+    ('niche_dev_match_liked_label',      'niche_dev_match_liked_negs'),
+]
+_EVAL_ONLY_COLS = ['neg_item_idxs', 'cg_label_rank']
+for _l, _n in _CROSS_FEATURE_COLS:
+    _EVAL_ONLY_COLS += [_l, _n]
+
+
+def _scalar_to_numpy(table, name, dtype):
+    """pa.Table column → 1-D numpy of the requested dtype.
+
+    Forces a copy (`np.array(..., copy=True)`) so the result is writable —
+    pyarrow buffers are immutable, and torch.from_numpy on a read-only buffer
+    emits a UserWarning at startup. The copy is cheap (4.3M × 4 bytes ≈ 17 MB)
+    and only fires per-column at dataset construction.
+    """
+    arr = table[name].combine_chunks()
+    return np.array(arr.to_numpy(zero_copy_only=False), dtype=dtype, copy=True)
+
+
+def _fixed_list_to_numpy(table, name, list_size, dtype):
+    """pa.Table FixedSizeList column → 2-D numpy (N, list_size). Forces a writable
+    copy on the final array — same reason as `_scalar_to_numpy`. The list buffers
+    are bigger (e.g. (4.3M, 99) float32 ≈ 1.7 GB) so the copy is more noticeable,
+    but is still bounded and transient per column.
+
+    Avoids the `np.stack(df[col].values)` Python-loop allocation pattern that
+    the pandas code path forced (which paid Python-side object-array overhead on
+    top of the buffer cost).
+    """
+    arr = table[name].combine_chunks()
+    flat = arr.flatten().to_numpy(zero_copy_only=False)
+    return np.array(flat.reshape(-1, list_size), dtype=dtype, copy=True)
+
+
 # ── Dataset class ────────────────────────────────────────────────────────────
 
 class RankerDataset:
     """
     Holds compact per-row arrays from one ranker_candidates_{split}.parquet.
 
-    Cross-feature scalars (currently just tag_cosine) are loaded from the parquet
-    and exposed via sample_batch / evaluate.compute_label_ranks. The model has its
-    own registered buffers (built in train.build_ranker from FeatureStore) — it does
-    NOT consume any item-feature matrix from this class.
+    Two load modes — pick based on caller:
+      mode='full'       (default) — load EVERY parquet column. Required for
+                                    `evaluate.compute_label_ranks` (E2E ceiling
+                                    metrics) which reads neg_idx + cg_label_rank
+                                    + all 23 × {label, negs} cross features.
+      mode='train_only'           — load ONLY the columns `sample_batch` needs
+                                    (label_idx + user history arrays + X_user_b5).
+                                    Skips ~40 GB of eval-only data — saves the train
+                                    dataset from pulling cross feature negs that
+                                    training never consumes (train computes cross
+                                    features on-the-fly per sampled candidate, see
+                                    train._forward_batch). Use this for train_ds
+                                    when `n_hard_negs == 0` (current default config),
+                                    which means `neg_idx` is also unused.
+
+    Implementation: pyarrow.parquet.read_table with explicit `columns=` list (no
+    pandas intermediate). FixedSizeList → numpy via zero-copy flatten + reshape
+    (no `np.stack` Python-loop copy that the old pandas path forced). The model has
+    its own registered buffers (built in train.build_ranker from FeatureStore) — it
+    does NOT consume any item-feature matrix from this class.
     """
 
-    def __init__(self, parquet_path: str, n_items: int, pad_idx: int):
-        df = pd.read_parquet(parquet_path)
+    def __init__(self, parquet_path: str, n_items: int, pad_idx: int, mode: str = 'full'):
+        if mode not in ('full', 'train_only'):
+            raise ValueError(f"mode must be 'full' or 'train_only', got {mode!r}")
+        self.mode = mode
 
-        # Corpus-index columns. Keep int32 — n_items ~5.4k fits easily.
-        self.label_idx     = df['label_item_idx'].values.astype(np.int32)              # (N,)
-        self.neg_idx       = np.stack(df['neg_item_idxs'].values).astype(np.int32)     # (N, 99)
-        self.cg_label_rank = df['cg_label_rank'].values.astype(np.int32)               # (N,)
+        # Select column manifest for this mode.
+        columns = list(_USER_AND_LABEL_COLS)
+        if mode == 'full':
+            columns += _EVAL_ONLY_COLS
 
-        # Cross features (precomputed by precompute.py — Bucket 2 roster, 10 features total).
-        # Phase A:
-        #   B-0  tag_cosine             : raw TF-IDF cosine of user tag pool vs candidate
-        # Bucket 1 (full-history slice):
-        #   B-1  genre_overlap          : weighted binary genre overlap / item genre count
-        #   B-1b tag_overlap            : weighted binary tag overlap / item tag count
-        #   B-2  dev_affinity           : playtime-weighted fraction of user history under candidate's developer
-        # Bucket 2A (liked-only history slice):
-        #   B-3a genre_overlap_liked    : same as B-1, restricted to liked games
-        #   B-3b tag_overlap_liked      : same as B-1b, restricted to liked games
-        #   B-3c dev_affinity_liked     : same as B-2, restricted to liked games
-        # Bucket 2B (last-3-liked window):
-        #   B-4a genre_overlap_recent3  : same as B-1, on last 3 non-pad of X_hist_liked
-        #   B-4b tag_overlap_recent3    : same as B-1b, on last 3 non-pad of X_hist_liked
-        #   B-4c dev_affinity_recent3   : same as B-2, on last 3 non-pad of X_hist_liked
-        self.tag_cosine_label             = df['tag_cosine_label'].values.astype(np.float32)              # (N,)
-        self.tag_cosine_negs              = np.stack(df['tag_cosine_negs'].values).astype(np.float32)     # (N, 99)
-        # Bucket 1
-        self.genre_overlap_label          = df['genre_overlap_label'].values.astype(np.float32)
-        self.genre_overlap_negs           = np.stack(df['genre_overlap_negs'].values).astype(np.float32)
-        self.tag_overlap_label            = df['tag_overlap_label'].values.astype(np.float32)
-        self.tag_overlap_negs             = np.stack(df['tag_overlap_negs'].values).astype(np.float32)
-        self.dev_affinity_label           = df['dev_affinity_label'].values.astype(np.float32)
-        self.dev_affinity_negs            = np.stack(df['dev_affinity_negs'].values).astype(np.float32)
-        # Bucket 2A — liked slice
-        self.genre_overlap_liked_label    = df['genre_overlap_liked_label'].values.astype(np.float32)
-        self.genre_overlap_liked_negs     = np.stack(df['genre_overlap_liked_negs'].values).astype(np.float32)
-        self.tag_overlap_liked_label      = df['tag_overlap_liked_label'].values.astype(np.float32)
-        self.tag_overlap_liked_negs       = np.stack(df['tag_overlap_liked_negs'].values).astype(np.float32)
-        self.dev_affinity_liked_label     = df['dev_affinity_liked_label'].values.astype(np.float32)
-        self.dev_affinity_liked_negs      = np.stack(df['dev_affinity_liked_negs'].values).astype(np.float32)
-        # Bucket 2B — recent-3 window
-        self.genre_overlap_recent3_label  = df['genre_overlap_recent3_label'].values.astype(np.float32)
-        self.genre_overlap_recent3_negs   = np.stack(df['genre_overlap_recent3_negs'].values).astype(np.float32)
-        self.tag_overlap_recent3_label    = df['tag_overlap_recent3_label'].values.astype(np.float32)
-        self.tag_overlap_recent3_negs     = np.stack(df['tag_overlap_recent3_negs'].values).astype(np.float32)
-        self.dev_affinity_recent3_label   = df['dev_affinity_recent3_label'].values.astype(np.float32)
-        self.dev_affinity_recent3_negs    = np.stack(df['dev_affinity_recent3_negs'].values).astype(np.float32)
-        # Bucket 5 — numeric-match quintuple (RAW values; Z-scored inside the model
-        # at forward time). Order matches B5_USER_* in ranker/cross_features.py.
-        #   B-7a price_match              — abs price-bucket diff
-        #   B-7b era_gap                  — abs year diff
-        #   B-7c playtime_cal_median      — SIGNED median-log-playtime diff
-        #   B-7d popularity_match         — abs log-count diff
-        #   B-7e sentiment_match          — abs sentiment-ordinal diff
-        self.price_match_label            = df['price_match_label'].values.astype(np.float32)
-        self.price_match_negs             = np.stack(df['price_match_negs'].values).astype(np.float32)
-        self.era_gap_label                = df['era_gap_label'].values.astype(np.float32)
-        self.era_gap_negs                 = np.stack(df['era_gap_negs'].values).astype(np.float32)
-        self.playtime_cal_median_label    = df['playtime_cal_median_label'].values.astype(np.float32)
-        self.playtime_cal_median_negs     = np.stack(df['playtime_cal_median_negs'].values).astype(np.float32)
-        self.popularity_match_label       = df['popularity_match_label'].values.astype(np.float32)
-        self.popularity_match_negs        = np.stack(df['popularity_match_negs'].values).astype(np.float32)
-        self.sentiment_match_label        = df['sentiment_match_label'].values.astype(np.float32)
-        self.sentiment_match_negs         = np.stack(df['sentiment_match_negs'].values).astype(np.float32)
+        # pyarrow direct read (no pandas). Reading only the selected columns means
+        # parquet's per-column compression + projection pushdown also halves IO time
+        # for train_only loads.
+        table = pq.read_table(parquet_path, columns=columns)
 
-        # User-tower inputs (pre-padded to MAX_HISTORY_LEN by precompute).
-        self.X_user_avg_log     = df['user_avg_log_playtime'].values.astype(np.float32)
-        self.X_hist_liked       = np.stack(df['X_hist_liked'].values).astype(np.int64)
-        self.X_hist_disliked    = np.stack(df['X_hist_disliked'].values).astype(np.int64)
-        self.X_hist_full        = np.stack(df['X_hist_full'].values).astype(np.int64)
-        self.X_hist_pw          = np.stack(df['X_hist_playtime_weights'].values).astype(np.float32)
+        # ── User-tower inputs (loaded in both modes) ────────────────────────
+        # int64 for history indices because torch.gather() / torch.scatter_add_()
+        # require int64 indices downstream; .astype with copy=False reuses the
+        # buffer if the source is already int64 (parquet stores int32 here so one
+        # copy is needed). Float arrays load zero-copy.
+        # Inferred from the first 2-D column — same value for every history column.
+        h_table_arr = table['X_hist_liked'].combine_chunks()
+        max_hist = h_table_arr.type.list_size
+
+        self.label_idx         = _scalar_to_numpy(table, 'label_item_idx',        np.int32)
+        self.X_user_avg_log    = _scalar_to_numpy(table, 'user_avg_log_playtime', np.float32)
+        self.X_hist_liked      = _fixed_list_to_numpy(table, 'X_hist_liked',                  max_hist, np.int64)
+        self.X_hist_disliked   = _fixed_list_to_numpy(table, 'X_hist_disliked',               max_hist, np.int64)
+        self.X_hist_full       = _fixed_list_to_numpy(table, 'X_hist_full',                   max_hist, np.int64)
+        self.X_hist_pw         = _fixed_list_to_numpy(table, 'X_hist_playtime_weights',       max_hist, np.float32)
         # Bucket 2 — playtime weights for the LIKED slice (parallel to X_hist_liked,
         # normalized to sum 1 over non-pad liked entries; 0 at pad). Distinct from
         # X_hist_pw (which is normalized over the FULL slice).
-        self.X_hist_liked_pw    = np.stack(df['X_hist_liked_playtime_weights'].values).astype(np.float32)
+        self.X_hist_liked_pw   = _fixed_list_to_numpy(table, 'X_hist_liked_playtime_weights', max_hist, np.float32)
         # Bucket 5 — per-row user-side numeric aggregates (5 scalars). Order matches
         # B5_USER_* indices in ranker/cross_features.py. Same value repeated for all
         # rollback positions of the same user (full-history aggregates).
-        self.X_user_b5          = np.stack(df['X_user_b5'].values).astype(np.float32)
+        self.X_user_b5         = _fixed_list_to_numpy(table, 'X_user_b5',                     5,        np.float32)
+
+        # ── Eval-only columns ──────────────────────────────────────────────
+        # neg_idx + cg_label_rank + all 23 cross-feature pairs (Bucket 1 → 6).
+        # See `_CROSS_FEATURE_COLS` at module level for the full list / order.
+        # Used by evaluate.compute_label_ranks; NOT referenced by sample_batch.
+        if mode == 'full':
+            n_neg = table['neg_item_idxs'].combine_chunks().type.list_size
+            self.neg_idx       = _fixed_list_to_numpy(table, 'neg_item_idxs', n_neg, np.int32)
+            self.cg_label_rank = _scalar_to_numpy(table, 'cg_label_rank', np.int32)
+            for label_col, negs_col in _CROSS_FEATURE_COLS:
+                setattr(self, label_col, _scalar_to_numpy(table, label_col, np.float32))
+                setattr(self, negs_col,  _fixed_list_to_numpy(table, negs_col, n_neg, np.float32))
+            self.n_neg = n_neg
+        else:
+            # train_only: no neg pool stored (sample_batch only uses dataset.label_idx
+            # for col 0 + sampled random negs from rng). n_neg matches the corpus
+            # default so callers that introspect it (e.g. config-time `n_hard_take`
+            # clamp) see the right ceiling even though the array isn't materialized.
+            self.n_neg = CANDIDATES_PER_ROW - 1
+
+        # ── Drop the pa.Table reference so its buffers can be reclaimed once
+        # the numpy arrays above are detached. The numpy arrays may share buffers
+        # with the table (zero-copy) or be detached copies (dtype mismatch on
+        # astype); either way the table itself is no longer needed.
+        del table
 
         self.N        = len(self.label_idx)
-        self.n_neg    = self.neg_idx.shape[1]
         self.max_hist = self.X_hist_full.shape[1]
         self.pad_idx  = pad_idx
         self.n_items  = n_items
@@ -187,57 +277,77 @@ class RankerDataset:
 
 # ── Cross-feature computation (shared by sample_batch + evaluate + canary) ──
 
-def compute_cross_features(tag_cosine:             torch.Tensor,
-                           genre_overlap:          torch.Tensor,
-                           tag_overlap:            torch.Tensor,
-                           dev_affinity:           torch.Tensor,
-                           genre_overlap_liked:    torch.Tensor,
-                           tag_overlap_liked:      torch.Tensor,
-                           dev_affinity_liked:     torch.Tensor,
-                           genre_overlap_recent3:  torch.Tensor,
-                           tag_overlap_recent3:    torch.Tensor,
-                           dev_affinity_recent3:   torch.Tensor,
-                           price_match:            torch.Tensor,
-                           era_gap:                torch.Tensor,
-                           playtime_cal_median:    torch.Tensor,
-                           popularity_match:       torch.Tensor,
-                           sentiment_match:        torch.Tensor) -> torch.Tensor:
+def compute_cross_features(tag_cosine:                 torch.Tensor,
+                           genre_overlap:              torch.Tensor,
+                           tag_overlap:                torch.Tensor,
+                           dev_affinity:               torch.Tensor,
+                           genre_overlap_liked:        torch.Tensor,
+                           tag_overlap_liked:          torch.Tensor,
+                           dev_affinity_liked:         torch.Tensor,
+                           genre_overlap_recent3:      torch.Tensor,
+                           tag_overlap_recent3:        torch.Tensor,
+                           dev_affinity_recent3:       torch.Tensor,
+                           price_match:                torch.Tensor,
+                           era_gap:                    torch.Tensor,
+                           playtime_cal_median:        torch.Tensor,
+                           popularity_match:           torch.Tensor,
+                           sentiment_match:            torch.Tensor,
+                           tag_overlap_idf_full:       torch.Tensor,
+                           tag_overlap_idf_liked:      torch.Tensor,
+                           niche_tag_match_full:       torch.Tensor,
+                           niche_tag_match_liked:      torch.Tensor,
+                           max_tag_idf_match_full:     torch.Tensor,
+                           max_tag_idf_match_liked:    torch.Tensor,
+                           niche_dev_match_full:       torch.Tensor,
+                           niche_dev_match_liked:      torch.Tensor) -> torch.Tensor:
     """
-    Bucket 5 wide-path stacker. Returns (B, 15).
+    Bucket 6 wide-path stacker. Returns (B, 23).
 
     Inputs are 1-D (B,) tensors of per-(row, candidate) scalars. Column order in
-    the output tensor must match `n_cross_features=15` and the head weight slot
+    the output tensor must match `n_cross_features=23` and the head weight slot
     interpretation — checkpoints rely on this stable ordering:
 
-        column  0 : tag_cosine                  (B-0,  Phase A)
-        column  1 : genre_overlap               (B-1,  Bucket 1)
-        column  2 : tag_overlap                 (B-1b, Bucket 1)
-        column  3 : dev_affinity                (B-2,  Bucket 1)
-        column  4 : genre_overlap_liked         (B-3a, Bucket 2A)
-        column  5 : tag_overlap_liked           (B-3b, Bucket 2A)
-        column  6 : dev_affinity_liked          (B-3c, Bucket 2A)
-        column  7 : genre_overlap_recent3       (B-4a, Bucket 2B)
-        column  8 : tag_overlap_recent3         (B-4b, Bucket 2B)
-        column  9 : dev_affinity_recent3        (B-4c, Bucket 2B)
-        column 10 : price_match                 (B-7a, Bucket 5)
-        column 11 : era_gap                     (B-7b, Bucket 5)
-        column 12 : playtime_cal_median         (B-7c, Bucket 5)
-        column 13 : popularity_match            (B-7d, Bucket 5)
-        column 14 : sentiment_match             (B-7e, Bucket 5)
+        column  0 : tag_cosine                   (B-0,  Phase A)
+        column  1 : genre_overlap                (B-1,  Bucket 1)
+        column  2 : tag_overlap                  (B-1b, Bucket 1)
+        column  3 : dev_affinity                 (B-2,  Bucket 1)
+        column  4 : genre_overlap_liked          (B-3a, Bucket 2A)
+        column  5 : tag_overlap_liked            (B-3b, Bucket 2A)
+        column  6 : dev_affinity_liked           (B-3c, Bucket 2A)
+        column  7 : genre_overlap_recent3        (B-4a, Bucket 2B)
+        column  8 : tag_overlap_recent3          (B-4b, Bucket 2B)
+        column  9 : dev_affinity_recent3         (B-4c, Bucket 2B)
+        column 10 : price_match                  (B-7a, Bucket 5)
+        column 11 : era_gap                      (B-7b, Bucket 5)
+        column 12 : playtime_cal_median          (B-7c, Bucket 5)
+        column 13 : popularity_match             (B-7d, Bucket 5)
+        column 14 : sentiment_match              (B-7e, Bucket 5)
+        column 15 : tag_overlap_idf_full         (B-9a, Bucket 6)
+        column 16 : tag_overlap_idf_liked        (B-9b, Bucket 6)
+        column 17 : niche_tag_match_full         (B-9c, Bucket 6)
+        column 18 : niche_tag_match_liked        (B-9d, Bucket 6)
+        column 19 : max_tag_idf_match_full       (B-9e, Bucket 6)
+        column 20 : max_tag_idf_match_liked      (B-9f, Bucket 6)
+        column 21 : niche_dev_match_full         (B-9g, Bucket 6)
+        column 22 : niche_dev_match_liked        (B-9h, Bucket 6)
 
-    Cols 10-14 are RAW values — the model Z-scores them inside score_pairs /
+    Cols 10-22 are RAW values — the model Z-scores them inside score_pairs /
     score_pairs_batched (model.wide_norm_mean / wide_norm_std, populated by
     train.populate_wide_norm_buffers from train-parquet stats). Cols 0-9 are
     bounded in [-1, 1] or [0, 1] and pass through unchanged.
 
-    Future buckets append further columns at indices ≥ 15; do not reorder existing
+    Future buckets append further columns at indices ≥ 23; do not reorder existing
     columns or older checkpoints become silently mis-aligned at load time.
     """
     return torch.stack([tag_cosine, genre_overlap, tag_overlap, dev_affinity,
                         genre_overlap_liked, tag_overlap_liked, dev_affinity_liked,
                         genre_overlap_recent3, tag_overlap_recent3, dev_affinity_recent3,
                         price_match, era_gap, playtime_cal_median,
-                        popularity_match, sentiment_match],
+                        popularity_match, sentiment_match,
+                        tag_overlap_idf_full, tag_overlap_idf_liked,
+                        niche_tag_match_full, niche_tag_match_liked,
+                        max_tag_idf_match_full, max_tag_idf_match_liked,
+                        niche_dev_match_full, niche_dev_match_liked],
                        dim=-1)
 
 
@@ -290,6 +400,12 @@ def sample_batch(dataset: RankerDataset, batch_size: int, device: torch.device,
     cand = np.empty((batch_size, n_total), dtype=np.int64)
     cand[:, 0] = dataset.label_idx[rows]
     if n_hard_take > 0:
+        if dataset.mode != 'full':
+            raise RuntimeError(
+                f"sample_batch needs hard negs (n_hard_take={n_hard_take}) but dataset "
+                f"was loaded with mode='{dataset.mode}' (no neg_idx column). Either "
+                f"load with mode='full' or set n_hard_negs=0 in the training config."
+            )
         cand[:, 1:1 + n_hard_take] = dataset.neg_idx[rows][:, :n_hard_take]
     # Random negs sampled fresh per step from the corpus. Occasional collision with
     # label (~few % per row) is harmless — counts label twice in denominator,
@@ -315,16 +431,23 @@ def sample_batch(dataset: RankerDataset, batch_size: int, device: torch.device,
 
 # ── Public loader ───────────────────────────────────────────────────────────
 
-def load_splits(data_dir: str = 'data') -> tuple:
-    """Returns (train_dataset, val_dataset, FeatureStore)."""
+def load_splits(data_dir: str = 'data', train_mode: str = 'full') -> tuple:
+    """Returns (train_dataset, val_dataset, FeatureStore).
+
+    train_mode='train_only' skips ~40 GB of eval-only columns on the train dataset
+    (cross features, neg_idx, cg_label_rank — none of which sample_batch uses when
+    n_hard_negs=0). Default 'full' keeps backward compat. val_ds always loads
+    mode='full' since evaluation runs on it.
+    """
     fs       = load_features(data_dir=data_dir)
     n_items  = fs['n_items']
     pad_idx  = n_items                                    # matches src/model.py game_pad_idx
 
     train_ds = RankerDataset(os.path.join(data_dir, 'ranker_candidates_train.parquet'),
-                              n_items=n_items, pad_idx=pad_idx)
+                              n_items=n_items, pad_idx=pad_idx, mode=train_mode)
     val_ds   = RankerDataset(os.path.join(data_dir, 'ranker_candidates_val.parquet'),
-                              n_items=n_items, pad_idx=pad_idx)
-    print(f"Train: {train_ds.N:,} rollback rows  |  Val: {val_ds.N:,} rollback rows")
+                              n_items=n_items, pad_idx=pad_idx, mode='full')
+    print(f"Train: {train_ds.N:,} rollback rows ({train_ds.mode})  |  "
+          f"Val: {val_ds.N:,} rollback rows ({val_ds.mode})")
     print(f"  candidates_per_row={CANDIDATES_PER_ROW}  max_hist={train_ds.max_hist}")
     return train_ds, val_ds, fs

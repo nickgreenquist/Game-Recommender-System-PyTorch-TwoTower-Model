@@ -1,8 +1,8 @@
 # Steam Ranker: Implementation Plan
 
-## Status (2026-05-20)
+## Status (2026-05-21)
 
-Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (dropped), Phase B Bucket 4 ✗ (dropped), Phase B Bucket 5 ✓.
+Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (dropped), Phase B Bucket 4 ✗ (dropped), Phase B Bucket 5 ✓, Phase B Bucket 6 ✓.
 
 **A-N2** (Phase A exit, tag_cosine only): NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −1.5%). Proved a Wide & Deep MLP can effectively match the CG two-tower dot product on identical features.
 
@@ -16,15 +16,7 @@ Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (d
 
 **Bucket 5** (Bucket 2 + 5 numeric-match scalars: price / era / playtime-cal-median / popularity / sentiment, 15 wide cross features total): **NDCG@10 0.0866** vs Bucket 2 0.0828 (Δ **+4.6%**). MRR 0.0814 (+3.8%). Pure-reranking NDCG@10 0.1567 vs 0.1499 (+4.5%). **Uniform +4–5% lift across every headline metric** in both E2E and pure-rerank views — first bucket since Bucket 1 to deliver meaningful lift on top of the prior baseline. Hit@50 E2E jumped +0.0138 where Bucket 2 had flattened (+0.0030 vs CG), showing the numeric-match features are surfacing real targets that pure overlap couldn't. Canary quality holds or improves on every user type (JRPG, Racing, Survival, Management materially cleaner than CG; no catastrophic regressions on niche tastes). First bucket to use the Z-score normalization infrastructure (persistent `wide_norm_mean` / `wide_norm_std` buffers populated once at training start from train-parquet stats). Reset the next-bucket baseline.
 
-**Next: Bucket 6 (Niche Feature Crosses)** — 8 user × item cross features, structured as **4 niche concepts × 2 history slices (full + liked)**. Each concept measures some form of rarity/niche match between user and candidate; computing on both full and liked slices mirrors Bucket 6's existing IDF-overlap pattern and Bucket 2's full/liked structure (per-rollback recomputation, not static per-user). Cross features stay the Phase B priority (Buckets 1, 2, 5 — the three landed buckets — were all user × item crosses). Measured against Bucket 5 (NDCG@10 0.0866).
-
-The 4 concepts:
-1. **IDF Tag Overlap** (Shape A — IDF-reweighted Bucket 1 B-1b): `Σ user_tag_w[t] · game_tag_binary_idf[cand, t]` over slice. Keeps the 164-dim tag axis, reweights inside the inner product.
-2. **Niche Tag Match** (Shape B — scalar arithmetic): `|user_mean_tag_idf_slice − item_mean_tag_idf|`. Per-slice weighted-mean tag IDF over the user's tag profile vs item's mean tag IDF.
-3. **Max Tag IDF Match** (Shape B): `|user_max_tag_idf_slice − item_max_tag_idf|`. Sharpest-tag niche match — user who plays niche-tag games matches a candidate carrying a rare tag.
-4. **Niche Dev Match** (Shape B): `|user_mean_log_dev_catalog_size_slice − log(item_dev_catalog_size)|`. Heavy indie/small-dev user matches small-dev candidate.
-
-Each concept × {full, liked} → 8 wide cross features (cols 15–22 — pushes Buckets 8, 9 to cols 23+).
+**Bucket 6** (Bucket 5 + 8 niche feature crosses: 4 concepts × {full, liked}, 23 wide cross features total): **NDCG@10 0.0867** vs Bucket 5 0.0866 (Δ **+0.1%**). Offline metrics are flat at the noise floor — every E2E and pure-rerank delta sits in ±0.001 across K∈{1, 5, 10, 20, 50}, both signs scattered. **Canary tells a different story:** Fighting Lover ranker top-10 drops all 3 Final Fantasy / Tales JRPGs that B5 was surfacing (FF Type-0, FF VIII, Tales of Symphonia) and replaces them with METAL SLUG, METAL SLUG X, UNDER NIGHT IN-BIRTH, Naruto Storm 4 — proper fighters/arcade. Civ Lover promotes Galactic Civ III (anchor sibling) #3 → #1 and brings Master of Orion + Victoria II up. Western RPG, FPS show smaller niche-coherence improvements. **Kept on canary alone** — offline-flat-but-canary-better is the inverse of Bucket 4 ✗ (flat-everywhere) and falls under the V5 PROD vs V5 α=0 precedent: canary quality on niche tastes is what users notice. Inference cost: negligible (~120k extra FLOPs/query, sub-millisecond on MPS — see §8 Bucket 6 entry). Bucket 7 (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features absorbed here as `niche_dev_match` and `max_tag_idf_match`.
 
 **Bucket 7 (Item-Intrinsic Priors) dropped in planning (2026-05-20)** — 2 of its 3 features (`dev_catalog_size`, `candidate_max_tag_idf`) absorbed into Bucket 6 as proper user × item scalar crosses (`niche_dev_match`, `max_tag_idf_match`), which is the correct shape for the linear wide head. The remaining feature (`dev_specialization`) is the only one without an obvious user-side analog and isn't worth a bucket on its own. Could return later in a different shape (e.g. `|user_genre_specialization − item_dev_specialization|`) if downstream buckets disappoint.
 
@@ -481,6 +473,41 @@ Four buffers added to the model (non-persistent, rebuilt from FeatureStore on lo
 
 ---
 
+### Phase B — Bucket 6 ✓ (2026-05-21)
+
+**Niche Feature Crosses**: 8 user × item cross features structured as **4 niche/rarity concepts × 2 history slices** (`X_hist_full` and `X_hist_liked` with their respective playtime-weight columns) — `tag_overlap_idf` (Shape A, IDF-reweighted Bucket 1 B-1b), `niche_tag_match` (Shape B, weighted-mean tag IDF diff), `max_tag_idf_match` (Shape B, weighted-max tag IDF diff), `niche_dev_match` (Shape B, log dev-catalog-size diff). Wide-head columns 15–22. Five new per-game buffers landed (`game_tag_binary_idf`, `game_tag_count_idf`, `game_tag_mean_idf`, `game_tag_max_idf`, `game_dev_log_catalog_size`) — all non-persistent, rebuilt from FeatureStore. Single new compute util `niche_scalar_triple` in `ranker/cross_features.py` plus reuse of `weighted_overlap` for the IDF overlap pair — bit-exact identity across precompute, train, canary by construction.
+
+| Metric | Bucket 5 | Bucket 6 | Δ vs B5 |
+|---|---:|---:|---:|
+| NDCG@1 | 0.0324 | 0.0319 | −1.5% |
+| NDCG@10 | 0.0866 | 0.0867 | +0.1% |
+| NDCG@20 | 0.1083 | 0.1083 | 0.0% |
+| NDCG@50 | 0.1410 | 0.1410 | 0.0% |
+| Hit@10 | 0.1620 | 0.1625 | +0.3% |
+| Hit@20 | 0.2484 | 0.2486 | +0.1% |
+| Hit@50 | 0.4137 | 0.4140 | +0.1% |
+| MRR | 0.0814 | 0.0813 | −0.1% |
+| Pure-rerank NDCG@10 | 0.1567 | 0.1569 | +0.1% |
+| Pure-rerank MRR | 0.1393 | 0.1391 | −0.1% |
+| Pure-rerank Hit@10 | 0.2932 | 0.2941 | +0.3% |
+| Pure-rerank Hit@50 | 0.7489 | 0.7494 | +0.1% |
+
+**Bucket 6 outcome:** offline-flat (every delta in ±0.001 noise band, both signs scattered) **but canary-better on niche tastes.** Per-slice canary read (ranker-vs-ranker, identical CG control):
+
+- **Fighting Lover** — clean win. B5 ranker top-10 had 3 JRPGs (FF Type-0 #5, FF VIII #6, Tales of Symphonia #7) bleeding into a fighting-tag query. B6 ranker removes all three and surfaces METAL SLUG, METAL SLUG X, UNDER NIGHT IN-BIRTH, Naruto Storm 4 — proper fighters and arcade. Cleanest single-slice improvement in any bucket since Bucket 1.
+- **Civ Lover (4X)** — win. Galactic Civilizations III (sibling of the StarDrive/GalCiv II anchor tags) promoted #3 → #1; Master of Orion #11 → #5, Victoria II #12 → #7. B5's Might & Magic Heroes VI (a non-4X outlier) drops out of the top 10.
+- **Western RPG** — slight win. Pillars of Eternity #10 → #4, Kingdoms of Amalur #14 → #8. Both buckets still surface Terraria (Terraria pollution is a separate axis).
+- **FPS** — slight win. Half-Life 2 promoted #9 → #5. Both still have Oddworld pollution.
+- **JRPG / Indie / Racing / Survival / Management** — comparable to B5; minor reorders inside already-good lists.
+
+The 4 niche concepts target exactly the failure mode the Fighting slice exhibited — an anime-adjacent CG cluster pulls JRPGs into fighting lists, and the niche scalars (`max_tag_idf_match`, `niche_dev_match` on `liked`) penalize that bleed by checking whether the candidate's rarest tag matches the user's rarest-tag fingerprint and whether the candidate's developer-catalog scale matches the user's. **Kept on canary alone.** This is the inverse of Bucket 4 ✗ (flat-everywhere) and consistent with the V5 PROD vs V5 α=0 precedent — canary quality on niche tastes is what users notice. Bucket 7's `dev_specialization` (item-only, no user-side analog) was dropped in planning; the other two B7 features absorbed here as proper user × item crosses.
+
+**Inference cost:** negligible. Per query (n_cand=100, B=1) Bucket 6 adds 2× `weighted_overlap` matmuls + 2× `niche_scalar_triple` reductions ≈ ~120k FLOPs total — sub-millisecond on MPS, dwarfed by CG retrieval (~700k FLOPs) and the deep tower forward. **Training cost:** Bucket 6 columns flow through the wide bypass alongside the existing 15; adds 8 × hidden_dim weights to the head, no architectural changes. **Precompute cost:** materially higher than Bucket 5 (8 new columns × 4.3M rows × 1000 candidates), motivated the chunked-streaming-write + sync-reduction work in `ranker/precompute.py` (CHUNK_SIZE=250_000, single per-batch stack-and-sync). Peak precompute memory dropped from ~103 GB → ~8–10 GB.
+
+**Lesson:** when offline-flat coincides with canary-better, ship. Flat offline metrics don't penalize within-top-20 reorders that don't flip the held-out target across the K boundary, but those reorders are exactly what list-shape evaluation (canary) sees. Bucket 4 ✗ was flat-everywhere (flat offline AND flat canary); Bucket 6 is flat offline but canary-better — different signal entirely.
+
+---
+
 ## 9. Cross-Feature Roadmap (Phase B)
 
 Features are grouped into **buckets** that share a semantic theme. Each bucket is one training experiment, measured against the previous Phase B baseline (or A-N2 for the first). Bundle-level NDCG is the verdict; per-feature attribution is only done as a drop-one diagnostic if a bucket disappoints (see §10 rule 1).
@@ -503,7 +530,7 @@ Bucket 2 rolls **Liked** and **Recent-3 Liked** into a single training run (6 fe
 
 **Bucket 5 ✓ (Numeric Matching) broke the flat streak** — 5 scalar-arithmetic cross features (price / era / playtime-calibration-median / popularity / sentiment match) landed with a uniform +4–5% lift across every headline metric vs Bucket 2 (see §8 Bucket 5 entry for the table). Lesson: when an overlap-style bucket flattens, the next bucket should be a different signal class entirely, not a re-shaping of the same signal.
 
-**Bucket 6 (Niche Feature Crosses)** and **Bucket 8 (Engagement-Level Cross)** are the remaining user × item cross features in the roadmap and run next. Bucket 6 bundles 8 features (4 niche concepts × 2 slices each) — highest-confidence next bucket given Bucket 1's tag features were the biggest single win in Phase B, and the niche scalar crosses absorb what would have been Bucket 7. Bucket 8 is the least-confident of the remaining buckets (the deep MLP may already capture engagement signal via dev/genre embeddings + user_avg_log).
+**Bucket 6 ✓ (Niche Feature Crosses) landed offline-flat but canary-better** — 8 user × item cross features (4 niche concepts × {full, liked}) landed at NDCG@10 0.0867 vs Bucket 5's 0.0866 (deltas in ±0.001 noise band on every metric), but the canary side-by-side shows clear per-slice improvements (Fighting Lover JRPG bleed eliminated, Civ Lover Galactic Civ III promoted to #1, smaller niche-coherence wins on Western RPG and FPS). Kept on canary alone — see §8 Bucket 6 entry for the full table and per-slice canary analysis. **Bucket 8 (Engagement-Level Cross)** is the remaining user × item cross feature in the roadmap and runs next. Bucket 8 is the least-confident of the original Phase B roadmap (the deep MLP may already capture engagement signal via dev/genre embeddings + user_avg_log).
 
 **Bucket 7 (Item-Intrinsic Priors) dropped in planning (2026-05-20).** Two of its three features (`dev_catalog_size`, `candidate_max_tag_idf`) absorbed into Bucket 6 as user × item scalar crosses (`niche_dev_match`, `max_tag_idf_match`) — the correct shape for the linear wide head, which can't extract modulation from item-only inputs. The remaining feature (`dev_specialization`) is the only item-only scalar without an obvious user-side analog and isn't worth a bucket on its own.
 
@@ -624,7 +651,9 @@ Five scalar-arithmetic differences on user-vs-item numeric stats. All require Z-
 
 **Implementation cost:** 4 new per-game buffers (~22 KB total — 5,438 × 4 floats × 4 buffers); 5 new per-user dicts (~3.5 MB — 88,310 users × 5 floats × 8 bytes for the dict overhead); 10 new parquet columns (5 features × {label, negs} per row, ~10 GB on the train parquet); 2 new persistent Z-score model buffers (40 bytes — `wide_norm_mean(5,)` + `wide_norm_std(5,)`); 5 lines of subtract-and-abs in cross-feature compute; 1 new helper for populating the Z-score buffers on training start (single pass over train parquet, ~5-10 sec one-time).
 
-### Bucket 6 — Niche Feature Crosses
+### Bucket 6 ✓ — Niche Feature Crosses (2026-05-21)
+
+**Outcome:** offline-flat (every E2E and pure-rerank delta in ±0.001 noise band vs Bucket 5), but canary-better on niche tastes — Fighting Lover JRPG bleed eliminated, Civ Lover Galactic Civ III sibling promoted to #1, smaller niche-coherence wins on Western RPG / FPS. Kept on canary alone. See §8 Bucket 6 entry for the full metric table and per-slice canary analysis. Implementation details below are the design as shipped.
 
 Eight user × item cross features, structured as **4 niche/rarity concepts × 2 history slices** (`X_hist_full` and `X_hist_liked` with their respective playtime-weight columns). Each concept measures a different facet of "how well does this user's niche/rarity taste match this candidate's niche/rarity profile?" — and computing on both slices mirrors Bucket 6's existing IDF-overlap pattern (Bucket 2 already established the full/liked structure for categorical-overlap features).
 
@@ -739,6 +768,11 @@ Initialize new wide-feature weights at 0.1 — small non-zero signal without swa
 
 - **Phase C — Label quality.** After Phase B saturates, re-precompute with stricter `is_liked` filter (`raw_hours ≥ game_median` OR `≥ 2× user_median` OR `recommend=True`). Slashes label set by 40-60% but every label is a genuinely-engaged game. Expected to lift NDCG; cleanly attributable because Phases A+B are already proven.
 - **DCN V2.** Replace deep MLP with explicit cross layers — only if cross features stop helping.
+
+### Open infrastructure TODOs
+
+- **Fix `evaluate_only` memory like we just fixed train (2026-05-21).** `evaluate_only` in `ranker/train.py` calls `load_splits('data')` which still loads `train_ds` in full mode — pulling all 23 × {label, negs} cross features for 4.3M training rows into RAM (~40 GB) even though full-val eval only ever touches `val_ds`. Same fix pattern as the train-mode work that landed today: either skip `train_ds` entirely in the eval-only path, or load it in `train_only` mode (or a future `metadata_only` mode that drops even the history arrays). Expected peak memory after fix: ~1.5 GB (just val_ds full) instead of 60+ GB.
+- **Share parquet-loading utilities.** `_scalar_to_numpy`, `_fixed_list_to_numpy`, and the `_USER_AND_LABEL_COLS` / `_EVAL_ONLY_COLS` / `_CROSS_FEATURE_COLS` manifests in `ranker/dataset.py` are the right home for parquet → numpy conversion. They're already reused via `RankerDataset` (used by both train and eval). One open duplication: the cross-feature column manifest currently lives in 3 places — `ranker/dataset._CROSS_FEATURE_COLS` (manifest of attr names), `ranker/precompute._CROSS_COLS` (manifest of column names + dtypes for parquet write), and `ranker/train._WIDE_NORM_PARQUET_COLS` (manifest of just the Z-scored label column names). All three need to stay in lockstep when a bucket lands. Consolidate into a single canonical manifest in `ranker/dataset.py` that the other two import — or push down into a new `ranker/_columns.py` if both `dataset.py` and `precompute.py` want to consume it without a circular import. Lower priority than the `evaluate_only` memory fix; cosmetic until someone forgets to update one of the three lists on a new bucket.
 
 ---
 

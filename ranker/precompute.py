@@ -40,6 +40,17 @@ Cross features (precomputed; columns written per (label, neg) per row):
   forward time — populating those buffers from train-parquet stats happens AFTER
   precompute (see ranker.train.populate_wide_norm_buffers).
 
+  Bucket 6 (niche feature crosses — 4 concepts × {full, liked} = 8 features):
+  - tag_overlap_idf_full     (B-9a) — IDF-reweighted Bucket 1 B-1b on full slice
+  - tag_overlap_idf_liked    (B-9b) — IDF-reweighted on liked slice
+  - niche_tag_match_full     (B-9c) — abs(user_mean_tag_idf - item_mean_tag_idf), full
+  - niche_tag_match_liked    (B-9d) — same, liked slice
+  - max_tag_idf_match_full   (B-9e) — abs(user_weighted_max_tag_idf - item_max_tag_idf), full
+  - max_tag_idf_match_liked  (B-9f) — same, liked slice
+  - niche_dev_match_full     (B-9g) — abs(user_mean_log_dev_catalog - item_log_dev_catalog), full
+  - niche_dev_match_liked    (B-9h) — same, liked slice
+  Same RAW / Z-score story as Bucket 5 — model Z-scores all 13 (cols 10-22) at forward time.
+
 Per-row user-side scalars persisted to parquet alongside the cross features (5 new
 columns) — needed at train time to recompute the 5 Bucket 5 cross features on the
 fly for sampled random negatives (where the parquet's label/neg precomputed values
@@ -61,6 +72,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -78,14 +91,30 @@ from src.train import (build_model, get_config,
 from ranker.cross_features import (B5_USER_MEAN_LOG_COUNT, B5_USER_MEAN_PRICE,
                                      B5_USER_MEAN_SENTIMENT, B5_USER_MEAN_YEAR,
                                      B5_USER_MEDIAN_LOG_PT, Bucket5GameBuffers,
-                                     OverlapBuffers, categorical_overlap_triple,
-                                     last_n_history, numeric_match_quintuple)
+                                     NicheBuffers, OverlapBuffers,
+                                     categorical_overlap_triple, last_n_history,
+                                     niche_scalar_triple, numeric_match_quintuple,
+                                     weighted_overlap)
 from src.features import SENTIMENT_UNKNOWN_FILL
 from ranker.train import _ALPHA_TO_CG_GLOB
 
 
 TOP_K_CANDIDATES         = 100   # 1 label + 99 hard negatives per row
-SCORING_BATCH_SIZE       = 512
+# Bumped 512 → 2048 (2026-05-20). At B=2048 the (B, n_items+1) intermediates are
+# ~50 MB each (with n_items ~5.4k); well under MPS headroom. Halves number of
+# batches → halves device→host sync overhead, which dominates total precompute
+# wall-clock per the per-batch tear-down loop below.
+SCORING_BATCH_SIZE       = 2048
+# Streamed write chunk size (2026-05-20). Each chunk allocates its own per-row
+# cross-feature output buffers (~10 KB/row, dominated by 23 × 99-wide negs
+# float32 arrays); 250k rows → ~2.5 GB chunk + ~5 GB held in the full rollback
+# arrays (history, user_id, etc., which stay alive across chunks). Peak working
+# memory ~8-10 GB regardless of split size — was ~100 GB pre-chunking because
+# the full ~45 GB of cross-feature negs arrays sat in memory simultaneously
+# with pyarrow's pandas→parquet conversion doubling them during the write.
+# Pyarrow Table is built directly from numpy via FixedSizeListArray (zero-copy
+# where dtype matches) so the write doesn't double again.
+CHUNK_SIZE               = 250_000
 SPLIT_SEED               = 42    # mirror CG val builder seed (seed + 1 used by offline_eval)
 DEFAULT_PRECOMPUTE_ALPHA = 0.0   # Phase 1 default — matches ranker α=0 in train.get_config()
 
@@ -308,15 +337,24 @@ def _build_rollback_arrays(users: list, fs: dict, max_per_user: int, seed: int,
 
 @torch.no_grad()
 def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
-                      device: torch.device, batch_size: int, top_k: int) -> dict:
+                      device: torch.device, batch_size: int, top_k: int,
+                      row_start: int = 0, row_end: int | None = None) -> dict:
     """
-    Score each rollback example against the full corpus with the V5 CG model.
+    Score rollback rows [row_start, row_end) against the full corpus with the V5
+    CG model. Returns a chunk-sized dict of (n_chunk, ...) arrays.
 
-    Returns:
-      neg_item_idxs : (n, top_k - 1) int32 — top hard negatives by raw CG dot, label masked
-      cg_label_rank : (n,)          int32 — label's rank in full corpus, 1-indexed, capped at top_k
-      cg_label_score: (n,)          float32 — raw CG dot for the label (pre-mask)
-      cg_neg_scores : (n, top_k - 1) float32 — raw CG dot per negative
+    Chunk-sized output (peak memory caps at chunk_n × ~10 KB ≈ ~2.5 GB at CHUNK_SIZE=250k)
+    is the precompute streaming primitive — the orchestrator calls this once per
+    chunk and writes each chunk to parquet via pq.ParquetWriter (see precompute()).
+    Pre-chunking, this allocated full-split-sized output buffers (~45 GB for the
+    train split's 4.3M rollback examples × 23 cross-feature negs arrays) and the
+    process peaked at ~100 GB during the pandas→parquet write step.
+
+    Returns (each (n_chunk, ...) — n_chunk = row_end - row_start):
+      neg_item_idxs : (n_chunk, top_k - 1) int32 — top hard negatives by raw CG dot, label masked
+      cg_label_rank : (n_chunk,)           int32 — label's rank in full corpus, 1-indexed, capped at top_k
+      cg_label_score: (n_chunk,)           float32 — raw CG dot for the label (pre-mask)
+      cg_neg_scores : (n_chunk, top_k - 1) float32 — raw CG dot per negative
       tag_cosine_label,    tag_cosine_negs    — raw-TFIDF cosine                   (B-0)
       genre_overlap_label, genre_overlap_negs — weighted genre overlap, full hist  (B-1)
       tag_overlap_label,   tag_overlap_negs   — weighted tag overlap, full hist    (B-1b)
@@ -332,19 +370,31 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
       playtime_cal_median_label,   ...negs    — SIGNED median-log-playtime diff      (B-7c)
       popularity_match_label,      ...negs    — abs log-count diff                   (B-7d)
       sentiment_match_label,       ...negs    — abs sentiment-ordinal diff           (B-7e)
+      tag_overlap_idf_full_label,  ...negs    — IDF-weighted tag overlap, full       (B-9a)
+      tag_overlap_idf_liked_label, ...negs    — IDF-weighted tag overlap, liked      (B-9b)
+      niche_tag_match_full_label,  ...negs    — abs mean-tag-IDF diff, full          (B-9c)
+      niche_tag_match_liked_label, ...negs    — abs mean-tag-IDF diff, liked         (B-9d)
+      max_tag_idf_match_full_label,  ...negs  — abs max-tag-IDF diff, full           (B-9e)
+      max_tag_idf_match_liked_label, ...negs  — abs max-tag-IDF diff, liked          (B-9f)
+      niche_dev_match_full_label,  ...negs    — abs log-dev-catalog-size diff, full  (B-9g)
+      niche_dev_match_liked_label, ...negs    — abs log-dev-catalog-size diff, liked (B-9h)
     """
-    n     = arrays['X_hist_full'].shape[0]
+    if row_end is None:
+        row_end = arrays['X_hist_full'].shape[0]
+    n     = row_end - row_start                      # chunk size
     n_neg = top_k - 1
     pad_idx = fs['n_items']
 
-    X_avg_log         = torch.from_numpy(arrays['user_avg_log_playtime']).reshape(-1, 1)
-    X_hist_liked      = torch.from_numpy(arrays['X_hist_liked']).long()
-    X_hist_liked_pw   = torch.from_numpy(arrays['X_hist_liked_playtime_weights'])
-    X_hist_dis        = torch.from_numpy(arrays['X_hist_disliked']).long()
-    X_hist_full       = torch.from_numpy(arrays['X_hist_full']).long()
-    X_hist_pw         = torch.from_numpy(arrays['X_hist_playtime_weights'])
-    label_idx         = torch.from_numpy(arrays['label_item_idx']).long()
-    X_user_b5_t       = torch.from_numpy(arrays['X_user_b5'])      # (N, 5) float32
+    # Slice into the full rollback arrays ONCE per chunk (these are zero-copy
+    # numpy views, then torch.from_numpy is also zero-copy where dtype matches).
+    X_avg_log         = torch.from_numpy(arrays['user_avg_log_playtime'][row_start:row_end]).reshape(-1, 1)
+    X_hist_liked      = torch.from_numpy(arrays['X_hist_liked'][row_start:row_end]).long()
+    X_hist_liked_pw   = torch.from_numpy(arrays['X_hist_liked_playtime_weights'][row_start:row_end])
+    X_hist_dis        = torch.from_numpy(arrays['X_hist_disliked'][row_start:row_end]).long()
+    X_hist_full       = torch.from_numpy(arrays['X_hist_full'][row_start:row_end]).long()
+    X_hist_pw         = torch.from_numpy(arrays['X_hist_playtime_weights'][row_start:row_end])
+    label_idx         = torch.from_numpy(arrays['label_item_idx'][row_start:row_end]).long()
+    X_user_b5_t       = torch.from_numpy(arrays['X_user_b5'][row_start:row_end])    # (n_chunk, 5) float32
 
     neg_item_idxs      = np.zeros((n, n_neg), dtype=np.int32)
     cg_label_rank      = np.zeros(n,          dtype=np.int32)
@@ -385,6 +435,24 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     pop_match_negs     = np.zeros((n, n_neg), dtype=np.float32)
     sent_match_label   = np.zeros(n,          dtype=np.float32)
     sent_match_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    # Bucket 6 — niche feature crosses (8 features × {label, negs} = 16 arrays).
+    # Same RAW / Z-score-at-forward-time story as Bucket 5; 4 concepts × {full, liked}.
+    tag_ov_idf_f_label   = np.zeros(n,          dtype=np.float32)
+    tag_ov_idf_f_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    tag_ov_idf_l_label   = np.zeros(n,          dtype=np.float32)
+    tag_ov_idf_l_negs    = np.zeros((n, n_neg), dtype=np.float32)
+    niche_tag_f_label    = np.zeros(n,          dtype=np.float32)
+    niche_tag_f_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    niche_tag_l_label    = np.zeros(n,          dtype=np.float32)
+    niche_tag_l_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    max_tag_idf_f_label  = np.zeros(n,          dtype=np.float32)
+    max_tag_idf_f_negs   = np.zeros((n, n_neg), dtype=np.float32)
+    max_tag_idf_l_label  = np.zeros(n,          dtype=np.float32)
+    max_tag_idf_l_negs   = np.zeros((n, n_neg), dtype=np.float32)
+    niche_dev_f_label    = np.zeros(n,          dtype=np.float32)
+    niche_dev_f_negs     = np.zeros((n, n_neg), dtype=np.float32)
+    niche_dev_l_label    = np.zeros(n,          dtype=np.float32)
+    niche_dev_l_negs     = np.zeros((n, n_neg), dtype=np.float32)
 
     # Tag matrix on device once. Shape: (n_items+1, n_tags) — pad row appended for safe indexing.
     n_tags = fs['n_tags']
@@ -392,6 +460,10 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         fs['game_tag_matrix'],
         np.zeros((1, n_tags), dtype=np.float32),
     ])).to(device)
+    # Pre-L2-normalize once for all batches — saves a per-batch F.normalize over the
+    # (B, n_neg, n_tags) gather tensor in the tag_cosine compute. Mirrors what the
+    # model registers as game_tag_matrix_l2 in ranker.train._buffers_from_fs.
+    tag_matrix_dev_l2 = F.normalize(tag_matrix_dev, p=2, dim=1)
 
     # Genre BINARY matrix + per-item genre count on device once. fs['game_genre_matrix']
     # is L1-row-normalized (each entry = 1/k per genre, sums to 1); for the cross feature
@@ -454,7 +526,33 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         sentiment       =_to_padded(fs['game_sentiment']),
     )
 
-    for s in tqdm(range(0, n, batch_size), desc="Scoring candidates"):
+    # Bucket 6 — NicheBuffers built device-side. Same shape the model registers under
+    # in train._buffers_from_fs; both call sites use `weighted_overlap` (for IDF overlap)
+    # and `niche_scalar_triple` (for 3 scalars per slice), so parquet writes and
+    # train-time on-the-fly compute are bit-identical by construction. The matrix buffer
+    # needs a per-tag-IDF row; the scalar buffers each get a pad-0 row.
+    tag_binary_idf_dev = torch.from_numpy(np.vstack([
+        fs['game_tag_binary_idf'],
+        np.zeros((1, n_tags), dtype=np.float32),
+    ])).to(device)
+    tag_count_idf_dev = tag_binary_idf_dev.sum(dim=1).clamp(min=1.0)    # (n_items+1,)
+    niche_buffers = NicheBuffers(
+        tag_binary_idf       =tag_binary_idf_dev,
+        tag_count_idf        =tag_count_idf_dev,
+        tag_mean_idf         =_to_padded(fs['game_tag_mean_idf']),
+        tag_max_idf          =_to_padded(fs['game_tag_max_idf']),
+        dev_log_catalog_size =_to_padded(fs['game_dev_log_catalog_size']),
+    )
+
+    # Each feature lands in a fixed slot in the per-batch stacked tensor. Order MUST
+    # match the unpack tuple at the bottom of the loop. Cross-feature columns 0-23
+    # are the canonical (B, 1+n_neg) layout: column 0 is the LABEL, columns 1: are
+    # the NEGS. cg_score occupies slot 0 (col 0 = label CG score, cols 1: = neg CG
+    # scores from topk.values) so a single stack + one sync covers CG-score + all
+    # 23 cross features.
+    N_STACKED = 1 + 23                                          # cg_score + 23 cross features
+
+    for s in tqdm(range(0, n, batch_size), desc=f"  Scoring [{row_start:,}:{row_end:,}]"):
         e = min(s + batch_size, n)
         B = e - s
 
@@ -472,89 +570,120 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
 
         b_idx     = torch.arange(B, device=device)
         label_sc  = scores[b_idx, label_b]
-        cg_label_score[s:e] = label_sc.cpu().numpy()
-
-        # Label rank in full corpus, capped at top_k.
+        # Label rank in full corpus, capped at top_k. Stays on device through the
+        # batch; synced at the end with neg_item_idxs (the only two int outputs).
         full_rank = (scores > label_sc.unsqueeze(1)).sum(dim=1) + 1
-        cg_label_rank[s:e] = full_rank.clamp(max=top_k).cpu().numpy()
 
         scores[b_idx, label_b] = float('-inf')
         topk = scores.topk(n_neg, dim=1)
-        neg_item_idxs[s:e]  = topk.indices.cpu().numpy()
-        cg_neg_scores[s:e]  = topk.values.cpu().numpy()
 
-        # ── Tag cosine over raw TF-IDF ──────────────────────────────────────
-        # user_tag_pool: playtime-weighted sum of game_tag_matrix[X_hist_full] rows.
-        # h_pw is already normalized per row (sum=1 over real positions; pads weight=0).
-        # tag_matrix[pad_idx] is a zero row, so padding contributes nothing.
-        hist_tags = tag_matrix_dev[h_full]                           # (B, H, n_tags)
-        user_tag_pool = (hist_tags * h_pw.unsqueeze(-1)).sum(dim=1)  # (B, n_tags)
-        user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
-
-        label_tag_norm = F.normalize(tag_matrix_dev[label_b], p=2, dim=1)
-        tag_cos_label[s:e] = (user_tag_norm * label_tag_norm).sum(dim=1).cpu().numpy()
-
-        neg_tag_norm = F.normalize(tag_matrix_dev[topk.indices], p=2, dim=-1)  # (B, n_neg, n_tags)
-        tag_cos_negs[s:e] = (user_tag_norm.unsqueeze(1) * neg_tag_norm).sum(dim=-1).cpu().numpy()
-
-        # ── Buckets 1+2+3 cross features (shared compute path with train) ───
-        # Build a unified (B, 1 + n_neg) cand matrix with label at column 0, then call
-        # categorical_overlap_triple for each history slice — same util the training
-        # loop uses, so parquet (eval-time) values and train-time on-the-fly values
-        # are bit-identical by construction.
+        # Unified (B, 1 + n_neg) candidate matrix: label at col 0, hard negs at cols 1:.
+        # Every feature below produces a tensor of this shape — `torch.stack` at the end
+        # of the batch yields (B, 1+n_neg, 1 + 23) for a single device→host sync.
         cand_b = torch.cat([label_b.unsqueeze(1), topk.indices], dim=1)                   # (B, 1 + n_neg)
 
-        def _write_triple(label_arr_genre, negs_arr_genre,
-                          label_arr_tag,   negs_arr_tag,
-                          label_arr_dev,   negs_arr_dev,
-                          slice_indices,   slice_weights):
-            """Compute the (genre, tag, dev_affinity) triple for one slice and unpack
-            into the matching per-feature parquet output arrays (label at col 0,
-            negs at cols 1:)."""
-            g, t, d = categorical_overlap_triple(buffers,
-                                                  history_indices=slice_indices,
-                                                  history_weights=slice_weights,
-                                                  cand_idx=cand_b)
-            g_np, t_np, d_np = g.cpu().numpy(), t.cpu().numpy(), d.cpu().numpy()
-            label_arr_genre[s:e] = g_np[:, 0];  negs_arr_genre[s:e] = g_np[:, 1:]
-            label_arr_tag[s:e]   = t_np[:, 0];  negs_arr_tag[s:e]   = t_np[:, 1:]
-            label_arr_dev[s:e]   = d_np[:, 0];  negs_arr_dev[s:e]   = d_np[:, 1:]
+        # cg_score in the same (B, 1+n_neg) layout. label_sc captures the masked-out
+        # label score (pre-mask); topk.values has the neg scores. Stack into one column
+        # so the unpack at the end can split label vs negs identically to cross features.
+        cg_score = torch.cat([label_sc.unsqueeze(1), topk.values], dim=1)                 # (B, 1 + n_neg)
 
-        # Bucket 1 — full-history slice (h_full, h_pw)
-        _write_triple(genre_ov_label,    genre_ov_negs,
-                      tag_ov_label,      tag_ov_negs,
-                      dev_aff_label,     dev_aff_negs,
-                      h_full, h_pw)
+        # ── Tag cosine over raw TF-IDF (B-0) ─────────────────────────────────
+        # Single matmul into pre-L2-normalized full corpus → gather per cand_b.
+        # Replaces the old two-path (label cosine + per-neg cosine) approach; saves
+        # one F.normalize over (B, n_neg, n_tags) and aligns with train._forward_batch.
+        hist_tags = tag_matrix_dev[h_full]                                                # (B, H, n_tags)
+        user_tag_pool = (hist_tags * h_pw.unsqueeze(-1)).sum(dim=1)                       # (B, n_tags)
+        user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
+        full_tag_cos  = user_tag_norm @ tag_matrix_dev_l2.t()                             # (B, n_items+1)
+        tag_cos       = full_tag_cos.gather(1, cand_b)                                    # (B, 1 + n_neg)
 
-        # Bucket 2A — liked-only history slice (h_liked, h_liked_pw)
-        _write_triple(genre_ov_l_label,  genre_ov_l_negs,
-                      tag_ov_l_label,    tag_ov_l_negs,
-                      dev_aff_l_label,   dev_aff_l_negs,
-                      h_liked, h_liked_pw)
-
-        # Bucket 2B — last-3-liked window (derived from h_liked via last_n_history)
+        # ── Buckets 1+2 — categorical-overlap triple per history slice ──────
+        # categorical_overlap_triple → (genre, tag, dev_affinity) each (B, 1 + n_neg).
+        g_f,  t_f,  d_f  = categorical_overlap_triple(buffers,
+                                                       history_indices=h_full,  history_weights=h_pw,        cand_idx=cand_b)
+        g_l,  t_l,  d_l  = categorical_overlap_triple(buffers,
+                                                       history_indices=h_liked, history_weights=h_liked_pw,  cand_idx=cand_b)
         h_recent3, h_recent3_pw = last_n_history(h_liked, h_liked_pw, n=3, pad_idx=pad_idx)
-        _write_triple(genre_ov_r3_label, genre_ov_r3_negs,
-                      tag_ov_r3_label,   tag_ov_r3_negs,
-                      dev_aff_r3_label,  dev_aff_r3_negs,
-                      h_recent3, h_recent3_pw)
+        g_r3, t_r3, d_r3 = categorical_overlap_triple(buffers,
+                                                       history_indices=h_recent3, history_weights=h_recent3_pw, cand_idx=cand_b)
 
-        # ── Bucket 5 — numeric-match quintuple (scalar arithmetic, no history slice) ─
-        user_b5_b = X_user_b5_t[s:e].to(device)                                       # (B, 5)
+        # ── Bucket 5 — numeric-match quintuple ──────────────────────────────
+        user_b5_b = X_user_b5_t[s:e].to(device)                                            # (B, 5)
         price_match, era_gap, ptcal_med, pop_match, sent_match = numeric_match_quintuple(
             b5_buffers, user_b5_b, cand_b)
 
-        def _write_b5_pair(label_arr, negs_arr, feat: torch.Tensor):
-            """Unpack a (B, 1 + n_neg) numeric-match feature tensor into label/negs arrays."""
-            f_np = feat.cpu().numpy()
-            label_arr[s:e] = f_np[:, 0]
-            negs_arr[s:e]  = f_np[:, 1:]
+        # ── Bucket 6 — 8 niche feature crosses (4 concepts × {full, liked}) ──
+        tag_ov_idf_f = weighted_overlap(niche_buffers.tag_binary_idf,
+                                         niche_buffers.tag_count_idf,
+                                         history_indices=h_full, history_weights=h_pw,
+                                         cand_idx=cand_b)
+        tag_ov_idf_l = weighted_overlap(niche_buffers.tag_binary_idf,
+                                         niche_buffers.tag_count_idf,
+                                         history_indices=h_liked, history_weights=h_liked_pw,
+                                         cand_idx=cand_b)
+        niche_tag_f, max_tag_idf_f, niche_dev_f = niche_scalar_triple(niche_buffers,
+                                         history_indices=h_full, history_weights=h_pw,
+                                         cand_idx=cand_b)
+        niche_tag_l, max_tag_idf_l, niche_dev_l = niche_scalar_triple(niche_buffers,
+                                         history_indices=h_liked, history_weights=h_liked_pw,
+                                         cand_idx=cand_b)
 
-        _write_b5_pair(price_match_label, price_match_negs, price_match)
-        _write_b5_pair(era_gap_label,     era_gap_negs,     era_gap)
-        _write_b5_pair(ptcal_med_label,   ptcal_med_negs,   ptcal_med)
-        _write_b5_pair(pop_match_label,   pop_match_negs,   pop_match)
-        _write_b5_pair(sent_match_label,  sent_match_negs,  sent_match)
+        # ── Single device→host transfer for all float outputs ───────────────
+        # Was ~28 `.cpu().numpy()` calls per batch (one per feature × per slice ×
+        # per label/neg split); each MPS sync paid 50-100 ms overhead and the batch
+        # spent more time on synchronization than on compute. Now one big stack +
+        # one sync covers CG score + all 23 cross features. The int outputs
+        # (cg_label_rank, neg_item_idxs) get their own small syncs since they
+        # don't share dtype with the float stack.
+        stacked = torch.stack([
+            cg_score,                                              # slot 0
+            tag_cos,                                               # slot 1 (B-0)
+            g_f,  t_f,  d_f,                                       # slots 2-4   (Bucket 1)
+            g_l,  t_l,  d_l,                                       # slots 5-7   (Bucket 2A)
+            g_r3, t_r3, d_r3,                                      # slots 8-10  (Bucket 2B)
+            price_match, era_gap, ptcal_med, pop_match, sent_match,  # slots 11-15 (Bucket 5)
+            tag_ov_idf_f, tag_ov_idf_l,                            # slots 16-17 (Bucket 6 IDF overlap)
+            niche_tag_f,  niche_tag_l,                             # slots 18-19 (Bucket 6 mean)
+            max_tag_idf_f, max_tag_idf_l,                          # slots 20-21 (Bucket 6 max)
+            niche_dev_f,  niche_dev_l,                             # slots 22-23 (Bucket 6 dev)
+        ], dim=2)                                                  # (B, 1 + n_neg, N_STACKED)
+        st_np            = stacked.cpu().numpy()                   # ONE big sync
+        cg_label_rank[s:e] = full_rank.clamp(max=top_k).cpu().numpy()
+        neg_item_idxs[s:e] = topk.indices.cpu().numpy()
+
+        # ── Host-side unpack: slot → (label_arr at col 0, negs_arr at cols 1:) ─
+        # Slot indices MUST stay in lockstep with the stack order above; if you
+        # reorder the stack, update these lines too. Each line costs only a numpy
+        # slice + assignment — negligible compared to the per-batch GPU work.
+        cg_label_score[s:e]      = st_np[:,  0, 0];   cg_neg_scores[s:e]       = st_np[:, 1:,  0]
+        tag_cos_label[s:e]       = st_np[:,  0, 1];   tag_cos_negs[s:e]        = st_np[:, 1:,  1]
+        # Bucket 1
+        genre_ov_label[s:e]      = st_np[:,  0, 2];   genre_ov_negs[s:e]       = st_np[:, 1:,  2]
+        tag_ov_label[s:e]        = st_np[:,  0, 3];   tag_ov_negs[s:e]         = st_np[:, 1:,  3]
+        dev_aff_label[s:e]       = st_np[:,  0, 4];   dev_aff_negs[s:e]        = st_np[:, 1:,  4]
+        # Bucket 2A
+        genre_ov_l_label[s:e]    = st_np[:,  0, 5];   genre_ov_l_negs[s:e]     = st_np[:, 1:,  5]
+        tag_ov_l_label[s:e]      = st_np[:,  0, 6];   tag_ov_l_negs[s:e]       = st_np[:, 1:,  6]
+        dev_aff_l_label[s:e]     = st_np[:,  0, 7];   dev_aff_l_negs[s:e]      = st_np[:, 1:,  7]
+        # Bucket 2B
+        genre_ov_r3_label[s:e]   = st_np[:,  0, 8];   genre_ov_r3_negs[s:e]    = st_np[:, 1:,  8]
+        tag_ov_r3_label[s:e]     = st_np[:,  0, 9];   tag_ov_r3_negs[s:e]      = st_np[:, 1:,  9]
+        dev_aff_r3_label[s:e]    = st_np[:,  0, 10];  dev_aff_r3_negs[s:e]     = st_np[:, 1:, 10]
+        # Bucket 5
+        price_match_label[s:e]   = st_np[:,  0, 11];  price_match_negs[s:e]    = st_np[:, 1:, 11]
+        era_gap_label[s:e]       = st_np[:,  0, 12];  era_gap_negs[s:e]        = st_np[:, 1:, 12]
+        ptcal_med_label[s:e]     = st_np[:,  0, 13];  ptcal_med_negs[s:e]      = st_np[:, 1:, 13]
+        pop_match_label[s:e]     = st_np[:,  0, 14];  pop_match_negs[s:e]      = st_np[:, 1:, 14]
+        sent_match_label[s:e]    = st_np[:,  0, 15];  sent_match_negs[s:e]     = st_np[:, 1:, 15]
+        # Bucket 6
+        tag_ov_idf_f_label[s:e]  = st_np[:,  0, 16];  tag_ov_idf_f_negs[s:e]   = st_np[:, 1:, 16]
+        tag_ov_idf_l_label[s:e]  = st_np[:,  0, 17];  tag_ov_idf_l_negs[s:e]   = st_np[:, 1:, 17]
+        niche_tag_f_label[s:e]   = st_np[:,  0, 18];  niche_tag_f_negs[s:e]    = st_np[:, 1:, 18]
+        niche_tag_l_label[s:e]   = st_np[:,  0, 19];  niche_tag_l_negs[s:e]    = st_np[:, 1:, 19]
+        max_tag_idf_f_label[s:e] = st_np[:,  0, 20];  max_tag_idf_f_negs[s:e]  = st_np[:, 1:, 20]
+        max_tag_idf_l_label[s:e] = st_np[:,  0, 21];  max_tag_idf_l_negs[s:e]  = st_np[:, 1:, 21]
+        niche_dev_f_label[s:e]   = st_np[:,  0, 22];  niche_dev_f_negs[s:e]    = st_np[:, 1:, 22]
+        niche_dev_l_label[s:e]   = st_np[:,  0, 23];  niche_dev_l_negs[s:e]    = st_np[:, 1:, 23]
 
     return {
         'neg_item_idxs':                neg_item_idxs,
@@ -595,6 +724,23 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         'popularity_match_negs':        pop_match_negs,
         'sentiment_match_label':        sent_match_label,
         'sentiment_match_negs':         sent_match_negs,
+        # Bucket 6 (niche feature crosses — 4 concepts × {full, liked} = 8 features)
+        'tag_overlap_idf_full_label':       tag_ov_idf_f_label,
+        'tag_overlap_idf_full_negs':        tag_ov_idf_f_negs,
+        'tag_overlap_idf_liked_label':      tag_ov_idf_l_label,
+        'tag_overlap_idf_liked_negs':       tag_ov_idf_l_negs,
+        'niche_tag_match_full_label':       niche_tag_f_label,
+        'niche_tag_match_full_negs':        niche_tag_f_negs,
+        'niche_tag_match_liked_label':      niche_tag_l_label,
+        'niche_tag_match_liked_negs':       niche_tag_l_negs,
+        'max_tag_idf_match_full_label':     max_tag_idf_f_label,
+        'max_tag_idf_match_full_negs':      max_tag_idf_f_negs,
+        'max_tag_idf_match_liked_label':    max_tag_idf_l_label,
+        'max_tag_idf_match_liked_negs':     max_tag_idf_l_negs,
+        'niche_dev_match_full_label':       niche_dev_f_label,
+        'niche_dev_match_full_negs':        niche_dev_f_negs,
+        'niche_dev_match_liked_label':      niche_dev_l_label,
+        'niche_dev_match_liked_negs':       niche_dev_l_negs,
     }
 
 
@@ -679,62 +825,89 @@ def _verify_split(arrays: dict, neg: np.ndarray, cg_rank: np.ndarray,
           f"Hit@1={cg_hit1:.4f}  Hit@10={cg_hit10:.4f}  Recall@{top_k}={cg_recall:.4f}")
 
 
-def _build_dataframe(arrays: dict, scoring: dict) -> pd.DataFrame:
-    return pd.DataFrame({
-        'user_id':                       arrays['user_id'],
-        'rollback_n':                    arrays['rollback_n'].astype(np.int32),
-        'label_item_idx':                arrays['label_item_idx'].astype(np.int32),
-        'neg_item_idxs':                 list(scoring['neg_item_idxs'].astype(np.int32)),
-        'cg_label_rank':                 scoring['cg_label_rank'].astype(np.int32),
-        'cg_label_score':                scoring['cg_label_score'],
-        'cg_neg_scores':                 list(scoring['cg_neg_scores']),
-        # Cross features — Bucket 1 (full-history slice)
-        'tag_cosine_label':              scoring['tag_cosine_label'],
-        'tag_cosine_negs':               list(scoring['tag_cosine_negs']),
-        'genre_overlap_label':           scoring['genre_overlap_label'],
-        'genre_overlap_negs':            list(scoring['genre_overlap_negs']),
-        'tag_overlap_label':             scoring['tag_overlap_label'],
-        'tag_overlap_negs':              list(scoring['tag_overlap_negs']),
-        'dev_affinity_label':            scoring['dev_affinity_label'],
-        'dev_affinity_negs':             list(scoring['dev_affinity_negs']),
-        # Cross features — Bucket 2A (liked-only history slice)
-        'genre_overlap_liked_label':     scoring['genre_overlap_liked_label'],
-        'genre_overlap_liked_negs':      list(scoring['genre_overlap_liked_negs']),
-        'tag_overlap_liked_label':       scoring['tag_overlap_liked_label'],
-        'tag_overlap_liked_negs':        list(scoring['tag_overlap_liked_negs']),
-        'dev_affinity_liked_label':      scoring['dev_affinity_liked_label'],
-        'dev_affinity_liked_negs':       list(scoring['dev_affinity_liked_negs']),
-        # Cross features — Bucket 2B (last-3-liked window)
-        'genre_overlap_recent3_label':      scoring['genre_overlap_recent3_label'],
-        'genre_overlap_recent3_negs':       list(scoring['genre_overlap_recent3_negs']),
-        'tag_overlap_recent3_label':        scoring['tag_overlap_recent3_label'],
-        'tag_overlap_recent3_negs':         list(scoring['tag_overlap_recent3_negs']),
-        'dev_affinity_recent3_label':       scoring['dev_affinity_recent3_label'],
-        'dev_affinity_recent3_negs':        list(scoring['dev_affinity_recent3_negs']),
-        # Cross features — Bucket 5 (numeric-match quintuple)
-        'price_match_label':                scoring['price_match_label'],
-        'price_match_negs':                 list(scoring['price_match_negs']),
-        'era_gap_label':                    scoring['era_gap_label'],
-        'era_gap_negs':                     list(scoring['era_gap_negs']),
-        'playtime_cal_median_label':        scoring['playtime_cal_median_label'],
-        'playtime_cal_median_negs':         list(scoring['playtime_cal_median_negs']),
-        'popularity_match_label':           scoring['popularity_match_label'],
-        'popularity_match_negs':            list(scoring['popularity_match_negs']),
-        'sentiment_match_label':            scoring['sentiment_match_label'],
-        'sentiment_match_negs':             list(scoring['sentiment_match_negs']),
-        # User-side history
-        'user_avg_log_playtime':            arrays['user_avg_log_playtime'],
-        'user_interaction_count':           arrays['user_interaction_count'].astype(np.int32),
-        'X_hist_liked':                     list(arrays['X_hist_liked'].astype(np.int32)),
-        'X_hist_disliked':                  list(arrays['X_hist_disliked'].astype(np.int32)),
-        'X_hist_full':                      list(arrays['X_hist_full'].astype(np.int32)),
-        'X_hist_playtime_weights':          list(arrays['X_hist_playtime_weights']),
-        'X_hist_liked_playtime_weights':    list(arrays['X_hist_liked_playtime_weights']),
-        # User-side Bucket 5 aggregates (5 scalars per row, constant per user). Needed
-        # at train time for sampled random negatives — they aren't covered by the per-cand
-        # precomputed cross features above.
-        'X_user_b5':                        list(arrays['X_user_b5']),
-    })
+# Cross-feature column manifest. Each entry: (label_col_name, negs_col_name, dtype).
+# Used by _build_chunk_table to issue the 23 × {label, negs} = 46 column writes in
+# one declarative pass. Order matches compute_cross_features (dataset.py) — keep
+# in lockstep so future buckets register correctly here too.
+_CROSS_COLS = [
+    # B-0 + Bucket 1 (full slice)
+    ('tag_cosine_label',                 'tag_cosine_negs',                 pa.float32()),
+    ('genre_overlap_label',              'genre_overlap_negs',              pa.float32()),
+    ('tag_overlap_label',                'tag_overlap_negs',                pa.float32()),
+    ('dev_affinity_label',               'dev_affinity_negs',               pa.float32()),
+    # Bucket 2A (liked slice)
+    ('genre_overlap_liked_label',        'genre_overlap_liked_negs',        pa.float32()),
+    ('tag_overlap_liked_label',          'tag_overlap_liked_negs',          pa.float32()),
+    ('dev_affinity_liked_label',         'dev_affinity_liked_negs',         pa.float32()),
+    # Bucket 2B (last-3-liked window)
+    ('genre_overlap_recent3_label',      'genre_overlap_recent3_negs',      pa.float32()),
+    ('tag_overlap_recent3_label',        'tag_overlap_recent3_negs',        pa.float32()),
+    ('dev_affinity_recent3_label',       'dev_affinity_recent3_negs',       pa.float32()),
+    # Bucket 5 (numeric-match quintuple)
+    ('price_match_label',                'price_match_negs',                pa.float32()),
+    ('era_gap_label',                    'era_gap_negs',                    pa.float32()),
+    ('playtime_cal_median_label',        'playtime_cal_median_negs',        pa.float32()),
+    ('popularity_match_label',           'popularity_match_negs',           pa.float32()),
+    ('sentiment_match_label',            'sentiment_match_negs',            pa.float32()),
+    # Bucket 6 (niche feature crosses — 4 concepts × {full, liked})
+    ('tag_overlap_idf_full_label',       'tag_overlap_idf_full_negs',       pa.float32()),
+    ('tag_overlap_idf_liked_label',      'tag_overlap_idf_liked_negs',      pa.float32()),
+    ('niche_tag_match_full_label',       'niche_tag_match_full_negs',       pa.float32()),
+    ('niche_tag_match_liked_label',      'niche_tag_match_liked_negs',      pa.float32()),
+    ('max_tag_idf_match_full_label',     'max_tag_idf_match_full_negs',     pa.float32()),
+    ('max_tag_idf_match_liked_label',    'max_tag_idf_match_liked_negs',    pa.float32()),
+    ('niche_dev_match_full_label',       'niche_dev_match_full_negs',       pa.float32()),
+    ('niche_dev_match_liked_label',      'niche_dev_match_liked_negs',      pa.float32()),
+]
+
+
+def _build_chunk_table(arrays: dict, scoring: dict,
+                       row_start: int, row_end: int,
+                       n_neg: int, max_hist: int) -> pa.Table:
+    """Build a pa.Table for one chunk by zero-copy slicing arrays + scoring dicts.
+
+    Replaces the old `pd.DataFrame(...)` + `df.to_parquet()` round trip which
+    materialized a parallel pandas copy of every list-typed column and then again
+    in pyarrow's intermediate buffer during write. Direct pa.array(arr.ravel())
+    is zero-copy when dtype matches; FixedSizeListArray.from_arrays packs the
+    (n_chunk, K) layout without any further copy.
+
+    `arrays` is the FULL rollback-arrays dict (sliced via [row_start:row_end]
+    inside this fn); `scoring` is CHUNK-sized (already produced for this slice
+    by _score_candidates). This asymmetry matches how precompute() drives
+    chunked write — arrays stays alive across chunks; scoring is recreated per
+    chunk.
+    """
+    def fl(arr_2d, list_size, dtype):
+        """FixedSizeList from a 2D numpy slice; ravel() is a zero-copy view on
+        a C-contiguous slice, then pa.array() shares the buffer when dtype matches."""
+        return pa.FixedSizeListArray.from_arrays(
+            pa.array(np.ascontiguousarray(arr_2d).ravel(), type=dtype),
+            list_size,
+        )
+
+    s, e = row_start, row_end
+    cols = {
+        'user_id':              pa.array(arrays['user_id'][s:e], type=pa.string()),
+        'rollback_n':           pa.array(arrays['rollback_n'][s:e].astype(np.int32, copy=False), type=pa.int32()),
+        'label_item_idx':       pa.array(arrays['label_item_idx'][s:e].astype(np.int32, copy=False), type=pa.int32()),
+        'neg_item_idxs':        fl(scoring['neg_item_idxs'].astype(np.int32, copy=False), n_neg, pa.int32()),
+        'cg_label_rank':        pa.array(scoring['cg_label_rank'].astype(np.int32, copy=False), type=pa.int32()),
+        'cg_label_score':       pa.array(scoring['cg_label_score'], type=pa.float32()),
+        'cg_neg_scores':        fl(scoring['cg_neg_scores'], n_neg, pa.float32()),
+    }
+    for label_col, negs_col, dtype in _CROSS_COLS:
+        cols[label_col] = pa.array(scoring[label_col], type=dtype)
+        cols[negs_col]  = fl(scoring[negs_col], n_neg, dtype)
+    cols['user_avg_log_playtime']         = pa.array(arrays['user_avg_log_playtime'][s:e], type=pa.float32())
+    cols['user_interaction_count']        = pa.array(arrays['user_interaction_count'][s:e].astype(np.int32, copy=False), type=pa.int32())
+    cols['X_hist_liked']                  = fl(arrays['X_hist_liked'][s:e].astype(np.int32, copy=False), max_hist, pa.int32())
+    cols['X_hist_disliked']               = fl(arrays['X_hist_disliked'][s:e].astype(np.int32, copy=False), max_hist, pa.int32())
+    cols['X_hist_full']                   = fl(arrays['X_hist_full'][s:e].astype(np.int32, copy=False), max_hist, pa.int32())
+    cols['X_hist_playtime_weights']       = fl(arrays['X_hist_playtime_weights'][s:e], max_hist, pa.float32())
+    cols['X_hist_liked_playtime_weights'] = fl(arrays['X_hist_liked_playtime_weights'][s:e], max_hist, pa.float32())
+    cols['X_user_b5']                     = fl(arrays['X_user_b5'][s:e], 5, pa.float32())
+    return pa.table(cols)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
@@ -772,6 +945,7 @@ def precompute(checkpoint_path: str | None = None,
     val_users   = fs['val_users']
     print(f"\n  Train users: {len(train_users):,}   Val users: {len(val_users):,}")
 
+    n_neg = top_k - 1
     for split_name, users in [('train', train_users), ('val', val_users)]:
         print(f"\n── {split_name.upper()} split ──")
         # Mirror src/dataset seed convention: train uses SPLIT_SEED, val uses SPLIT_SEED + 1.
@@ -780,13 +954,43 @@ def precompute(checkpoint_path: str | None = None,
         split_shuffles = 3 if split_name == 'train' else 1
         arrays = _build_rollback_arrays(users, fs, max_per_user, seed=split_seed,
                                           n_shuffles=split_shuffles)
-        scoring = _score_candidates(model, V_all, arrays, fs, device, batch_size, top_k)
-        _verify_split(arrays, scoring['neg_item_idxs'], scoring['cg_label_rank'],
-                      fs, split_name, top_k)
-        df = _build_dataframe(arrays, scoring)
+        n_total  = arrays['X_hist_full'].shape[0]
+        max_hist = arrays['X_hist_full'].shape[1]
         out_path = os.path.join(output_dir, f'ranker_candidates_{split_name}.parquet')
-        df.to_parquet(out_path, index=False)
-        print(f"  → {out_path}  ({len(df):,} rows)")
+
+        # Streaming score + write in CHUNK_SIZE row chunks. Each chunk allocates
+        # its own ~chunk_n × ~10 KB scoring buffers (~2.5 GB at CHUNK_SIZE=250k);
+        # the full rollback arrays (~5 GB for train) stay alive across chunks for
+        # the verification pass at the end. Pre-chunking, scoring buffers held
+        # ~45 GB simultaneously and pyarrow doubled them during the write → ~100 GB
+        # peak. Now peak ~8-10 GB regardless of split size.
+        #
+        # Verification accumulators (neg_item_idxs + cg_label_rank, both small
+        # ~int32) are kept full-sized across chunks so _verify_split can run once
+        # after streaming completes — same checks as before, no protocol change.
+        neg_full  = np.zeros((n_total, n_neg), dtype=np.int32)
+        rank_full = np.zeros(n_total,          dtype=np.int32)
+
+        n_chunks = (n_total + CHUNK_SIZE - 1) // CHUNK_SIZE
+        print(f"  Streaming {n_total:,} rows in {n_chunks} chunks of up to {CHUNK_SIZE:,} → {out_path}")
+        writer = None
+        for chunk_start in range(0, n_total, CHUNK_SIZE):
+            chunk_end = min(chunk_start + CHUNK_SIZE, n_total)
+            scoring = _score_candidates(model, V_all, arrays, fs, device, batch_size, top_k,
+                                          row_start=chunk_start, row_end=chunk_end)
+            neg_full [chunk_start:chunk_end] = scoring['neg_item_idxs']
+            rank_full[chunk_start:chunk_end] = scoring['cg_label_rank']
+            table = _build_chunk_table(arrays, scoring, chunk_start, chunk_end, n_neg, max_hist)
+            if writer is None:
+                writer = pq.ParquetWriter(out_path, table.schema)
+            writer.write_table(table)
+            # Drop the chunk-sized scoring buffers + pa.Table before scoring next chunk —
+            # prompt GC ensures the next chunk's allocations don't stack on top of this one.
+            del scoring, table
+        writer.close()
+
+        _verify_split(arrays, neg_full, rank_full, fs, split_name, top_k)
+        print(f"  → {out_path}  ({n_total:,} rows)")
 
     print("\n── Game stats ──")
     compute_game_stats(fs, output_dir)

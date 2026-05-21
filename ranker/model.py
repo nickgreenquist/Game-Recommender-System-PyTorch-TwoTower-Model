@@ -85,6 +85,16 @@ class WideDeepRanker(nn.Module):
                  game_median_log_hours: torch.Tensor,  # (n_games+1,) float32 — log1p(median_hours)
                  game_log_count:        torch.Tensor,  # (n_games+1,) float32 — log1p(interaction_count)
                  game_sentiment:        torch.Tensor,  # (n_games+1,) float32 — sentiment ordinal 0-7
+                 # Bucket 6 — per-item rarity buffers for the 8 "Niche Feature Crosses".
+                 # 1 matrix + 4 scalars; consumed by `ranker.cross_features.weighted_overlap`
+                 # (the IDF overlap pair, Shape A) and `ranker.cross_features.niche_scalar_triple`
+                 # (the 3 niche scalars × 2 slices, Shape B) via the NicheBuffers bundle. Same
+                 # pad/zero-row convention as the other game_* buffers.
+                 game_tag_binary_idf:        torch.Tensor,  # (n_games+1, n_tags) float32 — tag_binary * tag_idf
+                 game_tag_count_idf:         torch.Tensor,  # (n_games+1,)        float32 — per-item sum of tag_binary_idf, clamp(min=eps)
+                 game_tag_mean_idf:          torch.Tensor,  # (n_games+1,)        float32 — mean IDF over the game's tags
+                 game_tag_max_idf:           torch.Tensor,  # (n_games+1,)        float32 — max IDF over the game's tags
+                 game_dev_log_catalog_size:  torch.Tensor,  # (n_games+1,)        float32 — log1p(# corpus games by this game's dev)
                  # Sub-tower output dims (V5 CG defaults)
                  item_id_emb_dim:        int = 32,
                  item_genre_emb_dim:     int = 8,
@@ -166,6 +176,15 @@ class WideDeepRanker(nn.Module):
         self.register_buffer('game_median_log_hours', game_median_log_hours, persistent=False)
         self.register_buffer('game_log_count',        game_log_count,        persistent=False)
         self.register_buffer('game_sentiment',        game_sentiment,        persistent=False)
+        # Bucket 6 niche/rarity buffers (5 new) — see NicheBuffers in
+        # ranker/cross_features.py for the consumer-side contract. Non-persistent for
+        # the same reason as the other game_* buffers: rebuilt from FeatureStore on
+        # load, so they never bloat `model.pth`.
+        self.register_buffer('game_tag_binary_idf',       game_tag_binary_idf,       persistent=False)
+        self.register_buffer('game_tag_count_idf',        game_tag_count_idf,        persistent=False)
+        self.register_buffer('game_tag_mean_idf',         game_tag_mean_idf,         persistent=False)
+        self.register_buffer('game_tag_max_idf',          game_tag_max_idf,          persistent=False)
+        self.register_buffer('game_dev_log_catalog_size', game_dev_log_catalog_size, persistent=False)
 
         # ── Embedding lookups (all CG-warm-startable) ───────────────────────
         self.item_id_lookup    = nn.Embedding(n_games + 1,       item_id_emb_dim,
