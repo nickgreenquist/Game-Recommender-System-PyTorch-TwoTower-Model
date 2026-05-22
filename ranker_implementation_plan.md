@@ -2,27 +2,27 @@
 
 ## Status (2026-05-21)
 
-Phase A ✓, Phase B Bucket 1 ✓, Phase B Bucket 2 ✓, Phase B Bucket 3 ✗ (dropped), Phase B Bucket 4 ✗ (dropped), Phase B Bucket 5 ✓, Phase B Bucket 6 ✓.
+Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓. Bucket 8 implemented (awaiting results); Bucket 9 (CG Score) is the last planned bucket.
 
-**A-N2** (Phase A exit, tag_cosine only): NDCG@10 0.0741 vs CG α=0 0.0752 (Δ −1.5%). Proved a Wide & Deep MLP can effectively match the CG two-tower dot product on identical features.
+Headline metric is full-val NDCG@10, each bucket measured against the previous *kept* baseline. Full tables + per-slice canary analysis live in §8; this is the scoreboard.
 
-**Bucket 1** (A-N2 + genre_overlap + tag_overlap + dev_affinity, 4 wide cross features): **NDCG@10 0.0822** vs CG α=0 0.0752 (Δ **+9.3%**) and vs A-N2 0.0741 (Δ **+10.9%**). MRR 0.0779 (+7.3% vs CG). Pure-reranking subset NDCG@10 0.1487 vs 0.1361 (+9.3%) — the lift is genuine reranking signal, not an E2E ceiling artifact. The three new categorical-overlap features together earned their seat and ranker now decisively beats the α=0 CG yardstick.
+| Bucket | Adds | NDCG@10 | Δ vs prev kept | Verdict |
+|---|---|---:|---:|---|
+| **A-N2** (Phase A exit) | tag_cosine only | 0.0741 | — (CG α=0: 0.0752) | baseline — MLP ≈ dot product |
+| **1** ✓ | genre/tag/dev overlap (full) | **0.0822** | **+10.9%** | ship — biggest single win |
+| **2** ✓ | overlap × {liked, recent-3} | **0.0828** | +0.7% | ship, barely — B1 took most of it |
+| **3** ✗ | overlap × disliked | 0.0824 | −0.5% | **drop** — disliked partition too noisy |
+| **4** ✗ | dev-catalog genre/tag overlap | 0.0827 | −0.1% | **drop** — redundant with `developer_lookup` |
+| **5** ✓ | 5 numeric-match scalars | **0.0866** | **+4.6%** | ship — uniform +4–5%, new signal class |
+| **6** ✓ | 8 niche/IDF crosses | 0.0867 | +0.1% (flat) | **ship on canary** — offline-flat, canary-better |
+| **8** | 2 engagement crosses | TBD | TBD | awaiting train/canary/eval |
+| **9** | CG score (solo, last) | — | — | not yet run |
 
-**Bucket 2** (Bucket 1 + 6 features: genre/tag/dev × {Liked, Recent-3 Liked}, 10 wide cross features total): **NDCG@10 0.0828** vs Bucket 1 0.0822 (Δ **+0.7%**). MRR 0.0784 (+0.6%). Pure-reranking NDCG@10 0.1499 vs 0.1487 (+0.8%). Direction is positive and consistent across every metric (no regressions), but magnitudes are tiny compared to Bucket 1's +10.9%. Bucket 1 already extracted most of the categorical-overlap signal from this data — Liked and Recent-3 slices add a thin layer on top. Bundle earns its seat, barely.
+**Permanently dropped signal classes** (don't re-propose in any shape — see §10 rule 9): disliked-history variants (Bucket 3); dev-catalog aggregates (Bucket 4). **Bucket 7** (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features were absorbed into Bucket 6 as proper user × item crosses (`niche_dev_match`, `max_tag_idf_match`), the third (`dev_specialization`, item-only) dropped.
 
-**Bucket 3 — DROPPED** (Bucket 2 + 3 features: genre/tag/dev × Disliked, 13 wide cross features total): **NDCG@10 0.0824** vs Bucket 2 0.0828 (Δ **−0.5%**), MRR 0.0781 vs 0.0784 (−0.4%), pure-reranking NDCG@10 0.1492 vs 0.1499 (−0.5%). Regressed on every headline metric vs Bucket 2 and essentially tied with Bucket 1 (+0.2% / +0.3%). The 3 disliked columns took capacity away from the existing 10 and contributed no usable signal. Root cause: Steam's "disliked" partition is too noisy to earn its columns — the `recommend==False` signal is sparse (most users don't review), the `0.1 < hours < 1.0` heuristic captures "tried it, didn't stick" which is ambiguous, and `hours ≤ user_rolling_median / 2` flags below-average games which for heavy players can include genuine favorites. Reverted in code; disliked variants are now dropped from later buckets (e.g. Bucket 4's deliberate exclusion stays permanent).
+**Ranker is not yet wired into serving.** Streamlit runs CG-only retrieval; integration (load both checkpoints, shared user-side feature engineering, two-stage scoring) is the post-roadmap step — the real remaining work once Bucket 9 lands.
 
-**Bucket 4 — DROPPED** (Bucket 2 + 6 features: genre/tag × {full, liked, recent-3} on per-developer averaged genre/tag vectors, 16 wide cross features total): **NDCG@10 0.0827** vs Bucket 2 0.0828 (Δ **−0.1%**), MRR 0.0785 vs 0.0784 (+0.1%), pure-rerank NDCG@10 0.1496 vs 0.1499 (−0.2%). Mixed-sign micro-deltas, regressions on the two headline NDCG metrics. Two independent training runs (same seed) reproduced the flat pattern — not seed variance. Root cause: the deep tower's `developer_lookup` already encodes studio identity end-to-end via warm-start; averaging genre/tag vectors per developer and inner-producting against the candidate adds no signal the dev embedding wasn't already representing implicitly. 6 columns of capacity displacement, ~0 net lift. Reverted in code; the dev-catalog signal class is permanently dropped (see §10 — don't retry in a different shape).
-
-**Bucket 5** (Bucket 2 + 5 numeric-match scalars: price / era / playtime-cal-median / popularity / sentiment, 15 wide cross features total): **NDCG@10 0.0866** vs Bucket 2 0.0828 (Δ **+4.6%**). MRR 0.0814 (+3.8%). Pure-reranking NDCG@10 0.1567 vs 0.1499 (+4.5%). **Uniform +4–5% lift across every headline metric** in both E2E and pure-rerank views — first bucket since Bucket 1 to deliver meaningful lift on top of the prior baseline. Hit@50 E2E jumped +0.0138 where Bucket 2 had flattened (+0.0030 vs CG), showing the numeric-match features are surfacing real targets that pure overlap couldn't. Canary quality holds or improves on every user type (JRPG, Racing, Survival, Management materially cleaner than CG; no catastrophic regressions on niche tastes). First bucket to use the Z-score normalization infrastructure (persistent `wide_norm_mean` / `wide_norm_std` buffers populated once at training start from train-parquet stats). Reset the next-bucket baseline.
-
-**Bucket 6** (Bucket 5 + 8 niche feature crosses: 4 concepts × {full, liked}, 23 wide cross features total): **NDCG@10 0.0867** vs Bucket 5 0.0866 (Δ **+0.1%**). Offline metrics are flat at the noise floor — every E2E and pure-rerank delta sits in ±0.001 across K∈{1, 5, 10, 20, 50}, both signs scattered. **Canary tells a different story:** Fighting Lover ranker top-10 drops all 3 Final Fantasy / Tales JRPGs that B5 was surfacing (FF Type-0, FF VIII, Tales of Symphonia) and replaces them with METAL SLUG, METAL SLUG X, UNDER NIGHT IN-BIRTH, Naruto Storm 4 — proper fighters/arcade. Civ Lover promotes Galactic Civ III (anchor sibling) #3 → #1 and brings Master of Orion + Victoria II up. Western RPG, FPS show smaller niche-coherence improvements. **Kept on canary alone** — offline-flat-but-canary-better is the inverse of Bucket 4 ✗ (flat-everywhere) and falls under the V5 PROD vs V5 α=0 precedent: canary quality on niche tastes is what users notice. Inference cost: negligible (~120k extra FLOPs/query, sub-millisecond on MPS — see §8 Bucket 6 entry). Bucket 7 (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features absorbed here as `niche_dev_match` and `max_tag_idf_match`.
-
-**Bucket 7 (Item-Intrinsic Priors) dropped in planning (2026-05-20)** — 2 of its 3 features (`dev_catalog_size`, `candidate_max_tag_idf`) absorbed into Bucket 6 as proper user × item scalar crosses (`niche_dev_match`, `max_tag_idf_match`), which is the correct shape for the linear wide head. The remaining feature (`dev_specialization`) is the only one without an obvious user-side analog and isn't worth a bucket on its own. Could return later in a different shape (e.g. `|user_genre_specialization − item_dev_specialization|`) if downstream buckets disappoint.
-
-**Ranker is not yet wired into serving.** Streamlit currently runs CG-only retrieval; integrating the ranker requires non-trivial app work (load both checkpoints, shared feature engineering for the user-side cross feature inputs, two-stage scoring pipeline). Deliberately deferred — Phase B keeps focus on offline lift until the bucket roadmap saturates.
-
-> **Terminology note:** earlier drafts called these "pools." That's wrong — "pool" in this codebase means an embedding aggregation (the deep tower's `pool_liked` / `pool_disliked` / `pool_full` / `pool_playtime`, which sum item embeddings). The cross features compute weighted overlap and categorical affinity *directly over the history arrays* — no embedding aggregation happens. The code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
+> **Terminology:** "pool" means an embedding aggregation (the deep tower's `pool_liked/disliked/full/playtime`). Cross features compute weighted overlap / categorical affinity *directly over the history arrays* — no embedding aggregation. Code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
 
 ---
 
@@ -127,29 +127,7 @@ Head:      Linear(128 + |wide| → 1) → raw logit
 Score:     logit / temperature(=0.1)  — applied before softmax CE, matches CG
 ```
 
-### Tower architectures
-
-CG mixes 1-layer and 2-layer towers; use the matching shape so warm-start copies the full state.
-
-**2-layer towers:**
-
-| Tower | Architecture |
-|---|---|
-| `item_tag_tower` | `Linear(n_tags → 128) → ReLU → Linear(128 → 32) → ReLU` |
-| `user_tag_tower` | `Linear(n_tags → 256) → ReLU → Linear(256 → 32) → ReLU` |
-| `user_genre_tower` | `Linear(2*n_genres → 128) → ReLU → Linear(128 → 32) → ReLU` |
-
-**1-layer towers (`Linear → ReLU`):**
-
-| Tower | Architecture |
-|---|---|
-| `item_id_tower` | `Linear(32 → 32) → ReLU` |
-| `item_genre_tower` | `Linear(n_genres → 8) → ReLU` |
-| `developer_tower` | `Linear(12 → 12) → ReLU` |
-| `year_tower` | `Linear(8 → 8) → ReLU` |
-| `price_tower` | `Linear(4 → 4) → ReLU` |
-
-Every lookup-fronted feature (id, dev, year, price) is `Embedding → Linear+ReLU` as two separate `nn.Module`s, not a fused Embedding. That's how CG names them and what the warm-start map below copies.
+Tower shapes are listed inline in the deep-concat layout above (2-layer: item_tag / user_tag / user_genre; 1-layer: item_id / item_genre / developer / year / price). Every lookup-fronted feature (id, dev, year, price) is `Embedding → Linear+ReLU` as two separate `nn.Module`s, not a fused Embedding — that's how CG names them, which the warm-start map relies on.
 
 ### Implementation invariants
 
@@ -165,38 +143,7 @@ Every lookup-fronted feature (id, dev, year, price) is `Embedding → Linear+ReL
 
 ### Warm-start mapping (init from v5 CG state_dict)
 
-> **Default ON** (`get_config()['warm_start'] = True`). A from-scratch ablation produced materially worse NDCG — the deep MLP needs CG's content-tower head start.
-
-26 tensor transfers expected (4 lookups × 1 + 5 one-layer towers × 2 + 3 two-layer towers × 4). Anything short means a shape drift or key mismatch.
-
-**Lookups:**
-
-| CG key | Ranker key |
-|---|---|
-| `item_embedding_lookup.weight` | `item_id_lookup.weight` |
-| `developer_embedding_lookup.weight` | `developer_lookup.weight` |
-| `year_embedding_lookup.weight` | `year_lookup.weight` |
-| `price_embedding_lookup.weight` | `price_lookup.weight` |
-
-**1-layer towers:**
-
-| CG keys | Ranker keys |
-|---|---|
-| `item_embedding_tower.0.{w,b}` | `item_id_tower.0.{w,b}` |
-| `item_genre_tower.0.{w,b}` | `item_genre_tower.0.{w,b}` |
-| `developer_tower.0.{w,b}` | `developer_tower.0.{w,b}` |
-| `year_embedding_tower.0.{w,b}` | `year_tower.0.{w,b}` |
-| `price_embedding_tower.0.{w,b}` | `price_tower.0.{w,b}` |
-
-**2-layer towers (copy both Linears):**
-
-| CG keys | Ranker keys |
-|---|---|
-| `item_tag_tower.{0,2}.{w,b}` | `item_tag_tower.{0,2}.{w,b}` |
-| `user_tag_tower.{0,2}.{w,b}` | `user_tag_tower.{0,2}.{w,b}` |
-| `user_genre_tower.{0,2}.{w,b}` | `user_genre_tower.{0,2}.{w,b}` |
-
-**Not transferred:** Deep MLP, head, cross-feature weights (random init — no CG counterpart); `user_projection.*` / `item_projection.*` (the ranker has no projection MLP, the deep MLP takes its place); all buffers (built fresh from FeatureStore).
+**Default ON** (`get_config()['warm_start'] = True`). A from-scratch ablation produced materially worse NDCG — the deep MLP needs CG's content-tower head start. The full CG→ranker key map lives in `train._CG_TO_RANKER_KEY_MAP`: 26 tensor transfers (4 lookups + 5 one-layer towers × 2 + 3 two-layer towers × 4); anything short means shape drift or key mismatch. **Not transferred:** deep MLP, head, cross-feature weights (random init — no CG counterpart); `user_projection.*` / `item_projection.*` (ranker has no projection MLP); all buffers (rebuilt from FeatureStore).
 
 ---
 
@@ -510,263 +457,73 @@ The 4 niche concepts target exactly the failure mode the Fighting slice exhibite
 
 ## 9. Cross-Feature Roadmap (Phase B)
 
-Features are grouped into **buckets** that share a semantic theme. Each bucket is one training experiment, measured against the previous Phase B baseline (or A-N2 for the first). Bundle-level NDCG is the verdict; per-feature attribution is only done as a drop-one diagnostic if a bucket disappoints (see §10 rule 1).
+Cross features are grouped into **buckets** that share a semantic theme. Each bucket is one training experiment, measured against the previous *kept* baseline; bundle-level NDCG is the verdict, with drop-one attribution only as a diagnostic when a bucket disappoints (§10 rule 1). All cross features sit on the **wide bypass** — one column in `head.weight` with a direct gradient path, *not* concatenated into the deep MLP (where a single scalar would drown in ~290 dims).
 
-All Phase B cross features sit on the **wide bypass** — each feature is one column in `head.weight` with a direct gradient path, *not* concatenated into the deep MLP (which would drown a single scalar in ~290 dims).
+**Landed/dropped bucket designs (1–6) are realized in `ranker/cross_features.py` + the precompute/train/canary call sites — code is the source of truth.** Outcomes, eval tables, and drop/pass reasoning live in §8. The scoreboard is in the Status section. This section keeps only the canonical column ordering + the not-yet-run bucket designs (8, 9) + cross-cutting reference (normalization, removed ideas, future phases).
 
-### B-0 (in A-N2) — Tag Cosine
-
-| Feature | Formula |
-|---|---|
-| **Tag Cosine** | precomputed: `cosine(user_tag_pool_tfidf, item_tag_vec)` — direction match on the user's full tag profile vs candidate. Magnitude-blind. |
-
-### Buckets 1–2 (landed): Categorical-overlap history variants
-
-The same three categorical-overlap features (genre_overlap, tag_overlap, dev_affinity) computed over **three different slices of the user's interaction history**, grouped into two buckets. All slices reuse `ranker/cross_features.py`'s `weighted_overlap` and `dev_affinity` utils — only `history_indices` and `history_weights` change. There is no pooling here (no embedding aggregation): the utils index per-item categorical buffers directly and reduce by playtime weights to one scalar per (history slice, candidate) pair.
-
-Bucket 2 rolls **Liked** and **Recent-3 Liked** into a single training run (6 features). Each bucket independently answers "does this history-variant family add signal on top of the previous baseline?"
-
-**Bucket 3 (Disliked) and Bucket 4 (Developer Catalog Signals) were both tried and dropped** — see dedicated ✗ sections below for eval tables and root causes. Bucket 4's drop is the second consecutive "more user × item categorical overlap" bucket to flatten, recalibrating downstream expectations away from this signal class.
-
-**Bucket 5 ✓ (Numeric Matching) broke the flat streak** — 5 scalar-arithmetic cross features (price / era / playtime-calibration-median / popularity / sentiment match) landed with a uniform +4–5% lift across every headline metric vs Bucket 2 (see §8 Bucket 5 entry for the table). Lesson: when an overlap-style bucket flattens, the next bucket should be a different signal class entirely, not a re-shaping of the same signal.
-
-**Bucket 6 ✓ (Niche Feature Crosses) landed offline-flat but canary-better** — 8 user × item cross features (4 niche concepts × {full, liked}) landed at NDCG@10 0.0867 vs Bucket 5's 0.0866 (deltas in ±0.001 noise band on every metric), but the canary side-by-side shows clear per-slice improvements (Fighting Lover JRPG bleed eliminated, Civ Lover Galactic Civ III promoted to #1, smaller niche-coherence wins on Western RPG and FPS). Kept on canary alone — see §8 Bucket 6 entry for the full table and per-slice canary analysis. **Bucket 8 (Engagement-Level Cross)** is the remaining user × item cross feature in the roadmap and runs next. Bucket 8 is the least-confident of the original Phase B roadmap (the deep MLP may already capture engagement signal via dev/genre embeddings + user_avg_log).
-
-**Bucket 7 (Item-Intrinsic Priors) dropped in planning (2026-05-20).** Two of its three features (`dev_catalog_size`, `candidate_max_tag_idf`) absorbed into Bucket 6 as user × item scalar crosses (`niche_dev_match`, `max_tag_idf_match`) — the correct shape for the linear wide head, which can't extract modulation from item-only inputs. The remaining feature (`dev_specialization`) is the only item-only scalar without an obvious user-side analog and isn't worth a bucket on its own.
-
-Naming convention for the cross-feature column slots (must stay stable across checkpoints — see `dataset.compute_cross_features` ordering):
+### Column slots (stable across checkpoints — see `dataset.compute_cross_features`)
 
 ```
-col 0   : tag_cosine                          (B-0,  Phase A)
-col 1   : genre_overlap_full                  (B-1,  Bucket 1 ✓)
-col 2   : tag_overlap_full                    (B-1b, Bucket 1 ✓)
-col 3   : dev_affinity_full                   (B-2,  Bucket 1 ✓)
-col 4   : genre_overlap_liked                 (Bucket 2 ✓)
-col 5   : tag_overlap_liked                   (Bucket 2 ✓)
-col 6   : dev_affinity_liked                  (Bucket 2 ✓)
-col 7   : genre_overlap_recent3               (Bucket 2 ✓)
-col 8   : tag_overlap_recent3                 (Bucket 2 ✓)
-col 9   : dev_affinity_recent3                (Bucket 2 ✓)
-col 10  : price_match                         (Bucket 5)
-col 11  : era_gap                             (Bucket 5)
-col 12  : playtime_calibration_median         (Bucket 5)
-col 13  : popularity_match                    (Bucket 5)
-col 14  : sentiment_match                     (Bucket 5)
-col 15  : tag_overlap_idf_full                (Bucket 6)
-col 16  : tag_overlap_idf_liked               (Bucket 6)
-col 17  : niche_tag_match_full                (Bucket 6)
-col 18  : niche_tag_match_liked               (Bucket 6)
-col 19  : max_tag_idf_match_full              (Bucket 6)
-col 20  : max_tag_idf_match_liked             (Bucket 6)
-col 21  : niche_dev_match_full                (Bucket 6)
-col 22  : niche_dev_match_liked               (Bucket 6)
+col 0   : tag_cosine                          (Phase A — cosine(user_tag_pool_tfidf, item_tag_vec))
+col 1-3 : genre/tag/dev overlap, FULL slice   (Bucket 1 ✓)
+col 4-6 : genre/tag/dev overlap, LIKED slice  (Bucket 2 ✓)
+col 7-9 : genre/tag/dev overlap, RECENT-3     (Bucket 2 ✓)
+col 10  : price_match                         (Bucket 5 ✓)
+col 11  : era_gap                             (Bucket 5 ✓)
+col 12  : playtime_calibration_median         (Bucket 5 ✓, signed)
+col 13  : popularity_match                    (Bucket 5 ✓)
+col 14  : sentiment_match                     (Bucket 5 ✓)
+col 15-16: tag_overlap_idf, full/liked        (Bucket 6 ✓)
+col 17-18: niche_tag_match, full/liked        (Bucket 6 ✓)
+col 19-20: max_tag_idf_match, full/liked      (Bucket 6 ✓)
+col 21-22: niche_dev_match, full/liked        (Bucket 6 ✓)
 col 23  : user_dev_engagement_cross           (Bucket 8)
 col 24  : user_genre_engagement_cross         (Bucket 8)
-col 25  : cg_score                            (Bucket 9, kept solo — was Bucket 6 in earlier drafts)
+col 25  : cg_score                            (Bucket 9, kept solo, last)
 ```
-(Bucket 3's columns 10-12 were the disliked-slice triple; that bucket was dropped — see Bucket 3 ✗ section. Bucket 4 then took cols 10-15 for the dev-catalog triple-times-two and also dropped — see Bucket 4 ✗ section. Bucket 5 onward reclaims the slots in roadmap order. Bucket 7 was dropped in planning 2026-05-20: its 3 features `dev_specialization` / `dev_catalog_size` / `candidate_max_tag_idf` were item-only (not real crosses); 2 of those 3 were absorbed into Bucket 6 as proper user × item scalar crosses (`niche_dev_match`, `max_tag_idf_match`) on both full and liked slices, and the third (`dev_specialization`) was dropped as not worth a slot on its own. Bucket 6 grew from 2 features to 8 (4 niche concepts × 2 slices) as a result, shifting Buckets 8 and 9 to cols 23-25. Bucket 9 CG Score is held to the end of the roadmap per Discipline Rule 3.)
-
-**Bucket 5 design note:** Bucket 5 is the first bucket whose features are *scalar arithmetic* on numeric user/item stats rather than weighted reductions over categorical buffers. Five Z-scored differences land in cols 10-14 (see Bucket 5 detail section). Mean-playtime calibration was considered alongside median-playtime calibration but rejected — the two scalars are heavily correlated (Pearson ≥ 0.85 on Steam's whale-heavy distribution), and the head can't extract independent signal from colinear wide-bypass columns. Median is the right stat for Steam's distribution (whale-distorted means mislead on "typical engagement"), so median wins; mean is dropped permanently.
-
-#### Bucket 1 ✓ — Full History (2026-05-18)
-
-History: `X_hist_full`, weighted by `X_hist_playtime_weights`. **Outcome:** NDCG@10 0.0741 → 0.0822 (+10.9% vs A-N2). See §8 Phase Log for the full metric table.
-
-| # | Feature | Formula |
-|---|---|---|
-| B-1 | **Genre Overlap (Full)** | `(user_genre_w · item_genre_binary) / item_genre_count` — mean over the candidate's genres of "user's playtime fraction in that genre." [0, 1]. Buffers: `game_genre_binary`, `game_genre_count`. |
-| B-1b | **Tag Overlap (Full)** | `(user_tag_w · item_tag_binary) / item_tag_count` — same structure as B-1 but on tags. **Magnitude-aware and complementary to B-0 Tag Cosine** (cosine is direction-only; overlap is "average user weight on candidate's tags"). Buffers: `game_tag_binary`, `game_tag_count`. |
-| B-2 | **Developer Affinity (Full)** | `playtime-weighted fraction of user's history under this developer` (i.e. `Σ_i h_pw[i] · 1[hist_dev[i] == item_dev]`). Captures studio loyalty (FromSoftware, Larian, Paradox) — categorical membership CG can't do. |
-
-#### Bucket 2 ✓ — Liked + Recent-3 Liked (2026-05-19)
-
-Six new features in one training run: Bucket 1's three categorical-overlap features computed over two slices of the user's liked-only history. **Outcome:** NDCG@10 0.0822 → 0.0828 (+0.7% vs Bucket 1). Direction-consistent across every metric but small magnitude; see §8 Phase Log Bucket 2 entry for the full metric table and honest read.
-
-**Slice A — Liked (full):** `history_indices=X_hist_liked`, `history_weights=X_hist_liked_playtime_weights` (**new precompute column**, parallel to `X_hist_liked`, MAX_HISTORY_LEN, looking up each liked entry's playtime weight from the full-history computation). Filters out games the user disliked or barely touched, so the user-side weight vector reflects only genuine positive preferences.
-
-**Slice B — Recent-3 Liked:** last 3 non-pad positions of `X_hist_liked` with playtime weights re-normalized to sum to 1 over those 3. Captures recency drift on positive-signal context — "what has the user been *enjoying* lately" — sharper than the full-liked slice. Steam has no timestamps, so "last" = the last 3 entries in `X_hist_liked` (filled in shuffled-prefix order, seeded so consistent across runs). If a user has fewer than 3 liked games in the context, use however many exist; if 0, the recent-3 features fall through to 0 and the model relies on the liked-full slice.
-
-Both slices reuse the `X_hist_liked_playtime_weights` precompute column — landed once, two consumers.
-
-**Hypothesis:** sharper signal-to-noise on the liked-only side should improve discrimination, especially for users with bimodal libraries (e.g. plays both AAA and indie — full-history dev_affinity gets smeared across both, liked-history concentrates on the studios they *kept* playing). Recent-3 layered on top should pick up taste drift the full-liked slice averages out. Measured against Bucket 1.
-
-| # | Feature | Formula |
-|---|---|---|
-| B-3a | **Genre Overlap (Liked)** | Same as B-1, history restricted to liked games. |
-| B-3b | **Tag Overlap (Liked)** | Same as B-1b, history restricted to liked games. |
-| B-3c | **Developer Affinity (Liked)** | Same as B-2, history restricted to liked games. |
-| B-4a | **Genre Overlap (Recent-3)** | Same as B-1, history = last 3 non-pad of `X_hist_liked` with weights re-normalized. |
-| B-4b | **Tag Overlap (Recent-3)** | Same as B-1b, last 3 liked. |
-| B-4c | **Developer Affinity (Recent-3)** | Same as B-2, last 3 liked. "Are you currently on a studio kick?" |
-
-#### Bucket 3 ✗ — Disliked History (DROPPED 2026-05-19)
-
-**Tried with playtime-weight option (a) and dropped.** Three categorical-overlap features on `X_hist_disliked` (genre/tag/dev affinity, B-5a/b/c), with a new `X_hist_disliked_playtime_weights` precompute column. Hypothesis was that the wide head would learn negative weights ("high overlap with dislikes → lower score") and add real signal if user dislikes are coherent.
-
-**Outcome:** regressed vs Bucket 2 on every headline metric (NDCG@10 −0.5%, MRR −0.4%, pure-rerank NDCG@10 −0.5%); essentially tied with Bucket 1. See §8 Bucket 3 ✗ DROPPED entry for the full metric table and root-cause analysis.
-
-**Why it failed:** Steam's "disliked" partition is too noisy to earn its columns. The partition rule `recommend==False  OR  0.1 < hours < 1.0  OR  hours <= user_rolling_median / 2` mixes true dislikes with noise — `recommend` is sparse on Steam, the hours-band heuristic captures ambiguous "tried it didn't stick" behavior, and the relative-to-median rule flags below-average games which for heavy players can include genuine favorites. Three noisy features can't help and slightly displace the signal carried by the 10 Bucket 2 features.
-
-**Permanent decision:** disliked-history variants stay out of future buckets. Bucket 4's deliberate exclusion of disliked dev-catalog signals becomes the rule, not the exception. Open weighting options (a/b/c) are no longer worth pursuing — the noise lives in the partition rule itself, not in the weighting.
-
-#### Bucket 4 ✗ — Developer Catalog Signals (DROPPED 2026-05-19)
-
-**Tried and dropped.** Six categorical-overlap features mirroring Bucket 2's slice structure but with per-item buffers swapped from `game_genre_binary` / `game_tag_binary` to **developer-catalog-averaged** versions: `game_dev_genre_avg[item, g]` = fraction of the dev's catalog carrying genre g (and similarly for tags). Two new per-item buffers (genre + tag) × three history slices (full / liked / recent-3 liked) = 6 wide-head columns (cols 10-15 in the trial). Hypothesis was that existing `dev_affinity` is *identity-match* ("user has playtime on this exact studio") and dev-catalog overlap would add *similarity-match* ("user likes studios that make games *like* this one's studio"), helping especially for sparse-tag candidates and unseen-but-similar studios.
-
-**Outcome:** flat-to-negative vs Bucket 2 on every headline metric, two independent training runs reproducing the same pattern (NDCG@10 −0.1%, MRR +0.1%, pure-rerank NDCG@10 −0.2%). See §8 Bucket 4 ✗ DROPPED entry for the full metric table and root-cause analysis.
-
-**Why it failed:** the deep tower's `developer_lookup` (12-dim embedding per developer, warm-started from CG, trained jointly with the deep MLP) already encodes whatever catalog-level signal exists — because two games by the same studio share an embedding, the head can already condition on "studio X tends to make Z-like games." Hand-crafting a per-dev average of `game_genre_binary` / `game_tag_binary` and dotting it against the user's history doesn't add an independent axis; it duplicates a signal the deep path already carries. 6 wide columns of capacity displacement, ~0 net lift.
-
-**Permanent decision:** the dev-catalog signal class is dropped from future buckets entirely. Don't retry in a different shape (publisher-catalog, tag-tfidf-weighted dev catalog, dev embedding cosine cross feature, etc.) — the structural reason is that `developer_lookup` in the deep tower already encodes studio identity, and any hand-crafted per-dev aggregate of content features will be approximately redundant with what the deep path learns end-to-end. If a future bucket wants more dev-side signal, the lever is on the deep tower (richer dev features inside the deep concat), not a wide-bypass cross feature.
-
-### Bucket 5 ✓ — Numeric Matching (2026-05-20)
-
-**Outcome:** NDCG@10 0.0828 → **0.0866** (+4.6% vs Bucket 2). Uniform +4–5% across every headline metric in both E2E and pure-rerank views, plus clean canary quality on all 9 user types. See §8 Bucket 5 entry for the full metric table. Resets the Phase B baseline; Bucket 6 measures against this.
-
-Five scalar-arithmetic differences on user-vs-item numeric stats. All require Z-score normalization with fixed train-set mean/std stored as persistent buffers on the model (see "Wide-feature normalization" below) — the raw scalars have wildly different scales (price 0-8, year ~2000s, log-count up to ~8, sentiment 0-7, log-playtime 0-7) so one feature would dominate the head gradient without normalization. First bucket to require this infrastructure; subsequent Buckets 6-8 reuse the same Z-score buffer pattern.
-
-| # | Feature | Formula | Sign |
-|---|---|---|---|
-| B-7a | **Price Match** | `abs(user_mean_price_bucket - item_price_bucket)` — F2P / indie / AAA buyer segments. | abs |
-| B-7b | **Era Gap** | `abs(user_mean_year_numeric - item_year_numeric)` — new release vs retro preference. | abs |
-| B-7c | **Playtime Calibration (Median)** | `user_median_log_playtime - item_median_log_hours` — heavy-session vs short-session compatibility. Median (not mean) because Steam playtime is whale-heavy and means are systematically distorted by long-tail outliers. | **signed** |
-| B-7d | **Popularity Match** | `abs(user_mean_log_count - item_log_count)` — user preference for popular vs obscure. | abs |
-| B-7e | **Sentiment Match** | `abs(user_mean_sentiment - item_sentiment_ordinal)` — sentiment ordinal 0-7 (Overwhelmingly Negative → Overwhelmingly Positive). Captures "quality bar" preference (user who plays only Very Positive+ vs user who plays Mixed cult curios). | abs |
-
-**Signed vs abs:** Playtime Calibration is signed so the head can learn asymmetric weights for "user heavier than this candidate's typical" vs "user lighter than this candidate's typical." The other four are symmetric — mismatch in either direction is roughly equivalent at population level.
-
-**Per-game item-side buffers (NEW for Bucket 5)** — registered non-persistent on the ranker, rebuilt from FeatureStore on load. Each shaped `(n_items+1,)` float32 with pad row appended (pad value = 0; never indexed since `cand_idx` stays in `[0, n_items)`):
-- `game_year_numeric` — release year as float (e.g. `2018.0`); unknown → corpus median year.
-- `game_median_log_hours` — `log1p(median_hours)`; existing `game_median_hours` already in FeatureStore, just log-transformed.
-- `game_log_count` — `log1p(interaction_count)`; same `game_interaction_counts` already in FeatureStore.
-- `game_sentiment` — sentiment ordinal as float (0-7); unknown → 3.0 ("Mixed", roughly corpus median).
-
-(`game_price_idx` already on the model as int64 for the Embedding lookup — cast to float at use time in the cross-feature compute, no new buffer needed.)
-
-**Per-user scalar aggregates (NEW for Bucket 5)** — five floats per user added to FeatureStore as dicts keyed by `user_id`. Each is a single-pass aggregation over the user's full history (not the rollback prefix — consistent with existing `user_avg_log_playtime`, the only other per-user scalar passed into the model):
-- `user_mean_price_bucket`, `user_mean_year_numeric`, `user_mean_sentiment`, `user_mean_log_count` — straightforward means over `game_X[i]` for `i in user_history`.
-- `user_median_log_playtime` — median of `log1p(hours[i])` for `i in user_history`.
-
-**Cross-feature compute** — single new util `numeric_match_quintuple` in `ranker/cross_features.py`. Takes `(Bucket5GameBuffers, user_b5_scalars (B, 5), cand_idx (B, n_cand))`, returns the 5 features each shaped `(B, n_cand)`. Used by precompute (CPU, on-device tensors built locally), train (model's registered buffers), and canary (model's buffers + synthetic-user-side scalars built per `_build_synthetic_user_inputs`). Bit-exact identity across all 3 call sites by construction.
-
-**Implementation cost:** 4 new per-game buffers (~22 KB total — 5,438 × 4 floats × 4 buffers); 5 new per-user dicts (~3.5 MB — 88,310 users × 5 floats × 8 bytes for the dict overhead); 10 new parquet columns (5 features × {label, negs} per row, ~10 GB on the train parquet); 2 new persistent Z-score model buffers (40 bytes — `wide_norm_mean(5,)` + `wide_norm_std(5,)`); 5 lines of subtract-and-abs in cross-feature compute; 1 new helper for populating the Z-score buffers on training start (single pass over train parquet, ~5-10 sec one-time).
-
-### Bucket 6 ✓ — Niche Feature Crosses (2026-05-21)
-
-**Outcome:** offline-flat (every E2E and pure-rerank delta in ±0.001 noise band vs Bucket 5), but canary-better on niche tastes — Fighting Lover JRPG bleed eliminated, Civ Lover Galactic Civ III sibling promoted to #1, smaller niche-coherence wins on Western RPG / FPS. Kept on canary alone. See §8 Bucket 6 entry for the full metric table and per-slice canary analysis. Implementation details below are the design as shipped.
-
-Eight user × item cross features, structured as **4 niche/rarity concepts × 2 history slices** (`X_hist_full` and `X_hist_liked` with their respective playtime-weight columns). Each concept measures a different facet of "how well does this user's niche/rarity taste match this candidate's niche/rarity profile?" — and computing on both slices mirrors Bucket 6's existing IDF-overlap pattern (Bucket 2 already established the full/liked structure for categorical-overlap features).
-
-**The 4 concepts:**
-
-| Concept | Shape | What it measures |
-|---|---|---|
-| **IDF Tag Overlap** | A (overlap) | Bucket 1's `tag_overlap` reweighted by tag IDF — "Roguelike" weighted higher than "Action." Magnitude-aware AND rarity-weighted; the missing axis between B-0 (direction-only cosine) and B-1b (magnitude-aware rarity-blind). |
-| **Niche Tag Match** | B (scalar) | `|user_mean_tag_idf − item_mean_tag_idf|` — aggregate tag-rarity match. User who plays mostly-niche-tag games matches a candidate with mostly-niche tags. |
-| **Max Tag IDF Match** | B (scalar) | `|user_max_tag_idf − item_max_tag_idf|` — sharpest-tag match. Picks out users with at least one rare-tag preference vs candidates that carry at least one rare tag. |
-| **Niche Dev Match** | B (scalar) | `|user_mean_log_dev_catalog_size − log(item_dev_catalog_size)|` — heavy small-dev/indie user matches small-dev candidate. Absorbs the would-be Bucket 7 `dev_catalog_size` as a proper user × item cross. |
-
-**All 8 features (4 concepts × {full, liked}):**
-
-| # | Feature | History slice | User-side aggregate |
-|---|---|---|---|
-| B-9a | **Tag Overlap (IDF, Full)**     | `X_hist_full`,  `X_hist_playtime_weights`        | `Σ user_tag_w[t] · game_tag_binary_idf[cand, t]` |
-| B-9b | **Tag Overlap (IDF, Liked)**    | `X_hist_liked`, `X_hist_liked_playtime_weights` | same, liked slice |
-| B-9c | **Niche Tag Match (Full)**      | `X_hist_full`                                    | `Σ_i h_pw[i] · game_tag_mean_idf[hist[i]]` |
-| B-9d | **Niche Tag Match (Liked)**     | `X_hist_liked`                                   | same, liked slice |
-| B-9e | **Max Tag IDF Match (Full)**    | `X_hist_full`                                    | `max_i (h_pw[i] · game_tag_max_idf[hist[i]])`  *(weighted max)* |
-| B-9f | **Max Tag IDF Match (Liked)**   | `X_hist_liked`                                   | same, liked slice |
-| B-9g | **Niche Dev Match (Full)**      | `X_hist_full`                                    | `Σ_i h_pw[i] · game_dev_log_catalog_size[hist[i]]` |
-| B-9h | **Niche Dev Match (Liked)**     | `X_hist_liked`                                   | same, liked slice |
-
-**Per-item buffers (NEW):**
-- `game_tag_binary_idf` shape `(n_items+1, n_tags)` float32 — for Shape A overlap (B-9a/b). `game_tag_binary * tag_idf[None, :]`.
-- `game_tag_mean_idf` shape `(n_items+1,)` float32 — mean IDF of the item's tags (used as item-side scalar for B-9c/d, AND looked up per history item for the user-side weighted mean).
-- `game_tag_max_idf` shape `(n_items+1,)` float32 — max IDF of the item's tags (B-9e/f).
-- `game_dev_log_catalog_size` shape `(n_items+1,)` float32 — `log1p(# corpus games by this game's dev)` (B-9g/h).
-
-**Tag IDF source:** `tag_idf` already computed in `features.py` for TF-IDF. No new IDF computation needed — just gather the per-tag IDF values into the four new per-game buffers at preprocess time.
-
-**Per-user values:** None new. Each user-side aggregate is computed on the fly per rollback example by indexing the per-item buffers with the slice's history indices (`X_hist_full` or `X_hist_liked`) and reducing by the slice's playtime weights — same pattern as `weighted_overlap` and `dev_affinity`. No FeatureStore changes for Bucket 6's user side; everything flows from the rollback history arrays already passed into the cross-feature compute.
-
-**Cross-feature compute:** Two new utils in `ranker/cross_features.py` reusing the Bucket 1 pattern:
-- `weighted_overlap_idf(buffers, hist_indices, hist_weights, cand_idx)` — same shape as `weighted_overlap`, just uses the IDF-weighted tag buffer (B-9a/b).
-- `niche_scalar_triple(buffers, hist_indices, hist_weights, cand_idx)` — returns 3 scalars per (slice, candidate): niche_tag_match, max_tag_idf_match, niche_dev_match. Called once per slice (full + liked) → 6 features.
-
-Both utils take a `NicheBuffers` NamedTuple (`game_tag_binary_idf`, `game_tag_mean_idf`, `game_tag_max_idf`, `game_dev_log_catalog_size`) and are reused by precompute, train, and canary — bit-exact identity by construction (same pattern as Bucket 5's `numeric_match_quintuple`).
-
-**Hypothesis:** complementary to B-0 (direction-only) and B-1b / B-3b (magnitude-aware, rarity-blind). 4 concepts × 2 slices gives the head 8 levers on the niche-match axis. Bucket 1's tag features were the biggest single Phase B win — adding IDF reweighting on top of them plus 3 aggregate-rarity scalars is the highest-confidence next bucket. Pattern A (per-context full/liked) chosen over Pattern B (static per-user) because niche-ness is plausibly context-dependent (user might normally play Action but be currently on a Roguelike kick — full-history niche differs from liked-history niche).
-
-**Implementation cost:** 4 new per-game buffers; 16 new parquet columns (8 features × {label, negs} per row, ~16 GB on the train parquet); 8 new Z-score normalization slots (`n_wide_normalized` grows 5 → 13); 2 new utils in `ranker/cross_features.py` (~30 lines); the `populate_wide_norm_buffers` helper extends to read the 8 new label columns. Cross-feature compute is `n_slices × n_concepts = 2 × 4 = 8` gather-and-reduce ops per batch — comparable to Bucket 2's compute footprint.
+Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–24 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4 transiently occupied cols 10+ and were reclaimed in roadmap order. The overlap features reuse `weighted_overlap` / `dev_affinity` across full/liked/recent-3 slices (only `history_indices`/`history_weights` change); Bucket 5 introduced the Z-score infra; Bucket 6 added IDF/rarity scalars (`niche_scalar_triple`).
 
 ### Bucket 8 — Engagement-Level Cross
 
 Two scalars crossing the user's overall engagement level (`X_user_avg_log` — already passed into `user_forward`) with the candidate's intrinsic engagement level. Captures *"high-hours user evaluating a high-hours studio"* compatibility.
 
-| # | Feature | Formula |
-|---|---|---|
-| B-11a | **User × Dev Engagement** | `X_user_avg_log[b] · dev_mean_log_playtime[cand]` |
-| B-11b | **User × Genre Engagement** | `X_user_avg_log[b] · mean(genre_mean_log_playtime[g] for g in cand's genres)` |
+Cols 23-24. Two scalars crossing the user's overall engagement level (`X_user_avg_log` — already passed into `user_forward`) with the candidate's intrinsic engagement level. Captures *"high-hours user evaluating a high-hours studio"* compatibility.
 
-`dev_mean_log_playtime[d]` = global mean `log(1+hours)` across all observed interactions with games by dev `d` (extension of `ranker_game_stats.parquet`'s `avg_log_playtime` aggregated to dev level). `genre_mean_log_playtime[g]` is the analogous per-genre quantity. Both built at preprocess.
+| Feature | Formula |
+|---|---|
+| **User × Dev Engagement** | `X_user_avg_log[b] · dev_mean_log_playtime[cand]` |
+| **User × Genre Engagement** | `X_user_avg_log[b] · mean(genre_mean_log_playtime[g] for g in cand's genres)` |
 
-**Hypothesis:** the deep tower already sees `X_user_avg_log` (for in-model genre debiasing) and the dev/genre embeddings, but does *not* see explicit dev/genre engagement-level scalars. The cross gives the wide head a direct "engagement compatibility" lever the deep path can't easily reconstruct.
+`dev_mean_log_playtime[d]` = interaction-weighted mean `log(1+hours)` over all corpus interactions with games by dev `d`; `genre_mean_log_playtime[g]` is the analogous per-genre quantity (built in `features.load_features`). Per-game buffers `game_dev_mean_log_playtime` / `game_genre_mean_log_playtime` map these to each candidate.
 
-**Risk acknowledged:** of the remaining user × item cross features in the roadmap (Buckets 6, 8), this is the lower-confidence one — the deep MLP may already capture enough of this signal via dev embeddings + user pool. Fair to deprioritize if Bucket 6 underwhelms; the engagement-cross hypothesis is interesting but its independence from the deep path is unproven.
+**Hypothesis:** the deep tower already sees `X_user_avg_log` and the dev/genre embeddings, but not explicit dev/genre engagement-level scalars. The cross gives the linear wide head a multiplicative "engagement compatibility" lever it can't synthesize itself.
 
-**Implementation cost:** 2 new scalar buffers (`dev_mean_log_playtime` shape `(n_devs+1,)`, `genre_mean_log_playtime` shape `(n_genres,)`); 4 new parquet columns; compute is one elementwise multiply + per-cand gather/mean.
+**Risk:** lowest-confidence bucket in the roadmap — the deep MLP may already capture this via dev embeddings + user pool. Implemented; awaiting train/canary/eval. Watch for the flat-everywhere (Bucket 4 ✗) signature → drop.
 
-### Bucket 9 — CG Score (kept solo)
+**Implementation cost:** 2 new per-game scalar buffers; 4 new parquet columns; compute is one elementwise multiply + per-cand gather/mean.
 
-*Renumbered from Bucket 6 in earlier drafts; Buckets 6-8 above slotted in between Numeric Matching and CG Score per the "earn independent signal first" discipline.*
+### Bucket 9 — CG Score (kept solo) — FINAL bucket
 
-| # | Feature | Formula |
-|---|---|---|
-| B-8 | **CG Score** | raw CG dot, per candidate. **Re-enable LAST.** CG score is circular ("follow CG and beat CG"); only earn it after content features have proven independent value. Kept solo to make its lift cleanly attributable. |
+| Feature | Formula |
+|---|---|
+| **CG Score** (col 25) | raw CG dot, per candidate. **Re-enabled LAST.** CG score is circular ("follow CG and beat CG"); only earned after content features proved independent value. Kept solo so its lift is cleanly attributable. |
 
-### Deep-concat additions (future, not in any bucket above)
+**This is the last bucket — the ranker buildout ends here.** Whatever the CG-score verdict (keep on lift / drop if it only re-imports CG's ranking), the model after Bucket 9 is the final ranker. No further feature buckets are planned.
 
-| Feature | Path | Note |
-|---|---|---|
-| Genre Diversity / Tag Entropy / History Confidence | Deep | User-state scalars added to the deep concat. Only consider after the wide-path roadmap saturates. |
+> **Dropped from scope:** the previously-considered deep-concat additions (Genre Diversity / Tag Entropy / History Confidence — user-state scalars on the deep path) are *not* being pursued. They're user-only signals that don't need the ranker's cross structure, and the buildout is wrapping up. If user-state signal is ever wanted, the higher-leverage place is CG's user tower (raises the retrieval ceiling), not the ranker reranker.
 
 ### Removed from the roadmap
 
-- ~~Dislike Similarity~~ (was B-6, `cosine(user_disliked_pool, item_id_emb)`) — dropped as a one-off scalar. Bucket 3 ✗ later tried the structured-columns version of the disliked-history signal (3 categorical-overlap features on `X_hist_disliked`) and that also failed; root cause was the noisy disliked partition itself, not the feature shape. (The cosine name `user_disliked_pool` here refers to the deep-tower's `pool_disliked` — that one IS a legit embedding pool.)
-- ~~Tag Peak Match~~ (was B-7, `max(user_tag_profile * item_tag_vec)`) — dropped. Tag Cosine (B-0) and Tag Overlap variants (Buckets 1–4 each carry one) cover every useful tag-affinity view; the "single peak" angle is redundant.
-- ~~Recent Game Similarity~~ (was B-8, `dot(last_played_id_emb, item_id_emb)`) — **replaced** by the Recent-3 slice inside Bucket 2 (Recent Genre Overlap / Tag Overlap / Developer Affinity on the last 3 LIKED games). Item-ID dot is a weak proxy; mirroring Bucket 1's three features on a recent-liked window is the meaningful recency signal.
+- ~~Dislike Similarity~~ / ~~disliked-history columns~~ — dropped; the disliked partition itself is too noisy (Bucket 3 ✗, §8).
+- ~~Tag Peak Match~~ (`max(user_tag_profile * item_tag_vec)`) — redundant with Tag Cosine + Tag Overlap variants.
+- ~~Recent Game Similarity~~ (`dot(last_id_emb, item_emb)`) — **replaced** by the Recent-3 slice in Bucket 2.
 
 ### Wide-feature normalization
 
-Wide features beyond cosines/Jaccard must be normalized before concatenation using fixed statistics registered as **persistent** model buffers (not BatchNorm — train/eval batch composition differs). Compute mean/std from a single pass over training data, register with `register_buffer(name, tensor)` (persistent — the default; do not pass `persistent=False`, that excludes from `state_dict` and silently degrades the model on load).
-
-```
-Expected ranges (pre-normalization):
-  Tag Cosine                              [−1, 1]   → no normalization
-  Genre/Tag Overlap (Full / Liked /       [0, 1]    → no normalization
-    Recent-3 / Disliked)
-  Developer Affinity (Full / Liked /      [0, 1]    → Z-score (heavy zero mass — may need
-    Recent-3 / Disliked)                              separate treatment; all four history variants
-                                                      share this concern)
-  Price Match                             [0, ~8]   → Z-score (Bucket 5)
-  Era Gap                                 [0, ~30]  → Z-score (raw year diff; Z-score handles the scale)
-  Playtime Calibration (Median)           [~−5, +5] → Z-score (signed)
-  Popularity Match                        [0, ~8]   → Z-score
-  Sentiment Match                         [0, ~7]   → Z-score (Bucket 5)
-  Tag Overlap (IDF, Full / Liked)         [0, ~3]   → Z-score (Bucket 6; range depends on IDF max)
-  Niche Tag Match (Full / Liked)          [0, ~3]   → Z-score (Bucket 6; weighted-mean IDF diff)
-  Max Tag IDF Match (Full / Liked)        [0, ~4]   → Z-score (Bucket 6; weighted-max IDF diff)
-  Niche Dev Match (Full / Liked)          [0, ~5]   → Z-score (Bucket 6; log dev catalog size diff)
-  User × Dev Engagement                   [~−5, +5] → Z-score (Bucket 8; signed cross product)
-  User × Genre Engagement                 [~−5, +5] → Z-score
-  CG Score                                [~−1, 1]  → no normalization (already cosine-bounded)
-```
-
-Initialize new wide-feature weights at 0.1 — small non-zero signal without swamping the deep path.
+Wide features beyond cosines/overlaps are Z-scored before the head using fixed train-set mean/std in **persistent** model buffers (`wide_norm_mean/std` — not BatchNorm; train/eval batch composition differs). Populated by `populate_wide_norm_buffers` in one pass over the train parquet at training start, std clamped to 1.0 near zero variance. `_normalize_wide` applies it to the trailing `n_wide_normalized` columns only (cols 10–24); cols 0–9 (cosine/overlap, bounded [−1,1]/[0,1]) and the eventual CG score (cosine-bounded) pass through raw. New wide-head weights init at 0.1.
 
 ### Other future phases
 
-- **Phase C — Label quality.** After Phase B saturates, re-precompute with stricter `is_liked` filter (`raw_hours ≥ game_median` OR `≥ 2× user_median` OR `recommend=True`). Slashes label set by 40-60% but every label is a genuinely-engaged game. Expected to lift NDCG; cleanly attributable because Phases A+B are already proven.
 - **DCN V2.** Replace deep MLP with explicit cross layers — only if cross features stop helping.
 
 ### Open infrastructure TODOs
