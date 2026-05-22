@@ -2,7 +2,7 @@
 
 ## Status (2026-05-22)
 
-Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓, 8 ✗. Bucket 9 (CG Score) is the last planned bucket.
+Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓, 8 ✗. Bucket 9 (CG Log-Rank) is the last planned bucket.
 
 **Best-so-far ranker** (Bucket 6, last kept): `saved_models/ranker/ranker_wd_alpha_0_20260520_204654.pth` — NDCG@10 0.0867, MRR 0.0813, pure-rerank NDCG@10 0.1569 / MRR 0.1391. CG comparator (α=0): `saved_models/best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth`. *Update this line whenever a bucket ships.*
 
@@ -18,7 +18,7 @@ Headline metric is full-val NDCG@10, each bucket measured against the previous *
 | **5** ✓ | 5 numeric-match scalars | **0.0866** | **+4.6%** | ship — uniform +4–5%, new signal class |
 | **6** ✓ | 8 niche/IDF crosses | 0.0867 | +0.1% (flat) | **ship on canary** — offline-flat, canary-better |
 | **8** ✗ | 2 engagement crosses | 0.0870 | +0.03% (flat) | **drop** — flat offline AND canary-regressed (RPG/Fighting) |
-| **9** | CG score (solo, last) | — | — | not yet run |
+| **9** | CG log-rank (solo, last) | — | — | not yet run |
 
 **Permanently dropped signal classes** (don't re-propose in any shape — see §10 rule 9): disliked-history variants (Bucket 3); dev-catalog aggregates (Bucket 4); engagement-level crosses (Bucket 8 — popularity-leak channel, deep MLP already captures it). **Bucket 7** (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features were absorbed into Bucket 6 as proper user × item crosses (`niche_dev_match`, `max_tag_idf_match`), the third (`dev_specialization`, item-only) dropped.
 
@@ -506,21 +506,27 @@ col 15-16: tag_overlap_idf, full/liked        (Bucket 6 ✓)
 col 17-18: niche_tag_match, full/liked        (Bucket 6 ✓)
 col 19-20: max_tag_idf_match, full/liked      (Bucket 6 ✓)
 col 21-22: niche_dev_match, full/liked        (Bucket 6 ✓)
-col 23  : cg_score                            (Bucket 9, kept solo, last)
+col 23  : cg_log_rank                         (Bucket 9, kept solo, last)
 ```
-Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–22 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4/8 transiently occupied cols 10+ (Bucket 8 held cols 23–24) and were reclaimed in roadmap order — so Bucket 9's `cg_score` lands at col 23. The overlap features reuse `weighted_overlap` / `dev_affinity` across full/liked/recent-3 slices (only `history_indices`/`history_weights` change); Bucket 5 introduced the Z-score infra; Bucket 6 added IDF/rarity scalars (`niche_scalar_triple`).
+Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–23 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4/8 transiently occupied cols 10+ (Bucket 8 held cols 23–24) and were reclaimed in roadmap order — so Bucket 9's `cg_log_rank` lands at col 23. The overlap features reuse `weighted_overlap` / `dev_affinity` across full/liked/recent-3 slices (only `history_indices`/`history_weights` change); Bucket 5 introduced the Z-score infra; Bucket 6 added IDF/rarity scalars (`niche_scalar_triple`).
 
 ### Bucket 8 — Engagement-Level Cross ✗ (dropped 2026-05-22)
 
 **Dropped — flat offline AND canary-regressed. Code reverted via git, never committed. See §8 for the full result + per-slice canary read.** Tried 2 scalars crossing the user's engagement level (`X_user_avg_log`) with the candidate's intrinsic engagement (`dev_mean_log_playtime` / `genre_mean_log_playtime`). The mechanism turned out to be a popularity-leak channel — high-engagement mass-market titles got boosted across all genres — so it polluted the Western RPG and Fighting niche slices rather than helping. Confirmed the pre-train hypothesis: the deep MLP already captures engagement via `X_user_avg_log` + dev/genre embeddings, leaving no independent signal for the wide cross. **Do not re-propose engagement-level crosses in any shape** (§10 rule 9).
 
-### Bucket 9 — CG Score (kept solo) — FINAL bucket
+### Bucket 9 — CG Log-Rank (kept solo) — FINAL bucket
 
 | Feature | Formula |
 |---|---|
-| **CG Score** (col 23) | raw CG dot, per candidate. **Re-enabled LAST.** CG score is circular ("follow CG and beat CG"); only earned after content features proved independent value. Kept solo so its lift is cleanly attributable. |
+| **CG Log-Rank** (col 23) | `log1p(within_pool_rank)`, per candidate. **Re-enabled LAST.** Importing CG's opinion is circular ("follow CG and beat CG"); only earned after content features proved independent value. Kept solo so its lift is cleanly attributable. Z-scored (cols-10+ block). |
 
-**This is the last bucket — the ranker buildout ends here.** Whatever the CG-score verdict (keep on lift / drop if it only re-imports CG's ranking), the model after Bucket 9 is the final ranker. No further feature buckets are planned.
+**Why log-rank, not raw CG score.** The wide head applies *one global linear weight* to this column. Raw CG dot magnitude is query-dependent (embedding norms / taste concentration vary per user), so a single weight on raw score means different things for different users. **Within-pool rank is uniform [1, n_cand] for every query**, so the weight is consistent across users — the decisive advantage for a *linear* feature. `log1p` adds the NDCG-style positional discount (rank-1↔2 gap >> rank-50↔51), and rank is invariant to monotonic CG-score transforms, so a CG recalibration doesn't invalidate the learned weight. The one thing rank discards is **score margin** (CG's confidence gap), but a linear feature can't exploit margin nonlinearly anyway, so that loss is unrecoverable in this slot regardless.
+
+**Within-pool, not corpus rank — and wire-only.** Each group's 100 candidates *are* CG's top-100 (negs come from `topk.values`), so within-pool rank is the right reranking quantity and is derived by argsorting the already-stored CG scores (`cg_label_score` + `cg_neg_scores`) per group — **no re-precompute**. Corpus rank for negatives is *not* in the parquet (only `cg_label_rank` for the label, used by the E2E ceiling); using corpus rank would force a re-precompute for no reranking benefit.
+
+**Honest expectation.** As a *standalone* feature, log-rank reorders nothing vs raw score within a group (both monotonic in CG's ordering) — the gain is purely better normalization/combination with the other 23 Z-scored linear features. This is a cleaner *encoding* of CG's signal, not a new signal class. Verdict criterion is unchanged: keep on lift; drop if it only re-imports CG's ranking without beating it.
+
+**This is the last bucket — the ranker buildout ends here.** Whatever the verdict (keep on lift / drop if it only re-imports CG's ranking), the model after Bucket 9 is the final ranker. No further feature buckets are planned.
 
 > **Dropped from scope:** the previously-considered deep-concat additions (Genre Diversity / Tag Entropy / History Confidence — user-state scalars on the deep path) are *not* being pursued. They're user-only signals that don't need the ranker's cross structure, and the buildout is wrapping up. If user-state signal is ever wanted, the higher-leverage place is CG's user tower (raises the retrieval ceiling), not the ranker reranker.
 
@@ -532,7 +538,7 @@ Cols are append-only — never reorder, or older checkpoints mis-align at load. 
 
 ### Wide-feature normalization
 
-Wide features beyond cosines/overlaps are Z-scored before the head using fixed train-set mean/std in **persistent** model buffers (`wide_norm_mean/std` — not BatchNorm; train/eval batch composition differs). Populated by `populate_wide_norm_buffers` in one pass over the train parquet at training start, std clamped to 1.0 near zero variance. `_normalize_wide` applies it to the trailing `n_wide_normalized` columns only (cols 10–24); cols 0–9 (cosine/overlap, bounded [−1,1]/[0,1]) and the eventual CG score (cosine-bounded) pass through raw. New wide-head weights init at 0.1.
+Wide features beyond cosines/overlaps are Z-scored before the head using fixed train-set mean/std in **persistent** model buffers (`wide_norm_mean/std` — not BatchNorm; train/eval batch composition differs). Populated by `populate_wide_norm_buffers` in one pass over the train parquet at training start, std clamped to 1.0 near zero variance. `_normalize_wide` applies it to the trailing `n_wide_normalized` columns only (cols 10–23, which now include Bucket 9's `cg_log_rank`); cols 0–9 (cosine/overlap, bounded [−1,1]/[0,1]) pass through raw. New wide-head weights init at 0.1.
 
 ### Other future phases
 
@@ -549,7 +555,7 @@ Wide features beyond cosines/overlaps are Z-scored before the head using fixed t
 
 1. **One bucket at a time.** Phase B groups cross features into buckets that share a semantic theme (see §9). Each bucket is one training experiment, measured against the previous baseline. Bundle-level NDCG is the verdict — *do not* attempt per-feature attribution by default. Drop-one ablation (train bucket-minus-feature-X for each X) is only triggered when a bucket disappoints, as a diagnostic. Rationale: 30h to test 10 features individually vs ~8h to test 4 buckets, with strictly correct per-bucket verdicts. (Note: inference-time ablation — zeroing a feature's head weight after training — is NOT a valid substitute. A model trained without X shifts its deep representation and may recover most of the lost signal; inference-zero only measures "how much is this feature alive in *this* trained head," not "is X worth including.")
 2. **Fair-α rule.** Always report which CG checkpoint (α=?) you're comparing against. Phase B experiments compare against A-N2 (NDCG@10 0.0741), which compares against CG α=0.
-3. **Beat CG on content features before re-enabling CG score.** Earn improvements from independent signal.
+3. **Beat CG on content features before re-enabling the CG signal (now CG log-rank, Bucket 9).** Earn improvements from independent signal first.
 4. **No `src/` modifications.** Ranker is fully self-contained; CG code is read-only.
 5. **No streamlit/export changes** until a model is verified better by eval + canary.
 6. **Softmax CE only.** Never sigmoid in `forward()`. Pointwise BCE was tried during early bring-up and abandoned.
