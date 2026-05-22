@@ -1,8 +1,10 @@
 # Steam Ranker: Implementation Plan
 
-## Status (2026-05-21)
+## Status (2026-05-22)
 
-Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓. Bucket 8 implemented (awaiting results); Bucket 9 (CG Score) is the last planned bucket.
+Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓, 8 ✗. Bucket 9 (CG Score) is the last planned bucket.
+
+**Best-so-far ranker** (Bucket 6, last kept): `saved_models/ranker/ranker_wd_alpha_0_20260520_204654.pth` — NDCG@10 0.0867, MRR 0.0813, pure-rerank NDCG@10 0.1569 / MRR 0.1391. CG comparator (α=0): `saved_models/best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth`. *Update this line whenever a bucket ships.*
 
 Headline metric is full-val NDCG@10, each bucket measured against the previous *kept* baseline. Full tables + per-slice canary analysis live in §8; this is the scoreboard.
 
@@ -15,10 +17,10 @@ Headline metric is full-val NDCG@10, each bucket measured against the previous *
 | **4** ✗ | dev-catalog genre/tag overlap | 0.0827 | −0.1% | **drop** — redundant with `developer_lookup` |
 | **5** ✓ | 5 numeric-match scalars | **0.0866** | **+4.6%** | ship — uniform +4–5%, new signal class |
 | **6** ✓ | 8 niche/IDF crosses | 0.0867 | +0.1% (flat) | **ship on canary** — offline-flat, canary-better |
-| **8** | 2 engagement crosses | TBD | TBD | awaiting train/canary/eval |
+| **8** ✗ | 2 engagement crosses | 0.0870 | +0.03% (flat) | **drop** — flat offline AND canary-regressed (RPG/Fighting) |
 | **9** | CG score (solo, last) | — | — | not yet run |
 
-**Permanently dropped signal classes** (don't re-propose in any shape — see §10 rule 9): disliked-history variants (Bucket 3); dev-catalog aggregates (Bucket 4). **Bucket 7** (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features were absorbed into Bucket 6 as proper user × item crosses (`niche_dev_match`, `max_tag_idf_match`), the third (`dev_specialization`, item-only) dropped.
+**Permanently dropped signal classes** (don't re-propose in any shape — see §10 rule 9): disliked-history variants (Bucket 3); dev-catalog aggregates (Bucket 4); engagement-level crosses (Bucket 8 — popularity-leak channel, deep MLP already captures it). **Bucket 7** (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features were absorbed into Bucket 6 as proper user × item crosses (`niche_dev_match`, `max_tag_idf_match`), the third (`dev_specialization`, item-only) dropped.
 
 **Ranker is not yet wired into serving.** Streamlit runs CG-only retrieval; integration (load both checkpoints, shared user-side feature engineering, two-stage scoring) is the post-roadmap step — the real remaining work once Bucket 9 lands.
 
@@ -453,13 +455,40 @@ The 4 niche concepts target exactly the failure mode the Fighting slice exhibite
 
 **Lesson:** when offline-flat coincides with canary-better, ship. Flat offline metrics don't penalize within-top-20 reorders that don't flip the held-out target across the K boundary, but those reorders are exactly what list-shape evaluation (canary) sees. Bucket 4 ✗ was flat-everywhere (flat offline AND flat canary); Bucket 6 is flat offline but canary-better — different signal entirely.
 
+### Phase B — Bucket 8 ✗ (2026-05-22)
+
+**Engagement-Level Cross** (dropped): 2 user × item scalars crossing `X_user_avg_log` with each candidate's intrinsic engagement level — `user_dev_engagement_cross` (× `dev_mean_log_playtime`) and `user_genre_engagement_cross` (× `genre_mean_log_playtime`). Wide-head cols 23–24. Two new per-game buffers (`game_dev_mean_log_playtime`, `game_genre_mean_log_playtime`) built in `features.load_features`; compute via `engagement_cross_pair` in `ranker/cross_features.py`.
+
+| Metric | Bucket 6 | Bucket 8 | Δ vs B6 |
+|---|---:|---:|---:|
+| NDCG@1 | 0.0319 | 0.0324 | +1.6% |
+| NDCG@10 | 0.0867 | 0.0870 | +0.3% |
+| NDCG@20 | 0.1083 | 0.1088 | +0.5% |
+| NDCG@50 | 0.1410 | 0.1413 | +0.2% |
+| Hit@10 | 0.1625 | 0.1626 | +0.1% |
+| Hit@20 | 0.2486 | 0.2494 | +0.3% |
+| MRR | 0.0813 | 0.0817 | +0.5% |
+| Pure-rerank NDCG@10 | 0.1569 | 0.1574 | +0.3% |
+| Pure-rerank MRR | 0.1391 | 0.1398 | +0.5% |
+
+**Bucket 8 outcome:** offline-flat (every delta in the ±0.001 noise band — sign is uniformly positive but magnitudes are 3rd–4th decimal, indistinguishable from a lucky-seed B6) **and canary-regressed on the two niche slices that matter most.** Per-slice canary read (ranker-vs-ranker, identical CG control):
+
+- **Western RPG** — ✗ regression. Terraria leaps to **#1**; Civ V #8, PlanetSide 2 #9, PAYDAY 2 #13, Portal #16, Warframe #17, Rust #20 all leak into the flagship RPG list. Pillars of Eternity, Icewind Dale: EE, Dragon Age: Origins, Might & Magic X — all present in B6 — drop out.
+- **Fighting** — ✗ regression, and it *undoes Bucket 6's headline win*. FF Type-0 #6, Borderlands 2 #7, Warframe #8, Counter-Strike #12, FF VIII #14, FF XIII #20 — the exact JRPG + shooter bleed B6 was kept for cleaning up.
+- **Civ (4X)** — slight win. Beyond Earth #7, EU IV #14, EU III #19, TW: Warhammer #20 (genuine 4X/grand-strategy) vs B6's EVE Online / GoT Genesis / X3 outliers.
+- **JRPG / FPS / Indie / Racing / Survival / Management** — comparable to B6; minor reorders inside already-good lists, no clear direction.
+
+**Why it regressed:** the cross is effectively a popularity-leak channel. `dev_mean_log_playtime` / `genre_mean_log_playtime` are highest for high-engagement mass-market titles (Terraria, Borderlands 2, Warframe, Counter-Strike, PlanetSide), so the wide head's positive weight on `X_user_avg_log × cand_engagement` boosts those titles *across every genre* regardless of taste fit — the precise cross-genre pollution the α=0.4 popularity correction and Bucket 6's niche scalars exist to suppress. **Confirms the pre-train hypothesis** (§9): the deep MLP already sees `X_user_avg_log` plus the dev/genre embeddings, so the engagement signal was redundant; re-expressing it as a multiplicative wide cross only added a popularity lever that does net harm. **Dropped — code reverted via git, not promoted.**
+
+**Lesson:** "offline-flat" alone isn't the ship signal — Bucket 6 was flat offline *and canary-better*; Bucket 8 was flat offline *and canary-worse*. The canary is the tiebreaker in both directions, and a uniformly-positive-but-tiny offline delta is not evidence of a real win when canary list-shape regresses. A flat bucket whose mechanism is "boost high-engagement items" is a popularity leak in disguise — it should be expected to pollute niche slices, not help them.
+
 ---
 
 ## 9. Cross-Feature Roadmap (Phase B)
 
 Cross features are grouped into **buckets** that share a semantic theme. Each bucket is one training experiment, measured against the previous *kept* baseline; bundle-level NDCG is the verdict, with drop-one attribution only as a diagnostic when a bucket disappoints (§10 rule 1). All cross features sit on the **wide bypass** — one column in `head.weight` with a direct gradient path, *not* concatenated into the deep MLP (where a single scalar would drown in ~290 dims).
 
-**Landed/dropped bucket designs (1–6) are realized in `ranker/cross_features.py` + the precompute/train/canary call sites — code is the source of truth.** Outcomes, eval tables, and drop/pass reasoning live in §8. The scoreboard is in the Status section. This section keeps only the canonical column ordering + the not-yet-run bucket designs (8, 9) + cross-cutting reference (normalization, removed ideas, future phases).
+**Landed/dropped bucket designs (1–6) are realized in `ranker/cross_features.py` + the precompute/train/canary call sites — code is the source of truth.** Outcomes, eval tables, and drop/pass reasoning live in §8. The scoreboard is in the Status section. This section keeps only the canonical column ordering + the final bucket design (9) + cross-cutting reference (normalization, removed ideas, future phases).
 
 ### Column slots (stable across checkpoints — see `dataset.compute_cross_features`)
 
@@ -477,36 +506,19 @@ col 15-16: tag_overlap_idf, full/liked        (Bucket 6 ✓)
 col 17-18: niche_tag_match, full/liked        (Bucket 6 ✓)
 col 19-20: max_tag_idf_match, full/liked      (Bucket 6 ✓)
 col 21-22: niche_dev_match, full/liked        (Bucket 6 ✓)
-col 23  : user_dev_engagement_cross           (Bucket 8)
-col 24  : user_genre_engagement_cross         (Bucket 8)
-col 25  : cg_score                            (Bucket 9, kept solo, last)
+col 23  : cg_score                            (Bucket 9, kept solo, last)
 ```
-Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–24 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4 transiently occupied cols 10+ and were reclaimed in roadmap order. The overlap features reuse `weighted_overlap` / `dev_affinity` across full/liked/recent-3 slices (only `history_indices`/`history_weights` change); Bucket 5 introduced the Z-score infra; Bucket 6 added IDF/rarity scalars (`niche_scalar_triple`).
+Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–22 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4/8 transiently occupied cols 10+ (Bucket 8 held cols 23–24) and were reclaimed in roadmap order — so Bucket 9's `cg_score` lands at col 23. The overlap features reuse `weighted_overlap` / `dev_affinity` across full/liked/recent-3 slices (only `history_indices`/`history_weights` change); Bucket 5 introduced the Z-score infra; Bucket 6 added IDF/rarity scalars (`niche_scalar_triple`).
 
-### Bucket 8 — Engagement-Level Cross
+### Bucket 8 — Engagement-Level Cross ✗ (dropped 2026-05-22)
 
-Two scalars crossing the user's overall engagement level (`X_user_avg_log` — already passed into `user_forward`) with the candidate's intrinsic engagement level. Captures *"high-hours user evaluating a high-hours studio"* compatibility.
-
-Cols 23-24. Two scalars crossing the user's overall engagement level (`X_user_avg_log` — already passed into `user_forward`) with the candidate's intrinsic engagement level. Captures *"high-hours user evaluating a high-hours studio"* compatibility.
-
-| Feature | Formula |
-|---|---|
-| **User × Dev Engagement** | `X_user_avg_log[b] · dev_mean_log_playtime[cand]` |
-| **User × Genre Engagement** | `X_user_avg_log[b] · mean(genre_mean_log_playtime[g] for g in cand's genres)` |
-
-`dev_mean_log_playtime[d]` = interaction-weighted mean `log(1+hours)` over all corpus interactions with games by dev `d`; `genre_mean_log_playtime[g]` is the analogous per-genre quantity (built in `features.load_features`). Per-game buffers `game_dev_mean_log_playtime` / `game_genre_mean_log_playtime` map these to each candidate.
-
-**Hypothesis:** the deep tower already sees `X_user_avg_log` and the dev/genre embeddings, but not explicit dev/genre engagement-level scalars. The cross gives the linear wide head a multiplicative "engagement compatibility" lever it can't synthesize itself.
-
-**Risk:** lowest-confidence bucket in the roadmap — the deep MLP may already capture this via dev embeddings + user pool. Implemented; awaiting train/canary/eval. Watch for the flat-everywhere (Bucket 4 ✗) signature → drop.
-
-**Implementation cost:** 2 new per-game scalar buffers; 4 new parquet columns; compute is one elementwise multiply + per-cand gather/mean.
+**Dropped — flat offline AND canary-regressed. Code reverted via git, never committed. See §8 for the full result + per-slice canary read.** Tried 2 scalars crossing the user's engagement level (`X_user_avg_log`) with the candidate's intrinsic engagement (`dev_mean_log_playtime` / `genre_mean_log_playtime`). The mechanism turned out to be a popularity-leak channel — high-engagement mass-market titles got boosted across all genres — so it polluted the Western RPG and Fighting niche slices rather than helping. Confirmed the pre-train hypothesis: the deep MLP already captures engagement via `X_user_avg_log` + dev/genre embeddings, leaving no independent signal for the wide cross. **Do not re-propose engagement-level crosses in any shape** (§10 rule 9).
 
 ### Bucket 9 — CG Score (kept solo) — FINAL bucket
 
 | Feature | Formula |
 |---|---|
-| **CG Score** (col 25) | raw CG dot, per candidate. **Re-enabled LAST.** CG score is circular ("follow CG and beat CG"); only earned after content features proved independent value. Kept solo so its lift is cleanly attributable. |
+| **CG Score** (col 23) | raw CG dot, per candidate. **Re-enabled LAST.** CG score is circular ("follow CG and beat CG"); only earned after content features proved independent value. Kept solo so its lift is cleanly attributable. |
 
 **This is the last bucket — the ranker buildout ends here.** Whatever the CG-score verdict (keep on lift / drop if it only re-imports CG's ranking), the model after Bucket 9 is the final ranker. No further feature buckets are planned.
 
@@ -543,7 +555,7 @@ Wide features beyond cosines/overlaps are Z-scored before the head using fixed t
 6. **Softmax CE only.** Never sigmoid in `forward()`. Pointwise BCE was tried during early bring-up and abandoned.
 7. **E2E ceiling always enforced** in both ranker eval and CG baseline.
 8. **If `src/model.py` or `src/train.get_config()` changes** (tower hidden dims, embedding sizes, new sub-towers): re-derive §3 *first* before changing the ranker — partial drift silently breaks warm-start.
-9. **Permanently dropped wide-feature classes:** (a) disliked-history variants (Bucket 3 ✗, see §8 — partition rule too noisy on Steam); (b) dev-catalog signals in any shape (Bucket 4 ✗, see §8 — redundant with `developer_lookup` in the deep tower). Don't re-propose either class as a new bucket. If a future need points at dev-side signal, the lever is on the deep tower, not the wide bypass.
+9. **Permanently dropped wide-feature classes:** (a) disliked-history variants (Bucket 3 ✗, see §8 — partition rule too noisy on Steam); (b) dev-catalog signals in any shape (Bucket 4 ✗, see §8 — redundant with `developer_lookup` in the deep tower); (c) engagement-level crosses (Bucket 8 ✗, see §8 — `X_user_avg_log × cand-engagement` is a popularity-leak channel that pollutes niche slices; the deep MLP already captures engagement). Don't re-propose any of these as a new bucket. If a future need points at dev-side or engagement signal, the lever is on the deep tower, not the wide bypass.
 
 ---
 
