@@ -436,18 +436,23 @@ def load_splits(data_dir: str = 'data', train_mode: str = 'full') -> tuple:
 
     train_mode='train_only' skips ~40 GB of eval-only columns on the train dataset
     (cross features, neg_idx, cg_label_rank — none of which sample_batch uses when
-    n_hard_negs=0). Default 'full' keeps backward compat. val_ds always loads
-    mode='full' since evaluation runs on it.
+    n_hard_negs=0). train_mode='skip' returns None for train_ds and never opens the
+    train parquet at all — for the evaluate_only path, which touches only val_ds
+    (peak ~1.5 GB instead of 60+ GB). Default 'full' keeps backward compat. val_ds
+    always loads mode='full' since evaluation runs on it.
     """
     fs       = load_features(data_dir=data_dir)
     n_items  = fs['n_items']
     pad_idx  = n_items                                    # matches src/model.py game_pad_idx
 
-    train_ds = RankerDataset(os.path.join(data_dir, 'ranker_candidates_train.parquet'),
-                              n_items=n_items, pad_idx=pad_idx, mode=train_mode)
+    if train_mode == 'skip':
+        train_ds = None
+    else:
+        train_ds = RankerDataset(os.path.join(data_dir, 'ranker_candidates_train.parquet'),
+                                  n_items=n_items, pad_idx=pad_idx, mode=train_mode)
     val_ds   = RankerDataset(os.path.join(data_dir, 'ranker_candidates_val.parquet'),
                               n_items=n_items, pad_idx=pad_idx, mode='full')
-    print(f"Train: {train_ds.N:,} rollback rows ({train_ds.mode})  |  "
-          f"Val: {val_ds.N:,} rollback rows ({val_ds.mode})")
-    print(f"  candidates_per_row={CANDIDATES_PER_ROW}  max_hist={train_ds.max_hist}")
+    train_desc = 'skipped' if train_ds is None else f"{train_ds.N:,} rollback rows ({train_ds.mode})"
+    print(f"Train: {train_desc}  |  Val: {val_ds.N:,} rollback rows ({val_ds.mode})")
+    print(f"  candidates_per_row={CANDIDATES_PER_ROW}  max_hist={val_ds.max_hist}")
     return train_ds, val_ds, fs

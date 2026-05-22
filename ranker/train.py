@@ -827,7 +827,10 @@ def evaluate_only(checkpoint_path: str | None = None) -> str:
         checkpoint_path = max(matches, key=os.path.getmtime)
 
     print("Loading datasets ...")
-    train_ds, val_ds, fs = load_splits('data')
+    # evaluate_only touches only val_ds — skip the train parquet entirely (peak
+    # ~1.5 GB vs 60+ GB; train_ds in full mode would pull all cross features for
+    # 4.3M rows that this path never reads).
+    _, val_ds, fs = load_splits('data', train_mode='skip')
     device = get_device()
     print(f"Device: {device}")
     val_ds.to(device)
