@@ -271,7 +271,7 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
 
 
 def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor, all_ids: list,
-                    top_n: int = 10) -> None:
+                    top_n: int = 20) -> None:
     model.eval()
     device = next(model.parameters()).device
 

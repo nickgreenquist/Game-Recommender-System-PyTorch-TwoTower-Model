@@ -1,5 +1,4 @@
-── Canary user evaluation ──
-  popularity_alpha=0.4 (applied)  temperature=0.100000
+── Canary user evaluation ──  (checkpoint: PROD_best_triple_full_softmax_popularity_alpha_04_20260502_203217.pth)
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Western RPG Lover  |  Tags: Action RPG
@@ -18,6 +17,16 @@ Mass Effect 2                                       King's Bounty: Crossworlds
                                                     Kingdoms of Amalur: Reckoning™
                                                     Jade Empire™: Special Edition
                                                     Baldur's Gate: Enhanced Edition
+                                                    Fallout 4
+                                                    Icewind Dale: Enhanced Edition
+                                                    Beyond Divinity
+                                                    Disciples III - Renaissance Steam Special Edition
+                                                    King's Bounty: Dark Side
+                                                    Might & Magic X - Legacy
+                                                    Vampire: The Masquerade - Bloodlines
+                                                    Divinity: Original Sin - Enhanced Edition
+                                                    Fallout 3: Game of the Year Edition
+                                                    King's Bounty: The Legend
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 JRPG Lover  |  Tags: JRPG
@@ -36,6 +45,16 @@ FINAL FANTASY® XIII                                 Hyperdimension Neptunia Re;
                                                     FINAL FANTASY TYPE-0™ HD
                                                     The Legend of Heroes: Trails in the Sky
                                                     FINAL FANTASY IX
+                                                    FINAL FANTASY IV: THE AFTER YEARS
+                                                    Tales of Zestiria
+                                                    Tales of Symphonia
+                                                    Chantelise - A Tale of Two Sisters
+                                                    Hyperdimension Neptunia U: Action Unleashed
+                                                    LIGHTNING RETURNS™: FINAL FANTASY® XIII
+                                                    FINAL FANTASY® XIII-2
+                                                    FINAL FANTASY V
+                                                    FINAL FANTASY X/X-2 HD Remaster
+                                                    FINAL FANTASY VIII
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 FPS Lover  |  Tags: FPS
@@ -54,6 +73,16 @@ Doom 3: BFG Edition                                 QUAKE III: Team Arena
                                                     Unreal 2: The Awakening
                                                     HeXen II
                                                     Unreal Tournament: Game of the Year Edition
+                                                    Unreal Gold
+                                                    Turok
+                                                    Commander Keen
+                                                    Unreal Tournament 3 Black
+                                                    Ultimate Doom
+                                                    Left 4 Dead
+                                                    Dynomite Deluxe
+                                                    Heretic: Shadow of the Serpent Riders
+                                                    Aliens versus Predator Classic 2000
+                                                    Return to Castle Wolfenstein
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Civ Lover  |  Tags: 4X
@@ -72,6 +101,16 @@ Total War™: ROME II - Emperor Edition               Dawn of Discovery™
                                                     Napoleon: Total War™
                                                     Galactic Civilizations III
                                                     Europa Universalis IV
+                                                    Commander: Conquest of the Americas
+                                                    Rise of Venice
+                                                    Stellaris
+                                                    Grand Ages: Rome
+                                                    King's Bounty: The Legend
+                                                    Stronghold 3 Gold
+                                                    Crusader Kings II
+                                                    Victoria I Complete
+                                                    Distant Worlds: Universe
+                                                    Sins of a Solar Empire®: Rebellion
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Indie Lover  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
@@ -90,6 +129,16 @@ Spelunky                                            Nuclear Throne
                                                     Armed with Wings: Rearmed
                                                     Moon Hunters
                                                     Darkest Dungeon®
+                                                    Enter the Gungeon
+                                                    Catacomb Kids
+                                                    A Wizard's Lizard
+                                                    Skyshine's BEDLAM
+                                                    NeuroVoider
+                                                    Crawl
+                                                    Runestone Keeper
+                                                    Roguelands
+                                                    Ziggurat
+                                                    Dungeon of the Endless™
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Racing Lover  |  Tags: Racing
@@ -108,6 +157,16 @@ Test Drive: Ferrari Racing Legends                  WRC 4 FIA World Rally Champi
                                                     GT Legends
                                                     F1 RACE STARS™
                                                     Need for Speed: Shift
+                                                    Train Simulator
+                                                    Euro Truck Simulator 2
+                                                    Xpand Rally
+                                                    F1 2015
+                                                    Trainz™ Simulator 12
+                                                    Street Legal Racing: Redline v2.3.1
+                                                    GRID Autosport
+                                                    MotoGP™13
+                                                    GRID 2
+                                                    Microsoft Flight Simulator X: Steam Edition
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Fighting Lover  |  Tags: Fighting
@@ -126,6 +185,16 @@ THE KING OF FIGHTERS XIII STEAM EDITION             BlazBlue: Calamity Trigger
                                                     Devil May Cry® 4 Special Edition
                                                     SAMURAI WARRIORS 4-II
                                                     DYNASTY WARRIORS 8: Xtreme Legends Complete Edition / 真・三國無双７ with 猛将伝
+                                                    Arcana Heart 3 LOVE MAX!!!!!
+                                                    STRIDER™ / ストライダー飛竜®
+                                                    METAL SLUG X
+                                                    METAL GEAR RISING: REVENGEANCE
+                                                    Double Dragon: Neon
+                                                    METAL SLUG 3
+                                                    Valkyria Chronicles™
+                                                    Skullgirls
+                                                    METAL GEAR SOLID V: GROUND ZEROES
+                                                    Tennis Elbow 2013
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Survival Lover  |  Tags: Survival
@@ -144,6 +213,16 @@ The Forest                                          Fallout 4
                                                     Arma 3
                                                     Borderlands 2
                                                     Arma 2: Operation Arrowhead
+                                                    Stardew Valley
+                                                    No Man's Sky
+                                                    Sid Meier's Civilization® V
+                                                    Tom Clancy’s The Division™
+                                                    PAYDAY 2
+                                                    Fallout: New Vegas
+                                                    Killing Floor
+                                                    RimWorld
+                                                    Left 4 Dead
+                                                    Project Zomboid
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Management Lover  |  Tags: Management
@@ -162,3 +241,13 @@ Euro Truck Simulator 2                              Farming Simulator 15
                                                     Software Inc.
                                                     RollerCoaster Tycoon® 3: Platinum
                                                     Tropico 5
+                                                    Cities XXL
+                                                    SimCity™ 4 Deluxe Edition
+                                                    Project Highrise
+                                                    Hearts of Iron IV
+                                                    Simutrans
+                                                    American Truck Simulator
+                                                    Planetbase
+                                                    Supreme Ruler Ultimate
+                                                    Supreme Ruler 2020 Gold
+                                                    Buzz Aldrin's Space Program Manager
