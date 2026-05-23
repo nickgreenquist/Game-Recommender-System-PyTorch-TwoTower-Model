@@ -1096,7 +1096,7 @@ st.title("Steam Game Recommender")
 model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag, ranker = load_artifacts()
 
 st.markdown(
-    "<small>Two-Tower neural network · Built with "
+    "<small>Two-Tower retrieval + Wide &amp; Deep ranking neural networks · Built with "
     "<a href='https://cseweb.ucsd.edu/~jmcauley/datasets.html' target='_blank'>UCSD Steam dataset</a>"
     " and <a href='https://pytorch.org' target='_blank'>PyTorch</a><br>"
     "Code: <a href='https://github.com/nickgreenquist/Game-Recommender-System-PyTorch-TwoTower-Model'"
