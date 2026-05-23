@@ -1,6 +1,7 @@
 """
 Stage 3 — Dataset Building
-Builds rollback training examples for in-batch negatives softmax training.
+Builds rollback training examples for full-softmax training (cross-entropy over the
+entire game corpus every step).
 
 Usage (from train.py or main.py):
     from src.dataset import load_features, make_softmax_splits, save_softmax_splits, load_softmax_splits
@@ -190,28 +191,6 @@ def _build_rollback_dataset(users: list, fs: dict,
     )
 
 
-# ── Padding helpers ───────────────────────────────────────────────────────────
-
-def pad_history_batch(histories: list, pad_idx: int) -> torch.Tensor:
-    """Pad a list of variable-length index lists to a (B, max_len) tensor."""
-    max_len = max((len(h) for h in histories), default=1)
-    padded  = torch.full((len(histories), max_len), pad_idx, dtype=torch.long)
-    for i, hist in enumerate(histories):
-        if hist:
-            padded[i, :len(hist)] = torch.tensor(hist, dtype=torch.long)
-    return padded
-
-
-def pad_weights_batch(weight_lists: list) -> torch.Tensor:
-    """Pad a list of variable-length weight lists to a (B, max_len) tensor."""
-    max_len = max((len(w) for w in weight_lists), default=1)
-    padded  = torch.zeros(len(weight_lists), max_len, dtype=torch.float)
-    for i, weights in enumerate(weight_lists):
-        if weights:
-            padded[i, :len(weights)] = torch.tensor(weights, dtype=torch.float)
-    return padded
-
-
 # ── Orchestrator ──────────────────────────────────────────────────────────────
 
 def make_softmax_splits(fs: dict, data_dir: str = 'data',
@@ -243,14 +222,9 @@ def save_softmax_splits(train_data: tuple, val_data: tuple,
 
 
 def _dataset_info(data: tuple) -> tuple[int, float]:
-    """Return (n_examples, estimated_gb). Tensors measured exactly; lists estimated."""
+    """Return (n_examples, total_gb). All elements are tensors, measured exactly."""
     n = data[5].shape[0]  # index 5 = target_item_idx
-    total = 0
-    for x in data:
-        if isinstance(x, torch.Tensor):
-            total += x.numel() * x.element_size()
-        elif isinstance(x, list):
-            total += sum(len(h) for h in x) * 28 + len(x) * 56  # CPython int + list overhead
+    total = sum(x.numel() * x.element_size() for x in data if isinstance(x, torch.Tensor))
     return n, total / 1e9
 
 

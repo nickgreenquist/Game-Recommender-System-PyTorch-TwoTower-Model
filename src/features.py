@@ -21,7 +21,7 @@ from tqdm import tqdm
 FEATURES_VERSION   = 'v1'
 VAL_FRACTION       = 0.10   # fraction of users held out for eval
 VAL_SPLIT_SEED     = 42
-MAX_HISTORY_LEN    = 200    # cap per-user play history (avg-pool handles any length, but caps memory)
+MAX_HISTORY_LEN    = 200    # cap per-user play history (sum-pool handles any length; this caps memory)
 N_PRICE_BUCKETS    = 9      # fixed: Free <$5 $5-10 $10-20 $20-30 $30-40 $40-60 >$60 Unknown
 
 # Bucket 5 — sentiment ordinal fallback for games without a known Steam sentiment string.

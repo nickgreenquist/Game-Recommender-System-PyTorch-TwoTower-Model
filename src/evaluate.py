@@ -426,7 +426,6 @@ def _resolve_checkpoint(checkpoint_path: str, checkpoint_dir: str):
     if checkpoint_path is not None:
         return checkpoint_path
     candidates = sorted(
-        glob.glob(os.path.join(checkpoint_dir, 'best_triple_full_softmax_*.pth')) +
         glob.glob(os.path.join(checkpoint_dir, 'best_*.pth')),
         key=os.path.getmtime, reverse=True
     )

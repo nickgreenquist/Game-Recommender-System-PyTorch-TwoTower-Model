@@ -13,7 +13,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from src.dataset import pad_history_batch, pad_weights_batch
 from src.model import GameRecommender
 
 
@@ -217,7 +216,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
     start = time.time()
 
     from tqdm import tqdm
-    pbar = tqdm(range(training_steps), desc="Training (V2 Softmax)")
+    pbar = tqdm(range(training_steps), desc="Training (full softmax)")
     for i in pbar:
         is_log = (i % log_every == 0)
 
@@ -238,7 +237,7 @@ def train_softmax(model: GameRecommender, train_data: tuple, val_data: tuple,
 
                     U      = model.user_embedding(X_avg_log_val[vidx], v_liked, v_disliked, v_full, v_pw)
 
-                    # CORRECT (Raw dot product for validation - no Monen popularity adjustment)
+                    # Raw dot product for validation — no Menon popularity adjustment
                     logits = (U @ V_all.T) / temperature
                     val_losses.append(F.cross_entropy(logits, target_item_idx_val[vidx]).item())
                 val_loss = float(np.mean(val_losses))

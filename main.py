@@ -5,7 +5,6 @@ Usage:
     python main.py preprocess games         # Step 1: filter games → base_games, base_game_tags, base_vocab
     python main.py preprocess interactions  # Step 2: process user items → base_interactions_read/labels
     python main.py preprocess               # Run both steps in order
-    python main.py explore                  # Explore user/game threshold distributions
     python main.py features                 # Stage 2: base parquets → data/features_*.parquet
     python main.py dataset                  # Stage 3: features → data/dataset_*_v1.pt
     python main.py train                    # Stage 4: train, save checkpoints (softmax)
@@ -28,11 +27,6 @@ VERSION  = 'v1'
 def cmd_preprocess(step=None):
     from src.preprocess import run
     run(data_dir=DATA_DIR, step=step)
-
-
-def cmd_explore():
-    from src.explore import run
-    run(data_dir=DATA_DIR)
 
 
 def cmd_features():
@@ -92,7 +86,6 @@ def cmd_export(checkpoint_path=None):
 
 COMMANDS = {
     'preprocess': cmd_preprocess,
-    'explore':    cmd_explore,
     'features':   cmd_features,
     'dataset':    cmd_dataset,
     'train':      cmd_train,

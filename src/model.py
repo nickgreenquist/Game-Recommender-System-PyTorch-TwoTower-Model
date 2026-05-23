@@ -1,12 +1,12 @@
 """
-Two-Tower GameRecommender model V2.
+Two-Tower GameRecommender model (V5).
 
-Key changes:
-- ReLU everywhere (replaces Tanh).
-- Sum pooling for history (replaces weighted avg).
-- Triple history pools: Liked, Disliked, Full (shared ID embedding).
-- Shallow history pooling: sum raw 32-dim ID embeddings directly.
-- User tag context tower.
+Key design points:
+- ReLU everywhere.
+- Shallow sum pooling for history (sum raw 32-dim ID embeddings directly).
+- Four history pools: Liked, Disliked, Full, Playtime-weighted Full (shared ID embedding).
+- In-model genre debiasing + user tag context tower.
+- F.normalize on both tower outputs (cosine similarity).
 """
 import torch
 import torch.nn as nn
@@ -101,8 +101,8 @@ class GameRecommender(nn.Module):
                            user_genre_embedding_size +
                            user_tag_embedding_size)
         
-        # Item Concat:
-        #   genre(8)+tag(16)+id(32)+dev(12)+year(8)+price(4) = 80-dim
+        # Item Concat (default V5 dims):
+        #   genre(8)+tag(32)+id(32)+dev(12)+year(8)+price(4) = 96-dim
         item_concat_dim = (item_genre_embedding_size + tag_embedding_size + 
                            item_id_embedding_size + developer_embedding_size + 
                            item_year_embedding_size + price_embedding_size)
@@ -164,39 +164,17 @@ class GameRecommender(nn.Module):
         playtime_emb = (item_embs * w).sum(dim=1)                           # (B, D)
 
         # ── Dynamic Genre Context (In-Model Contextual Pooling) ───────────
-        # Gather genre rows for history: (B, F, n_genres)
-        hist_genres = self.game_genre_matrix[X_hist_full]
-        
-        # mask = (X_hist_full != self.game_pad_idx).float().unsqueeze(-1)
-        running_genre_count = (hist_genres > 0).float().sum(dim=1)      # (B, n_genres)
-        running_genre_sum   = (hist_genres * w).sum(dim=1)              # (B, n_genres)
-        
-        # Debiased Affinity: (B, n_genres)
-        # Avoid division by zero: if count=0, affinity=0
-        safe_count = torch.where(running_genre_count > 0, running_genre_count, torch.ones_like(running_genre_count))
-        genre_affinity = torch.where(
-            running_genre_count > 0,
-            (running_sum_weighted := (hist_genres * w * 10.0).sum(dim=1)) / safe_count - X_user_avg_log, 
-            torch.zeros_like(running_genre_count)
-        )
-        # NOTE: The dataset.py used 'running_genre_sum' which was raw_logs. 
-        # Our 'w' here is normalized weights: w = raw_log / sum(raw_logs).
-        # So sum(hist_genres * w) = sum(hist_genres * raw_log) / sum(raw_log).
-        # To match the original logic: genre_ctx = (running_genre_sum / running_genre_count) - avg_log
-        # We need the ACTUAL raw logs. But wait, we can just pass the raw logs instead of normalized weights!
-        # Actually, let's keep the weights and just use them. 
-        # Original: (running_genre_sum / running_genre_count) - avg_log
-        # If we use normalized weights w_i = raw_log_i / total_log, then:
-        # running_genre_sum = sum(raw_log_i * is_genre) = total_log * sum(w_i * is_genre)
-        # So: (total_log * sum(w_i * is_genre) / running_genre_count) - avg_log
-        # Since total_log = N * avg_log:
-        # (N * avg_log * sum(w_i * is_genre) / running_genre_count) - avg_log
-        # = avg_log * [ (N * sum(w_i * is_genre) / running_genre_count) - 1 ]
-
-        N = (X_hist_full != self.game_pad_idx).float().sum(dim=1, keepdim=True) # (B, 1)
-        safe_N = torch.where(N > 0, N, torch.ones_like(N))
-        
-        genre_sum_w = (hist_genres * w).sum(dim=1) # (B, n_genres)
+        # Debiased per-genre affinity = (weighted mean log-playtime within the genre)
+        # − (user's overall avg log-playtime). With normalized weights w_i = raw_log_i /
+        # total_log and total_log = N · avg_log, this simplifies to:
+        #   avg_log · ((N · Σ w_i·is_genre / count_genre) − 1)
+        # count=0 genres get affinity 0 (avoid div-by-zero).
+        hist_genres = self.game_genre_matrix[X_hist_full]              # (B, F, n_genres)
+        running_genre_count = (hist_genres > 0).float().sum(dim=1)     # (B, n_genres)
+        N = (X_hist_full != self.game_pad_idx).float().sum(dim=1, keepdim=True)  # (B, 1)
+        safe_count = torch.where(running_genre_count > 0, running_genre_count,
+                                 torch.ones_like(running_genre_count))
+        genre_sum_w = (hist_genres * w).sum(dim=1)                     # (B, n_genres)
         genre_affinity = torch.where(
             running_genre_count > 0,
             X_user_avg_log * ((N * genre_sum_w / safe_count) - 1.0),

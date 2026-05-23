@@ -221,22 +221,16 @@ def categorical_overlap_triple(buffers:          OverlapBuffers,
 # and passed in here as a (B, 5) tensor.
 #
 # Indices into the (B, 5) user-side tensor. Order MUST stay stable — used by
-# ranker/precompute.py, ranker/dataset.py, ranker/train.py, ranker/canary.py to
-# pack/unpack consistently. The matching FeatureStore field names below must
-# track these in lockstep.
+# ranker/precompute.py, ranker/dataset.py, ranker/train.py, ranker/canary.py and
+# ranker/serving.py to pack/unpack consistently. The matching FeatureStore field
+# names (user_to_mean_price_bucket / _year_numeric / _median_log_playtime /
+# _mean_log_count / _mean_sentiment) must track this order in lockstep.
 
 B5_USER_MEAN_PRICE        = 0
 B5_USER_MEAN_YEAR         = 1
 B5_USER_MEDIAN_LOG_PT     = 2
 B5_USER_MEAN_LOG_COUNT    = 3
 B5_USER_MEAN_SENTIMENT    = 4
-B5_USER_FIELDS = (                        # FeatureStore dict keys, ordered to match B5_USER_*
-    'user_to_mean_price_bucket',
-    'user_to_mean_year_numeric',
-    'user_to_median_log_playtime',
-    'user_to_mean_log_count',
-    'user_to_mean_sentiment',
-)
 
 
 class Bucket5GameBuffers(NamedTuple):
