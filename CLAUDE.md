@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A PyTorch Two-Tower neural network recommender system trained on the Steam dataset. The model predicts game preferences via dot product of user and item embeddings.
 
+**Two-stage serving.** This is a two-stage recommender: the two-tower model is the candidate-generation (CG) / retrieval stage documented in this file, and a **Wide & Deep ranker** (in `ranker/`) reranks its top-100 candidates. Streamlit and the canary both run the full two-stage pipeline (raw α=0 CG retrieval → ranker rerank). This CLAUDE.md covers the CG model and `src/`; **the ranker subsystem has its own guide at `ranker/CLAUDE.md`** — read it before working anywhere under `ranker/`.
+
 This is a sibling project to:
 - `/Users/nickgreenquist/Documents/Movie-Recommender-System-PyTorch-TwoTower-Model` — MovieLens, MSE objective
 - `/Users/nickgreenquist/Documents/Book-Recommender-System-PyTorch-TwoTower-Model` — Goodreads, softmax objective (primary reference)
@@ -22,7 +24,6 @@ The architecture follows the same two-tower design as the book model. The book m
 python main.py preprocess games          # Step 1: filter games → data/base_games.parquet
 python main.py preprocess interactions   # Step 2: process user items → remaining parquets
 python main.py preprocess                # Run both steps in order
-python main.py explore                   # Explore user/game threshold distributions
 python main.py features                  # Stage 2: base parquets → data/features_*.parquet
 python main.py dataset                   # Stage 3: features → data/dataset_*_v1.pt
 python main.py train                     # Stage 4: train, save checkpoints (softmax)
@@ -248,7 +249,9 @@ scores = user_emb @ item_embs.T   # raw dot products — no correction needed
 
 **Current implementation uses `log1p(count)` with alpha=0.4.** Valve mega-popular titles (CS:GO, Garry's Mod, L4D2) are hard-filtered from the corpus via DENYLIST in `preprocess.py` (`{'730', '550', '620', '240', '4000'}`), so the popularity bias is only needed to suppress moderately popular games, not mega-popular ones.
 
-**Alpha trade-off — α=0 wins offline, α=0.4 wins canary.** A CG checkpoint trained with `alpha=0.0` produces materially better offline metrics (+25% Recall@1, +15% MRR vs α=0.4 — see Offline Evaluation) but materially worse canary quality on niche tastes: popular cross-genre titles leak into specialized lists (Half-Life series invading an arena-FPS canary, popular Paradox strategy invading a 4X-Civ canary, popular shooters invading a Survival canary). This is the popularity correction working as designed — α=0.4 deliberately suppresses globally popular items at training time to force the model onto preference signals, and pays for that with offline metrics that reward retrieving easy popular hits. Prod uses α=0.4 because canary quality on niche tastes is what users notice; an α=0 throwaway exists only as the offline-metrics baseline for ranker comparisons (see `ranker_implementation_plan.md`, §2 "Fair-α comparison"). The throwaway is never exported and never promoted to streamlit.
+**Alpha trade-off — α=0 wins offline, α=0.4 wins canary.** A CG checkpoint trained with `alpha=0.0` produces materially better offline metrics (+25% Recall@1, +15% MRR vs α=0.4 — see Offline Evaluation) but materially worse canary quality on niche tastes: popular cross-genre titles leak into specialized lists (Half-Life series invading an arena-FPS canary, popular Paradox strategy invading a 4X-Civ canary, popular shooters invading a Survival canary). This is the popularity correction working as designed — α=0.4 deliberately suppresses globally popular items at training time to force the model onto preference signals, and pays for that with offline metrics that reward retrieving easy popular hits. Prod uses α=0.4 because canary quality on niche tastes is what users notice; the α=0 CG also serves as the offline-metrics baseline for ranker comparisons (see `ranker/CLAUDE.md`, §2 "Fair-α rule").
+
+**Superseded by the two-stage serving architecture (2026-05-23):** the α=0 CG is no longer a throwaway. In the ranker-serving world it IS the deployed retrieval stage — raw α=0 CG retrieves the top-100, and the ranker reranks them. The standalone α=0.4-CG-only Streamlit experience was the pre-ranker compromise. A ranker-side popularity penalty (α=0.2) was tested 2026-05-23 and rejected (hurt offline ~27%, no meaningfully better canary), so **both stages ship raw α=0** — no popularity penalty anywhere in the deployed pipeline. See "Serving / Export Notes" and `ranker/CLAUDE.md` §10 rule 10.
 
 Temperature and alpha must be read from the checkpoint's config sidecar (`_config.json`) via `load_config_for_checkpoint()`, not hardcoded.
 
@@ -367,15 +370,21 @@ At eval time, val user rollback examples are generated fresh (not from the saved
 
 `game_tag_matrix` (registered buffer, n_games × n_tags × float32) and `game_dev_idx` are excluded from `model.pth` and stored in `feature_store.pt`. The Streamlit app reconstructs `GameRecommender` using the buffers from `feature_store.pt` and loads weights with `strict=False`.
 
-Serving artifacts (generated by `python main.py export`):
-- `serving/model.pth` — weights only (buffers excluded)
-- `serving/game_embeddings.pt` — pre-computed per-game embeddings dict
-- `serving/feature_store.pt` — vocab maps, game metadata, buffers, model config
+**Two-stage serving (architecture decision 2026-05-23):** the deployed CG is the **raw α=0** triple CG (the fixed retrieval stage), and the Wide & Deep ranker reranks its top-100. We tested moving the popularity penalty onto the ranker (α=0.2) and rejected it — it hurt offline ~27% with no meaningfully better canary — so **both stages ship raw α=0** with no popularity penalty anywhere; retrieval is recall-maximizing and the ranker reranks purely on its content/cross features. See `ranker/serving.py` for the shared rerank path (used by both canary and Streamlit) and `ranker/CLAUDE.md` for the full ranker subsystem docs.
+
+CG serving artifacts (generated by `python main.py export`, or by the ranker export below which calls it with the α=0 CG):
+- `serving/model.pth` — CG weights only (buffers excluded)
+- `serving/game_embeddings.pt` — pre-computed per-game CG embeddings dict
+- `serving/feature_store.pt` — vocab maps, game metadata, CG buffers, model config, **+ 9 ranker source arrays** (`game_developer_idx`, `game_year_numeric`, `game_median_log_hours`, `game_log_count`, `game_sentiment`, `game_tag_binary_idf`, `game_tag_mean_idf`, `game_tag_max_idf`, `game_dev_log_catalog_size`) consumed by `ranker.train._buffers_from_fs` to rebuild the ranker's non-persistent buffers at app startup
+
+Ranker serving artifacts (generated by `python ranker/main.py export [ranker.pth]` — re-exports the CG from the α=0 checkpoint, then adds):
+- `serving/ranker.pth` — `WideDeepRanker` state_dict (params + persistent `wide_norm` buffers; the non-persistent `game_*` buffers are rebuilt on load from the feature_store source arrays, same recipe as canary)
+- `serving/ranker_config.json` — ranker reconstruction config (emb dims / `n_cross_features` / `n_wide_normalized` / α + provenance). The app rebuilds the ranker purely from serving artifacts — no `saved_models/` and no `get_config()` glob (prod has neither).
 
 ## Streamlit App
 
-`streamlit run streamlit_app.py` — four tabs:
-- **Recommend** — pick games you've played → dot-product ranked recommendations
+`streamlit run streamlit_app.py` — tabs:
+- **Recommend** — pick games you've played → raw α=0 CG retrieves the top-100 by dot product. A **⚡ Apply Ranker** button reranks the same 100 with the Wide & Deep ranker and shows CG vs ranker **side-by-side with rank-delta badges** (how far each game moved). Degrades gracefully to CG-only if `serving/ranker.pth` is absent.
 - **Similar** — pick a game → cosine-nearest games in combined embedding space
 - **Genres** — pick genres → cosine-nearest games in genre embedding space
 - **Tags** — pick Steam tags → anchor-averaged query → cosine-nearest in tag space
