@@ -8,6 +8,10 @@ Requires: serving/model.pth
 
 Generate serving/ with: python main.py export
 """
+import html
+import json
+import os
+
 import numpy as np
 import streamlit as st
 import torch
@@ -21,6 +25,8 @@ from src.evaluate import (
 )
 
 from src.model import GameRecommender
+from ranker.serving import build_user_inputs_from_indices, rerank_candidates
+from ranker.train import build_ranker
 
 _FAV_WEIGHT      = 10.0   # simulated log-hours weight for explicitly liked games
 _ANCHOR_WEIGHT   =  2.0   # simulated log-hours weight for tag-anchor games
@@ -86,7 +92,39 @@ def load_artifacts():
     all_tag_embs   = torch.cat([be[iid]['GAME_TAG_EMBEDDING']   for iid in all_ids], dim=0)
     all_norm_tag   = F.normalize(all_tag_embs, dim=1)
 
-    return model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag
+    ranker = _load_ranker(fs)
+
+    return model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag, ranker
+
+
+def _load_ranker(fs: dict):
+    """Reconstruct the Wide & Deep ranker from serving/ artifacts, or None if absent
+    (the app then runs CG-only — no supercharge button). The non-persistent game_*
+    buffers are rebuilt from feature_store.pt's source arrays by build_ranker; only
+    params + the persistent wide_norm buffers come from ranker.pth. Same recipe as
+    ranker/canary.py, but driven purely by serving artifacts (no saved_models/, no
+    get_config glob — prod has neither)."""
+    if not (os.path.exists('serving/ranker.pth') and os.path.exists('serving/ranker_config.json')):
+        return None
+    with open('serving/ranker_config.json') as f:
+        cfg = json.load(f)
+    cfg['warm_start_cg_checkpoint'] = None    # never warm-start at serving time
+
+    # build_ranker / _buffers_from_fs expects UNPADDED numpy matrices (it re-pads and
+    # derives the _l2 / _binary variants). feature_store stores them PADDED for the CG,
+    # so strip the pad row here.
+    n_items = fs['n_items']
+    afs = dict(fs)
+    afs['game_tag_matrix']   = fs['game_tag_matrix'][:n_items].numpy()
+    afs['game_genre_matrix'] = fs['game_genre_matrix'][:n_items].numpy()
+
+    ranker = build_ranker(cfg, afs)
+    ranker.load_state_dict(torch.load('serving/ranker.pth', weights_only=True, map_location='cpu'))
+    ranker.eval()
+    # Surface the ranker's training α (popularity penalty) for the comparison header —
+    # read from the config sidecar so swapping in an α=0.2 ranker updates the label.
+    ranker.serving_alpha = float(cfg.get('popularity_alpha', 0.0))
+    return ranker
 
 
 # ── Steam cover URL ───────────────────────────────────────────────────────────
@@ -238,33 +276,172 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
     return model.user_embedding(X_avg_log, X_liked, X_disliked, X_full, X_pw)
 
 
-def _score_games(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
-                 fs: dict, exclude_iids: set, top_n: int = _TOTAL_RESULTS,
-                 mark_iids: set = None):
-    """Rank all corpus games by raw dot product (Menon Path 2: no inference correction).
-    mark_iids: item IDs to include but label '  ◀ seed' in the Title column.
-    """
-    import pandas as pd
-    mark_iids  = mark_iids or set()
-    raw_scores = (all_embs @ user_emb.T).squeeze(-1)
+# ── Two-stage: CG retrieval → ranker rerank ─────────────────────────────────────
 
-    rows = []
-    for idx in raw_scores.argsort(descending=True).tolist():
+def _cg_candidate_iids(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Tensor,
+                       exclude_iids: set, k: int = 100) -> list:
+    """Top-k corpus iids by raw CG dot product (Menon Path 2: no inference correction),
+    in CG order, excluding the user's seed games. This is the candidate pool the ranker
+    reranks — and (in the two-stage tabs) also the CG-only list the user browses, so the
+    'before' and 'after' views operate on the exact same 100 games."""
+    scores = (all_embs @ user_emb.T).squeeze(-1)
+    out = []
+    for idx in scores.argsort(descending=True).tolist():
         iid = all_ids[idx]
         if iid in exclude_iids:
             continue
-        row = _game_meta(iid, fs)
-        if iid in mark_iids:
-            row['Title'] += '  ◀ seed'
-        rows.append(row)
-        if len(rows) >= top_n:
+        out.append(iid)
+        if len(out) >= k:
             break
-    return pd.DataFrame(rows)
+    return out
+
+
+def _candidate_df(cg_iids: list, fs: dict):
+    """Build the paginated CG-only display DataFrame from the candidate pool, so the
+    CG-only view shows exactly the games the ranker will rerank."""
+    import pandas as pd
+    return pd.DataFrame([_game_meta(iid, fs) for iid in cg_iids])
+
+
+def _ranker_rerank(ranker, fs: dict, liked_iids: list, anchor_iids: list,
+                   cand_iids: list) -> list:
+    """Rerank the CG candidate iids with the ranker. Returns the candidate iids in
+    ranker (descending-score) order. Builds the ranker's user-side inputs from the same
+    liked + anchor games the CG used, via the shared ranker.serving path — so the
+    Streamlit user is represented exactly as a canary user is."""
+    device      = torch.device('cpu')
+    item_to_idx = fs['item_to_idx']
+    pad_idx     = fs['n_items']
+
+    liked_idxs  = [item_to_idx[i] for i in liked_iids  if i in item_to_idx]
+    anchor_idxs = [item_to_idx[i] for i in anchor_iids if i in item_to_idx]
+    # Candidate iids may include items not in item_to_idx only in pathological exports;
+    # filter defensively and keep the surviving iids aligned to the score order.
+    cand_pairs  = [(i, item_to_idx[i]) for i in cand_iids if i in item_to_idx]
+    cand_iids_f = [i for i, _ in cand_pairs]
+    cand_idxs   = [x for _, x in cand_pairs]
+
+    ui, full_ids, full_pw, full_raw_pw = build_user_inputs_from_indices(
+        liked_idxs=liked_idxs, anchor_idxs=anchor_idxs, disliked_idxs=[],
+        pad_idx=pad_idx,
+        fav_weight=_FAV_WEIGHT, anchor_weight=_ANCHOR_WEIGHT, dis_weight=0.5,
+    )
+    scores = rerank_candidates(ranker, device, ui, full_ids, full_pw, full_raw_pw, cand_idxs)
+    order  = scores.argsort(descending=True).tolist()
+    return [cand_iids_f[i] for i in order]
+
+
+def _delta_badge(delta: int) -> str:
+    """Rank-movement badge: positive delta = moved up (CG rank − ranker rank)."""
+    if delta > 0:
+        return f"🟢 ↑{delta}"
+    if delta < 0:
+        return f"🔴 ↓{-delta}"
+    return "🟡 no change"
+
+
+def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
+                     ranker_alpha: float = 0.0, per_page: int = _PAGE_SIZE) -> None:
+    """Row-per-rank side-by-side: CG retrieval order vs ranker-reranked order over the
+    SAME candidate pool, paginated `per_page` rows at a time. Each ranker row carries a
+    rank-delta badge showing how far the ranker moved that game relative to its CG
+    position (computed over the FULL pool, not the page). page_key namespaces the
+    Prev/Next page state per tab; ranker_alpha labels the ranker column with the model's
+    popularity penalty (CG retrieval is always α=0 by design)."""
+    cg_rank     = {iid: r for r, iid in enumerate(cg_iids)}        # 0-based CG position
+    ranker_rank = {iid: r for r, iid in enumerate(ranker_iids)}    # 0-based ranker position
+    total       = min(len(cg_iids), len(ranker_iids))
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    page        = max(0, min(st.session_state.get(f'{page_key}_page', 0), total_pages - 1))
+    start, end  = page * per_page, min((page + 1) * per_page, total)
+
+    # Rendered as a CSS GRID with INLINE styles (not st.columns, not CSS classes):
+    # Streamlit columns stack on mobile (open issue streamlit/streamlit#11392, no native
+    # fix). A 3-track grid with `minmax(0,1fr)` content columns is the canonical fix for
+    # children overflowing their container — the `0` min lets each track shrink below its
+    # content so long titles/headers WRAP instead of bleeding into the next column
+    # (plain `flex:1 1 0; min-width:0` was unreliable here). `column-gap` gives the
+    # padding between CG and Ranker. Card mirrors the CG results grid: cover on top, then
+    # title, developer · year, and (ranker side) the rank-delta badge stacked beneath.
+    ROW  = ("display:grid;grid-template-columns:1.6rem minmax(0,1fr) minmax(0,1fr);"
+            "column-gap:22px;align-items:start;margin-bottom:16px")
+    RANK = "text-align:center;font-weight:700;opacity:.55;font-size:.8rem;padding-top:2px"
+
+    def _header_cell(line1: str, line2: str = '') -> str:
+        # line2 (the α popularity-penalty caption) is omitted when α=0 — neither stage
+        # applies a penalty in the shipped config, so the line would just read "α=0".
+        line2_el = (f"<div style='font-size:.74rem;opacity:.65;white-space:normal;"
+                    f"overflow-wrap:anywhere'>{line2}</div>" if line2 else '')
+        return (f"<div style='min-width:0'>"
+                f"<div style='font-weight:600;font-size:.82rem;white-space:normal;"
+                f"overflow-wrap:anywhere'>{line1}</div>{line2_el}</div>")
+
+    def _meta_line(iid: str) -> str:
+        dev  = str(fs['item_id_to_developer'].get(iid, ''))
+        year = str(fs['item_id_to_year'].get(iid, ''))
+        return ' · '.join(x for x in (dev, year) if x)
+
+    def _card(iid: str, badge: str = '') -> str:
+        title  = html.escape(str(fs['item_id_to_title'].get(iid, iid)))
+        meta   = html.escape(_meta_line(iid))
+        meta_el  = (f"<div style='font-size:.72rem;opacity:.6;margin-top:2px;"
+                    f"white-space:normal;overflow-wrap:anywhere'>{meta}</div>" if meta else '')
+        badge_el = (f"<div style='font-size:.8rem;margin-top:4px'>{badge}</div>" if badge else '')
+        # Cover rendered as a background-image div, NOT an <img>: Streamlit's markdown CSS
+        # forces `margin:auto` on images (centering them and ignoring inline width). A
+        # background div sidesteps that entirely. Steam headers are 460×215 → use that
+        # aspect ratio so the banner fills the card width with no crop or centering.
+        return (
+            "<div style='min-width:0'>"
+            f"<div style='width:100%;aspect-ratio:460/215;border-radius:4px;"
+            f"background-color:#1b2838;background-position:center;background-size:cover;"
+            f"background-image:url(\"{_cover_url(iid)}\")'></div>"
+            f"<div style='font-size:.8rem;line-height:1.2;margin-top:4px;"
+            f"white-space:normal;overflow-wrap:anywhere;word-break:break-word'>{title}</div>"
+            f"{meta_el}{badge_el}</div>"
+        )
+
+    parts = [
+        f"<div style='{ROW}'><div style='{RANK}'></div>"
+        f"{_header_cell('Two-tower CG retrieval')}"
+        f"{_header_cell('⚡ Reranker · Wide &amp; Deep', f'α={ranker_alpha:g} popularity penalty' if ranker_alpha else '')}</div>"
+    ]
+    for i in range(start, end):
+        # Each game's delta is the same on both sides: CG_rank − ranker_rank (positive =
+        # the ranker moved it up). The CG card shows where its row's game LANDED in the
+        # ranker (top CG rows mostly ↓ — popular items the ranker demotes); the ranker
+        # card shows where its row's game CAME FROM in CG (top ranker rows mostly ↑).
+        cg_iid = cg_iids[i]
+        rk_iid = ranker_iids[i]
+        cg_delta = i - ranker_rank.get(cg_iid, i)
+        rk_delta = cg_rank.get(rk_iid, i) - i
+        parts.append(
+            f"<div style='{ROW}'><div style='{RANK}'>{i+1}</div>"
+            f"{_card(cg_iid, _delta_badge(cg_delta))}"
+            f"{_card(rk_iid, _delta_badge(rk_delta))}</div>")
+    # st.html (not st.markdown): st.markdown runs the HTML through a CommonMark +
+    # sanitizer pass that mangles dense nested-div layouts (the source of the earlier
+    # text bleed). st.html renders raw HTML faithfully — same lesson as the Book app's
+    # cover rendering.
+    st.html("".join(parts))
+
+    if total_pages > 1:
+        _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
+        if prev_col.button('← Prev', disabled=(page == 0), key=f'{page_key}_prev'):
+            st.session_state[f'{page_key}_page'] = page - 1
+            st.rerun()
+        info_col.markdown(
+            f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+        if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{page_key}_next'):
+            st.session_state[f'{page_key}_page'] = page + 1
+            st.rerun()
 
 
 # ── Tab: Recommend ────────────────────────────────────────────────────────────
 
-def tab_recommend(model, fs, all_ids, all_embs):
+def tab_recommend(model, fs, all_ids, all_embs, ranker=None):
     st.caption(
         "Select games you've enjoyed and the model will infer your taste from your "
         "play history. The more games you add, the sharper the recommendations."
@@ -273,7 +450,9 @@ def tab_recommend(model, fs, all_ids, all_embs):
     if st.session_state.pop('_clear_rec', False):
         for key in ('rec_liked', 'rec_tags'):
             st.session_state[key] = []
-        for key in ('rec_df', 'rec_page', 'rec_anchor_caption'):
+        for key in ('rec_df', 'rec_page', 'rec_anchor_caption',
+                    'rec_cg_iids', 'rec_liked_iids', 'rec_anchor_iids',
+                    'rec_ranker_iids', 'rec_ranked', 'rec_cmp_page'):
             st.session_state.pop(key, None)
 
     all_titles = fs['popularity_ordered_titles']
@@ -310,8 +489,15 @@ def tab_recommend(model, fs, all_ids, all_embs):
             with torch.no_grad():
                 user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids)
             exclude_iids = set(liked_iids) | set(anchor_iids)
-            df = _score_games(user_emb, all_ids, all_embs, fs, exclude_iids)
-            _store_results(df, 'rec')
+            # Retrieve the top-100 candidate pool once; both the CG-only browse view and
+            # the ranker rerank operate on this same pool (5 pages of 20).
+            cg_iids = _cg_candidate_iids(user_emb, all_ids, all_embs, exclude_iids, k=100)
+            st.session_state['rec_cg_iids']     = cg_iids
+            _store_results(_candidate_df(cg_iids, fs), 'rec')
+            st.session_state['rec_liked_iids']  = liked_iids
+            st.session_state['rec_anchor_iids'] = anchor_iids
+            st.session_state['rec_ranked']      = False
+            st.session_state.pop('rec_ranker_iids', None)
             if anchor_iids:
                 anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
                 st.session_state['rec_anchor_caption'] = "Tag anchors: " + " · ".join(anchor_names[:12])
@@ -322,7 +508,40 @@ def tab_recommend(model, fs, all_ids, all_embs):
         caption = st.session_state.get('rec_anchor_caption')
         if caption:
             st.caption(caption)
-    _show_results('rec')
+
+        # ── Two-stage supercharge: CG retrieval → ranker rerank ──────────────
+        ranked = st.session_state.get('rec_ranked', False)
+        if ranker is not None and st.session_state.get('rec_cg_iids'):
+            n_cand = len(st.session_state['rec_cg_iids'])
+            label = ("↺  Back to CG-only recommendations" if ranked
+                     else f"⚡  Apply Ranker  ·  rerank all {n_cand} candidates")
+            if st.button(label, use_container_width=True, key='rec_supercharge'):
+                if not ranked:
+                    with st.spinner("Reranking with the Wide & Deep ranker…"):
+                        st.session_state['rec_ranker_iids'] = _ranker_rerank(
+                            ranker, fs,
+                            st.session_state.get('rec_liked_iids', []),
+                            st.session_state.get('rec_anchor_iids', []),
+                            st.session_state['rec_cg_iids'])
+                    st.session_state['rec_ranked']   = True
+                    st.session_state['rec_cmp_page'] = 0
+                else:
+                    st.session_state['rec_ranked'] = False
+                st.rerun()
+
+        if st.session_state.get('rec_ranked') and st.session_state.get('rec_ranker_iids'):
+            n_cand = len(st.session_state['rec_cg_iids'])
+            st.caption(f"Candidate generation retrieves the top {n_cand} by using an ultra-fast "
+                       f"two-tower retrieval model; the ranker reorders those top {n_cand} CG "
+                       f"candidates. Badges show each game's rank movement.")
+            st.divider()
+            _show_comparison(st.session_state['rec_cg_iids'],
+                             st.session_state['rec_ranker_iids'], fs, 'rec_cmp',
+                             ranker_alpha=getattr(ranker, 'serving_alpha', 0.0))
+        else:
+            _show_results('rec')
+    else:
+        _show_results('rec')
 
 
 # ── Tab: Similar ──────────────────────────────────────────────────────────────
@@ -492,7 +711,7 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
 
 # ── Tab: Examples (canary profiles) ──────────────────────────────────────────
 
-def tab_examples(model, fs, all_ids, all_embs):
+def tab_examples(model, fs, all_ids, all_embs, ranker=None):
     st.caption("Select a pre-built user profile to see what the model recommends for that taste.")
 
     profiles = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
@@ -504,7 +723,9 @@ def tab_examples(model, fs, all_ids, all_embs):
     )
 
     if not selected:
-        st.session_state.pop('examples_profile', None)
+        for key in ('examples_profile', 'ex_cg_iids', 'ex_ranker_iids', 'ex_ranked',
+                    'ex_cmp_page'):
+            st.session_state.pop(key, None)
         return
 
     fav_titles   = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
@@ -521,10 +742,15 @@ def tab_examples(model, fs, all_ids, all_embs):
     if st.session_state.get('examples_profile') != selected:
         with torch.no_grad():
             user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, anchor_in_liked=False)
-        df = _score_games(user_emb, all_ids, all_embs, fs,
-                          exclude_iids=set(liked_iids),
-                          mark_iids=set(anchor_iids))
-        _store_results(df, 'examples')
+        # Retrieve the top-100 pool (exclude liked AND anchors — matches the canary's
+        # exclude set so the side-by-side mirrors the canary artifact). Both the CG-only
+        # browse view and the ranker rerank operate on this same pool.
+        cg_iids = _cg_candidate_iids(
+            user_emb, all_ids, all_embs, set(liked_iids) | set(anchor_iids), k=100)
+        st.session_state['ex_cg_iids'] = cg_iids
+        _store_results(_candidate_df(cg_iids, fs), 'examples')
+        st.session_state['ex_ranked'] = False
+        st.session_state.pop('ex_ranker_iids', None)
         st.session_state['examples_profile'] = selected
 
     st.subheader(f"Recommendations for: {selected}")
@@ -533,7 +759,35 @@ def tab_examples(model, fs, all_ids, all_embs):
     if anchor_iids:
         anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
         st.caption("Tag anchors: " + ", ".join(anchor_names))
-    _show_results('examples')
+
+    # ── Two-stage supercharge: CG retrieval → ranker rerank ──────────────────
+    ranked = st.session_state.get('ex_ranked', False)
+    if ranker is not None and st.session_state.get('ex_cg_iids'):
+        n_cand = len(st.session_state['ex_cg_iids'])
+        label = ("↺  Back to CG-only recommendations" if ranked
+                 else f"⚡  Apply Ranker  ·  rerank all {n_cand} candidates")
+        if st.button(label, use_container_width=True, key='ex_supercharge'):
+            if not ranked:
+                with st.spinner("Reranking with the Wide & Deep ranker…"):
+                    st.session_state['ex_ranker_iids'] = _ranker_rerank(
+                        ranker, fs, liked_iids, anchor_iids, st.session_state['ex_cg_iids'])
+                st.session_state['ex_ranked']   = True
+                st.session_state['ex_cmp_page'] = 0
+            else:
+                st.session_state['ex_ranked'] = False
+            st.rerun()
+
+    if st.session_state.get('ex_ranked') and st.session_state.get('ex_ranker_iids'):
+        n_cand = len(st.session_state['ex_cg_iids'])
+        st.caption(f"Candidate generation retrieves the top {n_cand} by using an ultra-fast "
+                   f"two-tower retrieval model; the ranker reorders those top {n_cand} CG "
+                   f"candidates. Badges show each game's rank movement.")
+        st.divider()
+        _show_comparison(st.session_state['ex_cg_iids'],
+                         st.session_state['ex_ranker_iids'], fs, 'ex_cmp',
+                         ranker_alpha=getattr(ranker, 'serving_alpha', 0.0))
+    else:
+        _show_results('examples')
 
 
 # ── Tab: About ───────────────────────────────────────────────────────────────
@@ -553,6 +807,12 @@ def tab_about():
         )
         st.markdown(
             "At inference, a dot product of the user and item embeddings retrieves the most relevant games."
+        )
+        st.markdown(
+            "This is a **two-stage** system: the two-tower model is the fast **retrieval** stage, and a "
+            "**Wide & Deep ranker** reranks its top 100 candidates using richer user × item cross-features. "
+            "Try it on the **Recommend** tab — results appear from retrieval first, then the **⚡ Apply Ranker** "
+            "button reranks them side-by-side."
         )
 
         st.subheader("The core design choice: no user ID")
@@ -575,7 +835,14 @@ def tab_about():
 
     col, _ = st.columns([1, 1])
     with col:
-        st.header("User Tower")
+        st.header("Stage 1: Two-Tower Retrieval")
+        st.markdown(
+            "The first stage is a two-tower model — a **user tower** and an **item tower** that each project into the "
+            "same 128-dim space. Scoring a game is a dot product of the two embeddings, so all ~5,437 games can be "
+            "ranked in a single matrix multiply. This is the fast, recall-maximizing retrieval stage."
+        )
+
+        st.subheader("User Tower")
         st.markdown(
             "Six sub-embeddings are concatenated (192-dim), then passed through a projection MLP → **128-dim**."
         )
@@ -596,7 +863,7 @@ def tab_about():
             "This means recommendations can be generated for any play history at inference time with no preprocessing."
         )
 
-        st.header("Item Tower")
+        st.subheader("Item Tower")
         st.markdown(
             "Six sub-embeddings are concatenated (96-dim), then passed through a projection MLP → **128-dim**."
         )
@@ -611,7 +878,7 @@ def tab_about():
 | price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
 """, unsafe_allow_html=True)
 
-        st.header("Projection MLP")
+        st.subheader("Projection MLP")
         st.markdown("""
 Concatenating sub-embeddings and feeding them directly into a dot product only learns **additive combinations**
 of the individual signals — it cannot model interactions between them.
@@ -624,9 +891,11 @@ This lets the model learn cross-feature interactions, such as:
 
 Both towers project to the same 128-dim output space — only this final dim needs to match.
 The internal concat sizes (192 user, 96 item) are independent of each other.
+
+Each tower's 128-dim output is L2-normalized, so the final dot product is a cosine similarity.
 """)
 
-        st.header("Shared Embeddings")
+        st.subheader("Shared Embeddings")
         st.markdown("""
 **item_embedding_lookup** (32-dim) — shared between all four user history pools and the item tower.
 
@@ -637,25 +906,32 @@ This means a game you played appears in the same embedding space as the game bei
 learns to align user taste with item identity through training.
 """)
 
-        st.header("Training")
+        st.subheader("Training")
         st.markdown("""
 - **Dataset:** UCSD Steam — 88k Australian users, ~5,437 corpus games (≥10 users with ≥6 min playtime; ultra-popular Valve titles excluded)
 - **Corpus filtering:** Games with fewer than 10 qualifying users excluded. Users with fewer than 5 or more than 10,000 total hours excluded. Users with fewer than 2 corpus games excluded.
 - **Playtime signal:** `log(1 + hours)` — used to classify history into Liked/Disliked pools. Never a prediction target.
 - **Loss:** Full softmax cross-entropy over the entire ~5,437-game corpus every step
 - **Optimizer:** Adam, lr=0.001, eps=1e-6, CosineAnnealingLR (eta_min=1e-4)
-- **Popularity bias:** alpha=0.4 × log1p(count) **added** at training (Menon et al. 2021, Path 2); raw dot products at inference — no correction needed
+- **Popularity bias:** alpha × log1p(count) **added** at training (Menon et al. 2021, Path 2); raw dot products at inference — no correction needed. The standalone CG uses alpha=0.4; the **deployed retrieval stage uses alpha=0** (recall-maximizing — the ranker does the final ranking, see Stage 2)
 - **Gradient clipping:** max_norm=1.0
-- **Batch size:** 512, temperature=0.1 (pure hyperparameter for full softmax)
+- **Batch size:** 512, temperature=0.000977 (= 0.5 / 512) for the full-softmax retrieval model
 - **Steps:** 50,000
 - **Training examples:** Rollback construction with 3× shuffle augmentation → ~4.3M examples (55k train users)
 """)
 
-        st.header("Offline Evaluation")
+        st.subheader("Offline Evaluation")
         st.markdown(
-            "Evaluated on **2,000 held-out val users** (never seen during training). "
-            "Each example has one target; Recall@K = Hit Rate@K for single-target eval. "
+            "Evaluated on a **sample of 2,000 users** drawn from the held-out validation set (10% of all users, "
+            "never seen during training). Each example has one target; Recall@K = Hit Rate@K for single-target eval. "
             "Shuffled history — no release-date ordering."
+        )
+        st.markdown(
+            "**Which checkpoint these tables describe.** The `alpha` popularity-bias knob produces two CG variants "
+            "(same architecture, different training-time bias). The tables below are the **standalone CG (alpha=0.4)** — "
+            "it trades raw recall for cleaner niche-taste lists. The **deployed retrieval stage uses alpha=0**, which is "
+            "recall-maximizing and therefore scores *higher* offline (NDCG@10 0.0752 vs 0.0645); that is the baseline the "
+            "ranker improves on in Stage 2 below."
         )
 
         st.markdown("**V5 PROD** — corpus: 5,437 games (Valve titles removed, no LayerNorm, correct Menon Path 2)")
@@ -713,10 +989,79 @@ MRR: **0.0875** (random: 0.0017, +51×)
         st.markdown(
             "**Why V5 metrics are lower than V4:** V4 was trained with the popularity bias *subtracted*, which caused "
             "the model to compensate by pushing popular item embeddings closer to all user embeddings — inflating Recall@K "
-            "for popular targets. V5 uses the correct Menon Path 2 formula (bias *added* at training, raw dot products at "
-            "inference), producing genuinely preference-driven rankings with cleaner per-genre quality. "
+            "for popular targets."
+        )
+        st.markdown(
+            "V5 uses the correct Menon Path 2 formula (bias *added* at training, raw dot products at "
+            "inference), producing genuinely preference-driven rankings with cleaner per-genre quality."
+        )
+        st.markdown(
             "**Why V3/V4 metrics are lower than V2:** Ultra-popular Valve games (CS:GO, Garry's Mod, Left 4 Dead 2) "
             "were trivially easy prediction targets — removing them makes every target require genuine taste modeling."
+        )
+
+        st.header("Stage 2: Wide & Deep Ranker")
+        st.markdown(
+            "Everything above is the **retrieval** stage. It is fast — it can score all ~5,437 games in a single "
+            "matrix multiply — but it has a structural limit: it only ever compares a user and an item through a "
+            "**dot product of two independent embeddings**."
+        )
+        st.markdown(
+            "It never sees the user and a specific candidate *together*, so it can't reason about signals like "
+            "\"how many of this candidate's genres are in your history\" or \"is this priced like the games you "
+            "usually play.\""
+        )
+        st.markdown(
+            "A second-stage **ranker** adds exactly those signals. It takes the retrieval model's **top 100** and "
+            "reorders them:"
+        )
+        st.markdown("""
+| Stage | Model | Job |
+|---|---|---|
+| 1 — Retrieval | Two-tower (above) | Score all games, keep the top 100 |
+| 2 — Ranking | Wide & Deep | Rerank those 100 with user × item cross-features |
+""", unsafe_allow_html=True)
+
+        st.subheader("Why Wide & Deep")
+        st.markdown("""
+- **Deep side** — mirrors the two-tower model exactly (same per-feature towers, same dimensions) and is
+  warm-started from the trained retrieval weights. All sub-embeddings concatenate (288-dim) into an MLP, carrying
+  over everything the retrieval model already learned.
+- **Wide side** — hand-crafted **cross-features** that bypass the MLP and connect straight to the output, each with
+  its own learned weight. A single scalar like "genre overlap" would be drowned out among ~290 deep dimensions, so
+  it gets a direct path instead.
+""")
+        st.markdown("The cross-features are what a dot product structurally cannot compute:")
+        st.markdown("""
+| Group | What it measures |
+|---|---|
+| Categorical overlap | Genre / tag / developer overlap between the candidate and your history (full, liked, and most-recent-3 slices) |
+| Numeric matching | Price gap, release-era gap, playtime calibration, popularity and sentiment match between your averages and the candidate |
+| Niche / rarity | IDF-weighted tag overlap + rarest-tag / studio-scale matching — suppresses popular cross-genre titles leaking into niche-taste lists |
+""", unsafe_allow_html=True)
+
+        st.markdown(
+            "The ranker is trained with the same sampled-softmax cross-entropy loss as the retrieval model "
+            "(1 positive + 999 random negatives), warm-started from it, then learns the cross-feature weights on top. "
+            "Because it only reranks the top 100, its hit-rate ceiling is the retrieval model's Recall@100."
+        )
+
+        st.subheader("What reranking buys")
+        st.markdown(
+            "Same held-out users, both capped at the retrieval ceiling. *Retrieval* here is the deployed raw "
+            "alpha=0 CG — neither production stage applies a popularity penalty:"
+        )
+        st.markdown("""
+| Metric | Retrieval (raw alpha=0 CG) | + Ranker | Lift |
+|---|---|---|---|
+| NDCG@10 | 0.0752 | **0.0867** | +15% |
+| Hit@10 | 0.1430 | **0.1625** | +14% |
+| MRR | 0.0726 | **0.0813** | +12% |
+""", unsafe_allow_html=True)
+        st.markdown(
+            "On the pure-reranking subset (where retrieval surfaced the target), NDCG@10 rises 0.1361 → 0.1569 (+15%). "
+            "Beyond the metrics, the ranker visibly cleans up niche-taste lists — for example, removing JRPGs that "
+            "leak into a fighting-game query. See it live on the **Recommend** tab."
         )
 
         st.header("Limitations")
@@ -748,7 +1093,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Steam Game Recommender")
-model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag = load_artifacts()
+model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag, ranker = load_artifacts()
 
 st.markdown(
     "<small>Two-Tower neural network · Built with "
@@ -764,10 +1109,10 @@ recommend_tab, examples_tab, similar_tab, genres_tab, tags_tab, about_tab = st.t
 )
 
 with recommend_tab:
-    tab_recommend(model, fs, all_ids, all_embs)
+    tab_recommend(model, fs, all_ids, all_embs, ranker)
 
 with examples_tab:
-    tab_examples(model, fs, all_ids, all_embs)
+    tab_examples(model, fs, all_ids, all_embs, ranker)
 
 with similar_tab:
     tab_similar(be, fs, all_ids, all_norm)
