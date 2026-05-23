@@ -1,0 +1,273 @@
+CG checkpoint:     saved_models/best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth
+Ranker checkpoint: saved_models/ranker/ranker_wd_alpha_0_20260522_192125.pth
+α match:           ranker α=0.0 → CG α=0.0 (parity)
+Top-N per canary:  20    Top-K from CG: 100
+Canaries:          9
+
+Device: mps
+
+CG: popularity_alpha=0.0  V_all shape=(5437, 128)
+Ranker: popularity_alpha=0.0  n_cross_features=24
+
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Western RPG Lover  |  Tags: Action RPG
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: The Witcher 2: Assassins of Kings Enhanced Edition, The Elder Scrolls IV: Oblivion® Game of the Year Edition, DARK SOULS™: Prepare To Die™ Edition, Divinity: Original Sin (Classic), Fallout: New Vegas, Mass Effect 2
+Anchors: Numen: Contest of Heroes, Victor Vran ARPG, Grim Dawn, Hazen: The Dark Whispers, BorderZone
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Kingdoms of Amalur: Reckoning™                      Baldur's Gate II: Enhanced Edition                
+2    Dragon Age: Origins - Ultimate Edition              Kingdoms of Amalur: Reckoning™                    
+3    Fallout 4                                           Baldur's Gate: Enhanced Edition                   
+4    DARK SOULS™ II                                      Dungeons and Dragons: Daggerdale                  
+5    Dungeons and Dragons: Daggerdale                    Might & Magic: Heroes VI                          
+6    Pillars of Eternity                                 Borderlands 2                                     
+7    The Witcher: Enhanced Edition Director's Cut        Dungeon Siege II                                  
+8    Borderlands 2                                       Terraria                                          
+9    DARK SOULS™ III                                     Borderlands                                       
+10   RIFT                                                Fallout 4                                         
+11   Fallout 3: Game of the Year Edition                 Pillars of Eternity                               
+12   Mass Effect                                         Dragon Age: Origins - Ultimate Edition            
+13   Torchlight II                                       Dark Messiah of Might & Magic                     
+14   Baldur's Gate II: Enhanced Edition                  Warhammer® 40,000: Dawn of War® II Chaos Rising   
+15   Borderlands                                         Torchlight II                                     
+16   Dragon's Dogma: Dark Arisen                         Dungeon Siege III                                 
+17   Torchlight                                          Warhammer 40,000: Dawn of War II                  
+18   Dungeon Siege III                                   PlanetSide 2                                      
+19   Lords Of The Fallen™                                Torchlight                                        
+20   DARK SOULS™ II: Scholar of the First Sin            Dragon Age: Origins                               
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+JRPG Lover  |  Tags: JRPG
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Mugen Souls, OH! RPG!, Ys VI: The Ark of Napishtim, Wild Season, Disgaea PC / 魔界戦記ディスガイア PC, Hyperdevotion Noire: Goddess Black Heart (Neptunia), FINAL FANTASY® XIII
+Anchors: I am Setsuna, The Legend of Heroes: Trails in the Sky SC, Grandia® II Anniversary Edition, Agarest: Generations of War, FINAL FANTASY III
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Fairy Fencer F                                      FINAL FANTASY V                                   
+2    Megadimension Neptunia VII                          Megadimension Neptunia VII                        
+3    Hyperdimension Neptunia Re;Birth3 V Generation / …  FINAL FANTASY IV: THE AFTER YEARS                 
+4    Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテュー…  DRAGON QUEST HEROES™ Slime Edition                
+5    Hyperdimension Neptunia Re;Birth2: Sisters Genera…  Mahjong Pretty Girls Battle                       
+6    FINAL FANTASY TYPE-0™ HD                            FINAL FANTASY IV                                  
+7    Hyperdimension Neptunia U: Action Unleashed         Tales of Symphonia                                
+8    Tales of Zestiria                                   Fairy Fencer F                                    
+9    Borderlands 2                                       FINAL FANTASY TYPE-0™ HD                          
+10   Agarest: Generations of War Zero                    Hyperdimension Neptunia Re;Birth3 V Generation / …
+11   The Legend of Heroes: Trails in the Sky             Tales of Zestiria                                 
+12   FINAL FANTASY IX                                    Hyperdimension Neptunia U: Action Unleashed       
+13   FINAL FANTASY X/X-2 HD Remaster                     Agarest: Generations of War Zero                  
+14   FINAL FANTASY XIV Online                            Hyperdimension Neptunia Re;Birth2: Sisters Genera…
+15   FINAL FANTASY IV: THE AFTER YEARS                   Agarest: Generations of War 2                     
+16   FINAL FANTASY IV                                    Rabi-Ribi                                         
+17   Fortune Summoners                                   FINAL FANTASY IX                                  
+18   FINAL FANTASY VII                                   Anima Gate of Memories                            
+19   FINAL FANTASY VIII                                  Mystery Chronicle: One Way Heroics                
+20   Epic Battle Fantasy 4                               FINAL FANTASY X/X-2 HD Remaster                   
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+FPS Lover  |  Tags: FPS
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: QUAKE II, Unreal Tournament 2004: Editor's Choice Edition, Quake IV, Final DOOM, Serious Sam HD: The First Encounter, Quake III Arena, Doom 3: BFG Edition
+Anchors: STAR WARS™ - Dark Forces, Singularity™, Quake Live™, Far Cry 3 - Blood Dragon, Painkiller: Resurrection
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Left 4 Dead                                         QUAKE Mission Pack 1: Scourge of Armagon          
+2    Half-Life 2: Episode One                            Deathmatch Classic                                
+3    Half-Life 2: Deathmatch                             Aliens versus Predator Classic 2000               
+4    Half-Life 2: Episode Two                            Return to Castle Wolfenstein                      
+5    Half-Life 2                                         QUAKE Mission Pack 2: Dissolution of Eternity     
+6    DOOM 3                                              Half-Life 2                                       
+7    Portal                                              Call of Duty® 2                                   
+8    QUAKE                                               Half-Life 2: Deathmatch                           
+9    Half-Life: Opposing Force                           Unreal Gold                                       
+10   Half-Life 2: Lost Coast                             HeXen II                                          
+11   Half-Life                                           Call of Duty®                                     
+12   Unreal Tournament 3 Black                           Unreal Tournament: Game of the Year Edition       
+13   Half-Life: Blue Shift                               Left 4 Dead                                       
+14   DOOM 3 Resurrection of Evil                         Half-Life                                         
+15   Ultimate Doom                                       Day of Defeat                                     
+16   Half-Life: Source                                   Counter-Strike                                    
+17   Unreal Gold                                         Kingpin — Life of Crime                           
+18   Call of Duty®: Black Ops                            Half-Life: Opposing Force                         
+19   Counter-Strike                                      Oddworld: Abe's Exoddus®                          
+20   Day of Defeat: Source                               QUAKE III: Team Arena                             
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Civ Lover  |  Tags: 4X
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Sid Meier's Civilization® V, Civilization IV®: Warlords, Sid Meier's Civilization IV: Colonization, Total War™: ROME II - Emperor Edition
+Anchors: Galactic Civilizations® II: Ultimate Edition, StarDrive, Star Ruler 2, Galactic Civilizations® I: Ultimate Edition, Space Empires IV Deluxe
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Empire: Total War™                                  Victoria II                                       
+2    Napoleon: Total War™                                Hearts of Iron III                                
+3    Europa Universalis IV                               Galactic Civilizations III                        
+4    Sid Meier's Civilization®: Beyond Earth™            East India Company                                
+5    Crusader Kings II                                   Patrician IV - Steam Special Edition              
+6    Medieval II: Total War™                             Offworld Trading Company                          
+7    Warhammer 40,000: Dawn of War II                    Empire: Total War™                                
+8    Endless Space® - Collection                         Europa Universalis IV                             
+9    Rome: Total War™ - Collection                       Commander: Conquest of the Americas               
+10   Civilization IV: Beyond the Sword                   Europa Universalis III Complete                   
+11   Sins of a Solar Empire®: Rebellion                  Port Royale 2                                     
+12   Sid Meier's Civilization® IV                        Crusader Kings II                                 
+13   Stronghold 3 Gold                                   Stronghold 3 Gold                                 
+14   Total War: ATTILA                                   Grand Ages: Rome                                  
+15   Hearts of Iron III                                  Stellaris                                         
+16   Stellaris                                           Democracy 3                                       
+17   Warhammer® 40,000: Dawn of War® II Chaos Rising     Sid Meier's Civilization®: Beyond Earth™          
+18   Banished                                            Napoleon: Total War™                              
+19   XCOM: Enemy Unknown                                 Endless Space® - Collection                       
+20   Age of Empires® III: Complete Collection            Master of Orion                                   
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Indie Lover  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Terraria, FTL: Faster Than Light, The Binding of Isaac: Rebirth, Rogue Legacy, Spelunky
+Anchors: Hotline Miami 2: Wrong Number Digital Comic, Typefighters (Steam Edition), The Art of Playing, Over The Void, Super Game Jam
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Crypt of the NecroDancer                            Dungeon Souls                                     
+2    Enter the Gungeon                                   Risk of Rain                                      
+3    Nuclear Throne                                      Hero Siege                                        
+4    Risk of Rain                                        Quest of Dungeons                                 
+5    Hero Siege                                          Desktop Dungeons                                  
+6    Undertale                                           The Binding of Isaac                              
+7    Dungeon of the Endless™                             Starbound                                         
+8    Magicite                                            Nuclear Throne                                    
+9    Darkest Dungeon®                                    Undertale                                         
+10   Downwell                                            Crypt of the NecroDancer                          
+11   The Binding of Isaac                                Castle Crashers®                                  
+12   Shovel Knight: Treasure Trove                       Dungeon of the Endless™                           
+13   Starbound                                           Runers                                            
+14   bit Dungeon II                                      Momodora: Reverie Under The Moonlight             
+15   Don't Starve Together                               Borderlands 2                                     
+16   Overture                                            Don't Starve Together                             
+17   One Way Heroics                                     Darkest Dungeon®                                  
+18   Castle Crashers®                                    Magicka                                           
+19   Quest of Dungeons                                   Magicite                                          
+20   Hammerwatch                                         Secrets of Grindea                                
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Racing Lover  |  Tags: Racing
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: F1 2012™, Need For Speed: Hot Pursuit, Test Drive Unlimited 2, Ford Street Racing, Test Drive: Ferrari Racing Legends
+Anchors: Sprint Cars Road to Knoxville, Xpand Rally Xtreme, Truck Racer, Ignite, RACE - The WTCC Game
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Euro Truck Simulator 2                              Rig n Roll                                        
+2    Train Simulator                                     Off-Road Drive                                    
+3    Assetto Corsa                                       WRC 4 FIA World Rally Championship                
+4    RACE 07                                             MotoGP™13                                         
+5    RaceRoom Racing Experience                          F1 2011                                           
+6    Microsoft Flight Simulator X: Steam Edition         Xpand Rally                                       
+7    American Truck Simulator                            Need for Speed Undercover                         
+8    GRID 2                                              18 Wheels of Steel: American Long Haul            
+9    Just Cause 2                                        Train Simulator                                   
+10   OMSI 2: Steam Edition                               rFactor 2                                         
+11   Unturned                                            Trainz™ Simulator 12                              
+12   FlatOut 2™                                          Ship Simulator Extremes                           
+13   Trainz™ Simulator 12                                F1 RACE STARS™                                    
+14   SPINTIRES™                                          Bus Simulator 16                                  
+15   Project CARS                                        18 Wheels of Steel: Extreme Trucker               
+16   rFactor 2                                           Grand Theft Auto: Episodes from Liberty City      
+17   Grand Theft Auto: San Andreas                       Need for Speed: Shift                             
+18   F1 2014                                             OMSI 2: Steam Edition                             
+19   Grand Theft Auto: Episodes from Liberty City        F1 2015                                           
+20   Ship Simulator Extremes                             iRacing                                           
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Fighting Lover  |  Tags: Fighting
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Street Fighter X Tekken, Ultra Street Fighter® IV, Injustice: Gods Among Us Ultimate Edition, Divekick, Street Fighter® IV, DEAD OR ALIVE 5 Last Round: Core Fighters, THE KING OF FIGHTERS XIII STEAM EDITION
+Anchors: Mortal Kombat: Legacy, THE KING OF FIGHTERS 2002 UNLIMITED MATCH, THE KING OF FIGHTERS '98 ULTIMATE MATCH FINAL EDITION, Guilty Gear Isuka, GUILTY GEAR XX ACCENT CORE PLUS R
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Street Fighter V                                    BlazBlue: Calamity Trigger                        
+2    BlazBlue: Calamity Trigger                          GUILTY GEAR Xrd -SIGN-                            
+3    BlazBlue: Continuum Shift Extend                    BlazBlue: Continuum Shift Extend                  
+4    GUILTY GEAR Xrd -SIGN-                              Skullgirls                                        
+5    Skullgirls                                          Devil May Cry® 4 Special Edition                  
+6    NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Bur…  DRAGON BALL XENOVERSE                             
+7    Devil May Cry 4                                     NARUTO SHIPPUDEN: Ultimate Ninja STORM 4          
+8    Devil May Cry® 4 Special Edition                    NARUTO SHIPPUDEN: Ultimate Ninja STORM 3 Full Bur…
+9    METAL SLUG 3                                        Yatagarasu Attack on Cataclysm                    
+10   DRAGON BALL XENOVERSE                               Street Fighter V                                  
+11   NARUTO SHIPPUDEN: Ultimate Ninja STORM Revolution   Resident Evil / biohazard HD REMASTER             
+12   Devil May Cry® 3 Special Edition                    Mitsurugi Kamui Hikae                             
+13   DYNASTY WARRIORS 8: Xtreme Legends Complete Editi…  FINAL FANTASY® XIII-2                             
+14   METAL GEAR RISING: REVENGEANCE                      Mortal Kombat Komplete Edition                    
+15   Sonic & All-Stars Racing Transformed                STRIDER™ / ストライダー飛竜®                              
+16   Borderlands 2                                       FINAL FANTASY TYPE-0™ HD                          
+17   Mitsurugi Kamui Hikae                               NARUTO SHIPPUDEN: Ultimate Ninja STORM Revolution 
+18   Mortal Kombat Komplete Edition                      UNDER NIGHT IN-BIRTH Exe:Late                     
+19   FINAL FANTASY VII                                   FINAL FANTASY VIII                                
+20   Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテュー…  Tales of Zestiria                                 
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Survival Lover  |  Tags: Survival
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Rust, ARK: Survival Evolved, Don't Starve Together, The Forest
+Anchors: Vortex: The Gateway, Project Explore, Miasmata, FarSky, UnReal World
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Terraria                                            Hurtworld                                         
+2    Unturned                                            Unturned                                          
+3    DayZ                                                Planet Explorers                                  
+4    Arma 2: Operation Arrowhead                         Reign Of Kings                                    
+5    PAYDAY 2                                            Starbound                                         
+6    Starbound                                           Stranded Deep                                     
+7    Borderlands 2                                       Tree of Life                                      
+8    Arma 3                                              DayZ                                              
+9    Fallout 4                                           Miscreated                                        
+10   Killing Floor                                       Terraria                                          
+11   Warframe                                            RimWorld                                          
+12   Reign Of Kings                                      Robocraft                                         
+13   Fallout: New Vegas                                  PAYDAY 2                                          
+14   Robocraft                                           Arma 2: Operation Arrowhead                       
+15   Arma II: DayZ Mod                                   Heroes & Generals                                 
+16   SPORE™                                              Fallout 4                                         
+17   Sid Meier's Civilization® V                         Tom Clancy’s The Division™                        
+18   Grand Theft Auto V                                  Arma 3                                            
+19   Chivalry: Medieval Warfare                          Subnautica                                        
+20   PlanetSide 2                                        Portal Knights                                    
+
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Management Lover  |  Tags: Management
+════════════════════════════════════════════════════════════════════════════════════════════════════════════
+Liked: Cities: Skylines, Kerbal Space Program, Prison Architect, Game Dev Tycoon, Euro Truck Simulator 2
+Anchors: Mad Games Tycoon, Big Pharma, Ride! Carnival Tycoon, Hotel Giant 2, Game Corp DX
+
+#    CG top-20                                           Ranker top-20                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────
+1    Farming Simulator 15                                Farming Simulator 15                              
+2    Banished                                            Software Inc.                                     
+3    Train Simulator                                     Train Fever                                       
+4    Sid Meier's Civilization® V                         Hearts of Iron IV                                 
+5    SimCity™ 4 Deluxe Edition                           Banished                                          
+6    RollerCoaster Tycoon® 3: Platinum                   RollerCoaster Tycoon® 3: Platinum                 
+7    Tropico 5                                           Project Highrise                                  
+8    Terraria                                            Turmoil                                           
+9    Farming Simulator 2013 Titanium Edition             Sid Meier's Civilization® V                       
+10   Democracy 3                                         Poly Bridge                                       
+11   Cities in Motion                                    Tropico 5                                         
+12   Train Fever                                         Farming Simulator 2013 Titanium Edition           
+13   American Truck Simulator                            Mini Metro                                        
+14   SPORE™                                              Universe Sandbox ²                                
+15   Sid Meier's Civilization®: Beyond Earth™            Terraria                                          
+16   The Sims™ 3                                         SimCity™ 4 Deluxe Edition                         
+17   Planetbase                                          RimWorld                                          
+18   Airline Tycoon 2                                    PAYDAY 2                                          
+19   Hearts of Iron IV                                   Offworld Trading Company                          
+20   Microsoft Flight Simulator X: Steam Edition         Planetbase                                        
+
