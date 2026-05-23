@@ -171,22 +171,39 @@ def get_config() -> dict:
         # dataset is loaded. Was 5 in Bucket 5; +8 for Bucket 6's 8 features.
         'n_wide_normalized':  13,
 
-        # Menon α — plan §8 default: 0 (ranker α=0 vs CG α=0). The 0.4 path is optional.
+        # Menon α — popularity penalty ADDED to TRAINING logits only (Path 2; raw dot
+        # products at inference/eval, same as CG). Architecture decision (2026-05-23):
+        # both stages ship raw α=0 — the CG retrieves recall-maximizing, and the ranker
+        # reorders on its content/cross features alone. A ranker-side penalty (α=0.2) was
+        # tested 2026-05-23 and REJECTED (hurt offline ~27%, no meaningfully better
+        # canary), so the penalty stays OFF. The plumbing is retained at 0; raise only if
+        # a future experiment revisits the decision.
         'popularity_alpha':   0.0,
 
         # Warm-start from CG state_dict (plan §3 "Warm-start mapping"). Default ON —
         # an off-baseline tested 2026-05-16 was materially worse, so warm-start is part
-        # of the Phase A configuration, not a Phase B add-on. Auto-resolves to the
-        # α-matched CG checkpoint via _ALPHA_TO_CG_GLOB. Flip to False (or override
-        # `warm_start_cg_checkpoint`) for one-off ablations.
+        # of the Phase A configuration, not a Phase B add-on. Flip to False to disable.
+        # To change WHICH CG it inits from, set `warm_start_alpha` below (the live knob);
+        # `warm_start_cg_checkpoint` is derived from it and overwritten on every get_config.
         'warm_start':         True,
+        # Which CG α to warm-start FROM — DECOUPLED from popularity_alpha. None = match
+        # popularity_alpha (historical behavior). Pinned to 0.0 here: the ranker always
+        # inits from the RAW α=0 CG (the fixed retrieval stage; no baked-in popularity
+        # prior), then learns the penalty from neutral embeddings during training. This
+        # is the SAFE warm-start direction (start neutral → learn the bias), unlike
+        # α=0-ranker-from-α=0.4-CG which forces the MLP to undo a prior it doesn't want.
+        'warm_start_alpha':   0.0,
 
         # Train-time eval: deterministic sample of N val rows for fast logging.
         # Final eval (evaluate_only) always uses the full val set.
         'n_eval_samples':     20_000,
     }
     if cfg['warm_start']:
-        cfg['warm_start_cg_checkpoint'] = _resolve_warm_start_for_alpha(cfg['popularity_alpha'])
+        # Warm-start source is chosen by warm_start_alpha (falls back to popularity_alpha
+        # when None) — NOT popularity_alpha directly, so an α=0.4 ranker can still init
+        # from the raw α=0 CG.
+        ws_alpha = cfg['warm_start_alpha'] if cfg['warm_start_alpha'] is not None else cfg['popularity_alpha']
+        cfg['warm_start_cg_checkpoint'] = _resolve_warm_start_for_alpha(ws_alpha)
     else:
         cfg['warm_start_cg_checkpoint'] = None
     return cfg
@@ -653,7 +670,7 @@ def train(checkpoint_dir: str | None = None) -> str:
         B, n_cand = cand_b.shape
 
         # User-side: ONE pass per row.
-        us = model.user_forward(x_avg, h_lkd, h_dis, h_full, h_pw)
+        user_concat = model.user_forward(x_avg, h_lkd, h_dis, h_full, h_pw)
 
         # Item-side: embed the ENTIRE corpus once per step, gather for this batch.
         # Math identity (autograd sums grads correctly on repeated indices). The win:
@@ -731,7 +748,7 @@ def train(checkpoint_dir: str | None = None) -> str:
         # score_pairs_batched factorizes the first MLP layer over the (B, n_cand) layout
         # — runs user-side projection on B rows (not B*n_cand) and avoids materializing
         # a (B*n_cand, U) user replica. Math identity; output matches score_pairs to ~1e-6.
-        scores = model.score_pairs_batched(us.user_concat, item_concat, cross, n_cand)
+        scores = model.score_pairs_batched(user_concat, item_concat, cross, n_cand)
         return scores, target_b, cand_b
 
     from tqdm import tqdm

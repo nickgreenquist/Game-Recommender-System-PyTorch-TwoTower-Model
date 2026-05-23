@@ -29,7 +29,7 @@ PRICE_BUCKET_LABELS = ['Free', '<$5', '$5–10', '$10–20', '$20–30', '$30–
 
 
 def run_export(data_dir: str = 'data', checkpoint_path: str = None,
-               version: str = 'v1') -> None:
+               version: str = 'v1') -> dict:
     # ── Resolve checkpoint ────────────────────────────────────────────────────
     if checkpoint_path is None:
         candidates = sorted(
@@ -171,6 +171,22 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         'item_id_to_price_label': item_id_to_price_label,
         # Popularity debiasing (matches training + canary inference formula)
         'game_interaction_counts': fs['game_interaction_counts'],  # numpy (n_items,) float32
+        # Ranker serving — source arrays consumed by ranker.train._buffers_from_fs to
+        # rebuild the WideDeepRanker's per-game buffers at app startup. UNPADDED (the
+        # ranker pads + derives the _l2 / _binary / count variants on load), matching
+        # the load_features contract exactly. game_tag_matrix / game_genre_matrix are
+        # NOT duplicated here — the ranker strips the pad row off the padded tensors
+        # above. game_tag_binary_idf is the only large add (~3.6 MB); the rest are
+        # per-game scalars (~190 KB total). See ranker/export.py.
+        'game_developer_idx':        fs['game_developer_idx'],         # numpy (n_items,) int64
+        'game_year_numeric':         fs['game_year_numeric'],          # numpy (n_items,) float32
+        'game_median_log_hours':     fs['game_median_log_hours'],      # numpy (n_items,) float32
+        'game_log_count':            fs['game_log_count'],             # numpy (n_items,) float32
+        'game_sentiment':            fs['game_sentiment'],             # numpy (n_items,) float32
+        'game_tag_binary_idf':       fs['game_tag_binary_idf'],        # numpy (n_items, n_tags) float32
+        'game_tag_mean_idf':         fs['game_tag_mean_idf'],          # numpy (n_items,) float32
+        'game_tag_max_idf':          fs['game_tag_max_idf'],           # numpy (n_items,) float32
+        'game_dev_log_catalog_size': fs['game_dev_log_catalog_size'],  # numpy (n_items,) float32
         # Model config for reconstruction
         'model_config': config,
     }
@@ -184,3 +200,6 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
     )
     print(f"\nTotal serving/ size: {total_mb:.1f} MB")
     print("Done. Run: streamlit run streamlit_app.py")
+    # Returned so callers (e.g. ranker/export.py) can reuse the FeatureStore for
+    # ranker reconstruction without a second load_features pass.
+    return fs

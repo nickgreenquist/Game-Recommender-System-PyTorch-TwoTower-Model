@@ -59,8 +59,7 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         h_dis  = dataset._X_hist_disliked_t[rows_t].to(device)
         h_full = dataset._X_hist_full_t[rows_t].to(device)
         h_pw   = dataset._X_hist_pw_t[rows_t].to(device)
-        us     = model.user_forward(x_avg, h_lkd, h_dis, h_full, h_pw)
-        user_concat = us.user_concat
+        user_concat = model.user_forward(x_avg, h_lkd, h_dis, h_full, h_pw)
 
         # ── Item side: build (B, n_cand) candidate matrix → gather from corpus ──
         cand = np.empty((B, n_cand), dtype=np.int64)

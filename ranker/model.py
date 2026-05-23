@@ -1,5 +1,6 @@
 """
-Stage 1 — Wide & Deep ranker with STRICT V5 CG feature parity.
+Wide & Deep ranker (serving stage 2 — reranks the CG's top-100) with STRICT V5 CG
+feature parity.
 
 Mirrors src/model.GameRecommender (V5) exactly:
   - 4 user history pools (liked / disliked / full / playtime-weighted full)
@@ -29,31 +30,8 @@ ZERO src/ imports — buffers built externally from FeatureStore in train.py / c
 and passed in. Warm-start from a CG checkpoint is a one-time copy at construction;
 the ranker owns all params after that and trains them freely (see train._warm_start_from_cg).
 """
-from collections import namedtuple
-
 import torch
 import torch.nn as nn
-
-
-# Named slice offsets into user_concat (callers use these to pull pool_disliked etc.
-# without hardcoding numbers). Keep in sync with the order in user_forward().
-USER_CONCAT_LAYOUT = {
-    'pool_liked':    (0,   32),
-    'pool_disliked': (32,  64),
-    'pool_full':     (64,  96),
-    'pool_playtime': (96,  128),
-    'genre_emb':     (128, 160),
-    'tag_emb':       (160, 192),
-}
-
-
-# Bundled result of WideDeepRanker.user_forward() — shared user-side compute that
-# future cross features can read without re-running the user tower.
-UserForwardResult = namedtuple('UserForwardResult', [
-    'user_concat',         # (B, user_concat_dim)
-    'tag_profile',         # (B, n_tags)            — sum of game_tag_matrix[X_hist_full]
-    'last_item_emb',       # (B, item_id_emb_dim)   — last real item in shuffled context
-])
 
 
 class WideDeepRanker(nn.Module):
@@ -289,12 +267,11 @@ class WideDeepRanker(nn.Module):
                      X_hist_disliked:         torch.Tensor,    # (B, H)
                      X_hist_full:             torch.Tensor,    # (B, H)
                      X_hist_playtime_weights: torch.Tensor,    # (B, H) float32, pre-normalized
-                     ) -> UserForwardResult:
+                     ) -> torch.Tensor:
         """
-        Unified user-side pass. Returns user_concat plus auxiliary signals that
-        cross features may need (tag_profile, last_item_emb). All look up the same
-        item_id_lookup table — keeping this in one place avoids 2x recompute when
-        evaluate / canary expand user_concat across hundreds of candidates.
+        Unified user-side pass. Returns user_concat (B, user_concat_dim). Computed once
+        per row so evaluate / canary can expand it across hundreds of candidates without
+        re-running the user tower.
         """
         # ── 4 pools (no LayerNorm — V5 removed it) ──────────────────────────
         # padding_idx in item_id_lookup zeroes pad rows automatically.
@@ -332,24 +309,14 @@ class WideDeepRanker(nn.Module):
             pool_liked, pool_disliked, pool_full, pool_playtime,
             genre_emb, tag_emb,
         ], dim=1)
-
-        # ── Auxiliary signals for cross features ────────────────────────────
-        # Last real item in shuffled context = position of the last non-pad index.
-        # X_hist_full is left-aligned (real first, pads last), so last real = N-1.
-        last_pos       = (N.squeeze(-1).long() - 1).clamp(min=0)                   # (B,)
-        b_idx          = torch.arange(X_hist_full.shape[0], device=X_hist_full.device)
-        last_idx       = X_hist_full[b_idx, last_pos]                              # (B,)
-        last_real_mask = (N.squeeze(-1) > 0).float().unsqueeze(-1)                 # (B, 1)
-        last_item_emb  = self.item_id_lookup(last_idx) * last_real_mask            # (B, id_dim)
-
-        return UserForwardResult(user_concat, tag_profile, last_item_emb)
+        return user_concat
 
     def user_embedding(self,
                        X_user_avg_log, X_hist_liked, X_hist_disliked,
                        X_hist_full, X_hist_playtime_weights) -> torch.Tensor:
-        """Convenience wrapper: returns user_concat only."""
+        """Alias for user_forward (kept for parity with src/model.GameRecommender)."""
         return self.user_forward(X_user_avg_log, X_hist_liked, X_hist_disliked,
-                                  X_hist_full, X_hist_playtime_weights).user_concat
+                                  X_hist_full, X_hist_playtime_weights)
 
     # ── Item tower ───────────────────────────────────────────────────────────
 
