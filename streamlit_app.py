@@ -44,8 +44,24 @@ _NON_GAME_GENRES = {
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 
+_REQUIRED_ARTIFACTS = (
+    'serving/feature_store.pt',
+    'serving/game_embeddings.pt',
+    'serving/model.pth',
+)
+
+
 @st.cache_resource
 def load_artifacts():
+    missing = [p for p in _REQUIRED_ARTIFACTS if not os.path.exists(p)]
+    if missing:
+        st.error(
+            "Serving artifacts are missing:\n\n"
+            + "\n".join(f"- `{p}`" for p in missing)
+            + "\n\nGenerate them with `python main.py export`."
+        )
+        st.stop()
+
     fs         = torch.load('serving/feature_store.pt', weights_only=False)
     be         = torch.load('serving/game_embeddings.pt', weights_only=False)
     state_dict = torch.load('serving/model.pth', weights_only=True)
@@ -202,23 +218,21 @@ def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
     tag_to_i = fs['tag_to_i']
     item_ids = fs['item_ids']
     id_to_title = fs['item_id_to_title']
-    item_to_idx = fs['item_to_idx']
 
     valid_tags = [t for t in tag_names if t in tag_to_i]
     anchors = []
     seen    = set(exclude)
 
     for tag in valid_tags:
-        tag_idx     = tag_to_i[tag]
-        sorted_iids = sorted(
-            item_ids,
-            key=lambda iid: float(tag_mat[item_to_idx[iid], tag_idx]),
-            reverse=True,
-        )
+        tag_idx = tag_to_i[tag]
+        # One vectorized sort of the tag's TF-IDF column (positions align to item_ids),
+        # not a Python sort with a per-comparison tensor lookup over the whole corpus.
+        order = tag_mat[:, tag_idx].argsort(descending=True).tolist()
         count = 0
-        for iid in sorted_iids:
+        for pos in order:
             if count >= _ANCHORS_PER_TAG:
                 break
+            iid   = item_ids[pos]
             title = id_to_title[iid]
             if title not in seen:
                 anchors.append(iid)
@@ -652,7 +666,6 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
             tag_mat  = fs['game_tag_matrix'][:fs['n_items']]
             tag_to_i = fs['tag_to_i']
             item_ids = fs['item_ids']
-            item_to_idx = fs['item_to_idx']
 
             anchor_tag_triples = []   # (tag, iid, title)
             seen_titles = set()
@@ -660,15 +673,14 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
                 if tag not in tag_to_i:
                     continue
                 tag_idx = tag_to_i[tag]
-                sorted_iids = sorted(
-                    item_ids,
-                    key=lambda iid: float(tag_mat[item_to_idx[iid], tag_idx]),
-                    reverse=True,
-                )
+                # Vectorized column sort (positions align to item_ids), not a Python
+                # sort with a per-comparison tensor lookup over the whole corpus.
+                order = tag_mat[:, tag_idx].argsort(descending=True).tolist()
                 count = 0
-                for iid in sorted_iids:
+                for pos in order:
                     if count >= _ANCHORS_PER_TAG:
                         break
+                    iid   = item_ids[pos]
                     title = fs['item_id_to_title'][iid]
                     if title not in seen_titles:
                         anchor_tag_triples.append((tag, iid, title))
