@@ -790,22 +790,32 @@ def tab_about():
     with col:
         st.header("What is this?")
         st.markdown(
-            "A PyTorch two-tower neural network trained on the "
+            "A **two-stage game recommender** trained on the "
             "[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) "
-            "(~5,437 games, ~4.3M training examples)."
+            "(~5,437 games). Like production recommenders (YouTube, TikTok), it splits the problem "
+            "into two phases — a fast **retrieval** model that narrows the full catalog to a shortlist, "
+            "then a **ranker** that carefully reorders that shortlist."
+        )
+        st.markdown("""
+| Stage | Model | Job |
+|---|---|---|
+| 1 — Retrieval | Two-tower neural network | Score all ~5,437 games by a dot product, keep the top 100 |
+| 2 — Ranking | Wide & Deep | Rerank those 100 with richer user × item cross-features |
+""", unsafe_allow_html=True)
+        st.markdown(
+            "**Stage 1** is a PyTorch two-tower network trained with full softmax cross-entropy over the "
+            "entire corpus (~4.3M examples), following the YouTube DNN retrieval approach "
+            "(Covington et al., 2016). At inference it scores every game by a dot product of the user and "
+            "item embeddings and keeps the top 100."
         )
         st.markdown(
-            "Trained with full softmax cross-entropy over the entire game corpus, following the YouTube DNN retrieval "
-            "approach (Covington et al., 2016)."
+            "**Stage 2** is a Wide & Deep ranker that reranks those 100 candidates using user × item "
+            "cross-features a dot product structurally can't compute (genre/tag overlap, price and era "
+            "gaps, niche/rarity matching)."
         )
         st.markdown(
-            "At inference, a dot product of the user and item embeddings retrieves the most relevant games."
-        )
-        st.markdown(
-            "This is a **two-stage** system: the two-tower model is the fast **retrieval** stage, and a "
-            "**Wide & Deep ranker** reranks its top 100 candidates using richer user × item cross-features. "
-            "Try it on the **Recommend** tab — results appear from retrieval first, then the **⚡ Apply Ranker** "
-            "button reranks them side-by-side."
+            "Try it on the **Recommend** tab — results appear from retrieval first, then the "
+            "**⚡ Apply Ranker** button reranks them side-by-side. Both stages are detailed below."
         )
 
         st.subheader("The core design choice: no user ID")
@@ -1005,15 +1015,9 @@ MRR: **0.0875** (random: 0.0017, +51×)
             "usually play.\""
         )
         st.markdown(
-            "A second-stage **ranker** adds exactly those signals. It takes the retrieval model's **top 100** and "
-            "reorders them:"
+            "A second-stage **ranker** adds exactly those signals. It takes the retrieval model's **top 100** "
+            "(the stage table at the top of this tab) and reorders them."
         )
-        st.markdown("""
-| Stage | Model | Job |
-|---|---|---|
-| 1 — Retrieval | Two-tower (above) | Score all games, keep the top 100 |
-| 2 — Ranking | Wide & Deep | Rerank those 100 with user × item cross-features |
-""", unsafe_allow_html=True)
 
         st.subheader("Why Wide & Deep")
         st.markdown("""
