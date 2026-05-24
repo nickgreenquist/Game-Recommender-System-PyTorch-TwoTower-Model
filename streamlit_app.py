@@ -935,13 +935,20 @@ learns to align user taste with item identity through training.
             "never seen during training). Each example has one target; Recall@K = Hit Rate@K for single-target eval. "
             "Shuffled history — no release-date ordering."
         )
+        st.markdown("**Which checkpoint these tables describe.**")
         st.markdown(
-            "**Which checkpoint these tables describe.** The `alpha` popularity-bias knob produces two CG variants "
-            "(same architecture, different training-time bias). The tables below are the **standalone CG (alpha=0.4)** — "
-            "it trades raw recall for cleaner niche-taste lists. The **deployed retrieval stage uses alpha=0**, which is "
-            "recall-maximizing and therefore scores *higher* offline (NDCG@10 0.0752 vs 0.0645); that is the baseline the "
-            "ranker improves on in Stage 2 below."
+            "The `alpha` popularity-bias knob produces two CG variants — same architecture, "
+            "different training-time bias."
         )
+        st.markdown(
+            "The tables below are the **standalone CG (alpha=0.4)**, which trades raw recall for "
+            "cleaner niche-taste lists."
+        )
+        st.markdown(
+            "The **deployed retrieval stage uses alpha=0** — recall-maximizing, so it scores *higher* "
+            "offline (NDCG@10 0.0752 vs 0.0645)."
+        )
+        st.markdown("That alpha=0 score is the baseline the ranker improves on in Stage 2 below.")
 
         st.markdown("**V5 PROD** — corpus: 5,437 games (Valve titles removed, no LayerNorm, correct Menon Path 2)")
         st.markdown("""
