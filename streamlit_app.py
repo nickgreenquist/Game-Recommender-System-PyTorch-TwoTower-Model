@@ -214,42 +214,38 @@ def _game_meta(item_id: str, fs: dict) -> dict:
     }
 
 
-# ── Paginated results grid ────────────────────────────────────────────────────
+# ── Results feed (show-more) ──────────────────────────────────────────────────
 
 def _store_results(df, result_key: str) -> None:
-    """Save a results DataFrame to session state and reset to page 0."""
-    st.session_state[f'{result_key}_df']   = df
-    st.session_state[f'{result_key}_page'] = 0
+    """Save a results DataFrame to session state and reset the feed to the first page."""
+    st.session_state[f'{result_key}_df']    = df
+    st.session_state[f'{result_key}_shown'] = _PAGE_SIZE
 
 
-def _pagination_controls(state_key: str, page: int, total_pages: int) -> None:
-    """Prev / page-indicator / Next row shared by the grid and comparison views. Reads
-    and writes st.session_state[f'{state_key}_page'] and reruns on navigation. No-op for
-    a single page."""
-    if total_pages <= 1:
+def _show_more_button(state_key: str, shown: int, total: int) -> None:
+    """Centered 'Show more' button that reveals the next _PAGE_SIZE results BELOW the ones
+    already on screen (cumulative append, not page replacement). Reads/writes
+    st.session_state[f'{state_key}_shown'] and reruns. Appending — rather than swapping
+    pages — means the browser keeps its scroll position and the new games slot in just
+    under where the button was, so no scroll-to-top juggling is needed. No-op once
+    everything is shown."""
+    if shown >= total:
         return
-    _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
-    if prev_col.button('← Prev', disabled=(page == 0), key=f'{state_key}_prev'):
-        st.session_state[f'{state_key}_page'] = page - 1
-        st.rerun()
-    info_col.markdown(
-        f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
-        unsafe_allow_html=True,
-    )
-    if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{state_key}_next'):
-        st.session_state[f'{state_key}_page'] = page + 1
+    _, mid, _ = st.columns([2, 1, 2])
+    if mid.button('Show more', use_container_width=True, key=f'{state_key}_more'):
+        st.session_state[f'{state_key}_shown'] = shown + _PAGE_SIZE
         st.rerun()
 
 
 def _show_results(result_key: str) -> None:
-    """Render the current page of stored results with Prev / Next navigation."""
+    """Render stored results as a growing feed: the first _PAGE_SIZE games plus a
+    'Show more' button that appends _PAGE_SIZE more each click."""
     df = st.session_state.get(f'{result_key}_df')
     if df is None or df.empty:
         return
 
-    page        = st.session_state.get(f'{result_key}_page', 0)
-    total_pages = max(1, (len(df) + _PAGE_SIZE - 1) // _PAGE_SIZE)
-    page_df     = df.iloc[page * _PAGE_SIZE:(page + 1) * _PAGE_SIZE]
+    shown   = st.session_state.get(f'{result_key}_shown', _PAGE_SIZE)
+    page_df = df.iloc[:shown]
 
     titles = page_df['Title'].tolist()
     covers = page_df['Cover'].tolist()
@@ -269,7 +265,7 @@ def _show_results(result_key: str) -> None:
                 if meta:
                     st.caption(meta)
 
-    _pagination_controls(result_key, page, total_pages)
+    _show_more_button(result_key, shown, len(df))
 
 
 # ── Tag anchor helpers ────────────────────────────────────────────────────────
@@ -423,17 +419,16 @@ def _delta_badge(delta: int) -> str:
 def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
                      ranker_alpha: float = 0.0, per_page: int = _PAGE_SIZE) -> None:
     """Row-per-rank side-by-side: CG retrieval order vs ranker-reranked order over the
-    SAME candidate pool, paginated `per_page` rows at a time. Each ranker row carries a
-    rank-delta badge showing how far the ranker moved that game relative to its CG
-    position (computed over the FULL pool, not the page). page_key namespaces the
-    Prev/Next page state per tab; ranker_alpha labels the ranker column with the model's
-    popularity penalty (CG retrieval is always α=0 by design)."""
+    SAME candidate pool, shown `per_page` rows at a time with a 'Show more' button that
+    appends another `per_page`. Each ranker row carries a rank-delta badge showing how far
+    the ranker moved that game relative to its CG position (computed over the FULL pool,
+    not the visible slice). page_key namespaces the feed's `_shown` state per tab;
+    ranker_alpha labels the ranker column with the model's popularity penalty (CG
+    retrieval is always α=0 by design)."""
     cg_rank     = {iid: r for r, iid in enumerate(cg_iids)}        # 0-based CG position
     ranker_rank = {iid: r for r, iid in enumerate(ranker_iids)}    # 0-based ranker position
     total       = min(len(cg_iids), len(ranker_iids))
-    total_pages = max(1, (total + per_page - 1) // per_page)
-    page        = max(0, min(st.session_state.get(f'{page_key}_page', 0), total_pages - 1))
-    start, end  = page * per_page, min((page + 1) * per_page, total)
+    shown       = min(st.session_state.get(f'{page_key}_shown', per_page), total)
 
     # Rendered as a CSS GRID with INLINE styles (not st.columns, not CSS classes):
     # Streamlit columns stack on mobile (open issue streamlit/streamlit#11392, no native
@@ -479,7 +474,7 @@ def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
         f"{_header_cell('Two-tower CG retrieval')}"
         f"{_header_cell('⚡ Reranker · Wide &amp; Deep', f'α={ranker_alpha:g} popularity penalty' if ranker_alpha else '')}</div>"
     ]
-    for i in range(start, end):
+    for i in range(shown):
         # Each game's delta is the same on both sides: CG_rank − ranker_rank (positive =
         # the ranker moved it up). The CG card shows where its row's game LANDED in the
         # ranker (top CG rows mostly ↓ — popular items the ranker demotes); the ranker
@@ -498,7 +493,7 @@ def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
     # cover rendering.
     st.html("".join(parts))
 
-    _pagination_controls(page_key, page, total_pages)
+    _show_more_button(page_key, shown, total)
 
 
 def _render_two_stage(prefix: str, result_key: str, fs: dict, ranker,
@@ -520,8 +515,8 @@ def _render_two_stage(prefix: str, result_key: str, fs: dict, ranker,
                 with st.spinner("Reranking with the Wide & Deep ranker…"):
                     st.session_state[f'{prefix}_ranker_iids'] = _ranker_rerank(
                         ranker, fs, liked_iids, anchor_iids, cg_iids)
-                st.session_state[f'{prefix}_ranked']   = True
-                st.session_state[f'{prefix}_cmp_page'] = 0
+                st.session_state[f'{prefix}_ranked']    = True
+                st.session_state[f'{prefix}_cmp_shown'] = _PAGE_SIZE
             else:
                 st.session_state[f'{prefix}_ranked'] = False
             st.rerun()
@@ -549,9 +544,9 @@ def tab_recommend(model, fs, all_ids, all_embs, ranker=None):
     if st.session_state.pop('_clear_rec', False):
         for key in ('rec_liked', 'rec_tags'):
             st.session_state[key] = []
-        for key in ('rec_df', 'rec_page', 'rec_anchor_caption',
+        for key in ('rec_df', 'rec_shown', 'rec_anchor_caption',
                     'rec_cg_iids', 'rec_liked_iids', 'rec_anchor_iids',
-                    'rec_ranker_iids', 'rec_ranked', 'rec_cmp_page'):
+                    'rec_ranker_iids', 'rec_ranked', 'rec_cmp_shown'):
             st.session_state.pop(key, None)
 
     all_titles = fs['popularity_ordered_titles']
@@ -635,7 +630,7 @@ def tab_similar(be, fs, all_ids, all_norm):
         else:
             for old_title in st.session_state.get('sim_active_titles', []):
                 st.session_state.pop(f'sim_{old_title}_df', None)
-                st.session_state.pop(f'sim_{old_title}_page', None)
+                st.session_state.pop(f'sim_{old_title}_shown', None)
             active_titles = []
             for title in selections:
                 iid = title_to_iid.get(title)
@@ -767,7 +762,7 @@ def tab_examples(model, fs, all_ids, all_embs, ranker=None):
 
     if not selected:
         for key in ('examples_profile', 'ex_cg_iids', 'ex_ranker_iids', 'ex_ranked',
-                    'ex_cmp_page'):
+                    'ex_cmp_shown'):
             st.session_state.pop(key, None)
         return
 
