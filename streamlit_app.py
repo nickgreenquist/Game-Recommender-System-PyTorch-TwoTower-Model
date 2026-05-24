@@ -167,15 +167,37 @@ def _cover_url(item_id: str) -> str:
     return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{item_id}/header.jpg"
 
 
-def _cover_div(cover_url: str) -> str:
+def _store_url(item_id: str) -> str:
+    """Steam store page for a game. The item_id IS the Steam app id (same id used for the
+    CDN cover above), so no stored URL is needed — the store path is fully derivable."""
+    return f"https://store.steampowered.com/app/{item_id}/"
+
+
+def _cover_div(cover_url: str, link_url: str = '') -> str:
     """Steam header rendered as a background-image div, NOT an <img>: Streamlit's markdown
     CSS forces `margin:auto` on images (centering them and ignoring inline width); a
     background div sidesteps that and the `background-color` shows through when the CDN
     has no header.jpg (a missing cover degrades to a dark panel, not a broken-image icon).
-    Steam headers are 460×215 → use that aspect ratio so the banner fills the card width."""
-    return (f"<div style='width:100%;aspect-ratio:460/215;border-radius:4px;"
-            f"background-color:#1b2838;background-position:center;background-size:cover;"
-            f"background-image:url(\"{cover_url}\")'></div>")
+    Steam headers are 460×215 → use that aspect ratio so the banner fills the card width.
+    When link_url is given the banner is wrapped in an <a> (opens the Steam store page in a
+    new tab); the .cover-link hover cue lives in the global style block at app init."""
+    div = (f"<div style='width:100%;aspect-ratio:460/215;border-radius:4px;"
+           f"background-color:#1b2838;background-position:center;background-size:cover;"
+           f"background-image:url(\"{cover_url}\")'></div>")
+    if not link_url:
+        return div
+    return (f"<a class='cover-link' href='{link_url}' target='_blank' rel='noopener' "
+            f"style='display:block'>{div}</a>")
+
+
+def _title_link(link_url: str, title: str, font_size: str = '.8rem') -> str:
+    """Game title as a Steam-store link (Steam blue, underline-on-hover via .title-link in
+    the global style block). Carries the same word-break rules the title text used as a
+    plain caption so long titles still wrap inside the narrow card column."""
+    safe = html.escape(str(title))
+    return (f"<a class='title-link' href='{link_url}' target='_blank' rel='noopener' "
+            f"style='font-size:{font_size};line-height:1.2;display:block;margin-top:4px;"
+            f"white-space:normal;overflow-wrap:anywhere;word-break:break-word'>{safe}</a>")
 
 
 # ── Per-game display metadata ─────────────────────────────────────────────────
@@ -183,6 +205,7 @@ def _cover_div(cover_url: str) -> str:
 def _game_meta(item_id: str, fs: dict) -> dict:
     return {
         'Cover':     _cover_url(item_id),
+        'Store':     _store_url(item_id),
         'Title':     fs['item_id_to_title'].get(item_id, item_id),
         'Developer': fs['item_id_to_developer'].get(item_id, ''),
         'Year':      fs['item_id_to_year'].get(item_id, ''),
@@ -230,16 +253,18 @@ def _show_results(result_key: str) -> None:
 
     titles = page_df['Title'].tolist()
     covers = page_df['Cover'].tolist()
+    stores = page_df['Store'].tolist() if 'Store' in page_df.columns else [''] * len(titles)
     devs   = page_df['Developer'].tolist() if 'Developer' in page_df.columns else [''] * len(titles)
     years  = page_df['Year'].tolist()      if 'Year'      in page_df.columns else [''] * len(titles)
 
     for row_start in range(0, len(titles), _COVER_COLS):
         s = slice(row_start, row_start + _COVER_COLS)
         cols = st.columns(_COVER_COLS)
-        for col, title, cover_url, dev, year in zip(cols, titles[s], covers[s], devs[s], years[s]):
+        for col, title, cover_url, store_url, dev, year in zip(
+                cols, titles[s], covers[s], stores[s], devs[s], years[s]):
             with col:
-                st.html(_cover_div(cover_url))
-                st.caption(title)
+                st.html(_cover_div(cover_url, store_url))
+                st.html(_title_link(store_url, title))
                 meta = ' · '.join(str(x) for x in [dev, year] if x)
                 if meta:
                     st.caption(meta)
@@ -437,16 +462,15 @@ def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
         return ' · '.join(x for x in (dev, year) if x)
 
     def _card(iid: str, badge: str = '') -> str:
-        title  = html.escape(str(fs['item_id_to_title'].get(iid, iid)))
+        store  = _store_url(iid)
         meta   = html.escape(_meta_line(iid))
         meta_el  = (f"<div style='font-size:.72rem;opacity:.6;margin-top:2px;"
                     f"white-space:normal;overflow-wrap:anywhere'>{meta}</div>" if meta else '')
         badge_el = (f"<div style='font-size:.8rem;margin-top:4px'>{badge}</div>" if badge else '')
         return (
             "<div style='min-width:0'>"
-            f"{_cover_div(_cover_url(iid))}"
-            f"<div style='font-size:.8rem;line-height:1.2;margin-top:4px;"
-            f"white-space:normal;overflow-wrap:anywhere;word-break:break-word'>{title}</div>"
+            f"{_cover_div(_cover_url(iid), store)}"
+            f"{_title_link(store, fs['item_id_to_title'].get(iid, iid))}"
             f"{meta_el}{badge_el}</div>"
         )
 
@@ -1099,6 +1123,10 @@ st.markdown("""
         word-break: break-word;
         white-space: normal;
     }
+    a.cover-link { transition: filter .15s ease, transform .15s ease; cursor: pointer; }
+    a.cover-link:hover { filter: brightness(1.12); transform: scale(1.02); }
+    a.title-link { color: #66c0f4; text-decoration: none; }
+    a.title-link:hover { text-decoration: underline; }
     </style>
 """, unsafe_allow_html=True)
 
