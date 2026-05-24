@@ -11,8 +11,10 @@ Generate serving/ with: python main.py export
 import html
 import json
 import os
+from typing import NamedTuple
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 import torch
 import torch.nn.functional as F
@@ -20,8 +22,6 @@ import torch.nn.functional as F
 from src.evaluate import (
     USER_TYPE_TO_FAVORITE_GAMES,
     USER_TYPE_TO_TAGS,
-    SIMULATED_FAV_LOG_HOURS,
-    SIMULATED_ANCHOR_LOG_HOURS,
 )
 
 from src.model import GameRecommender
@@ -51,8 +51,22 @@ _REQUIRED_ARTIFACTS = (
 )
 
 
+class Artifacts(NamedTuple):
+    """Everything the tabs need, loaded once and cached. Named fields so the load order
+    can't drift out of sync with the call sites."""
+    model:          GameRecommender
+    fs:             dict
+    be:             dict
+    all_ids:        list
+    all_embs:       torch.Tensor
+    all_norm:       torch.Tensor
+    all_norm_genre: torch.Tensor
+    all_norm_tag:   torch.Tensor
+    ranker:         object  # WideDeepRanker, or None when serving/ranker.pth is absent
+
+
 @st.cache_resource
-def load_artifacts():
+def load_artifacts() -> Artifacts:
     missing = [p for p in _REQUIRED_ARTIFACTS if not os.path.exists(p)]
     if missing:
         st.error(
@@ -110,7 +124,11 @@ def load_artifacts():
 
     ranker = _load_ranker(fs)
 
-    return model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag, ranker
+    return Artifacts(
+        model=model, fs=fs, be=be, all_ids=all_ids, all_embs=all_embs,
+        all_norm=all_norm, all_norm_genre=all_norm_genre, all_norm_tag=all_norm_tag,
+        ranker=ranker,
+    )
 
 
 def _load_ranker(fs: dict):
@@ -149,6 +167,17 @@ def _cover_url(item_id: str) -> str:
     return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{item_id}/header.jpg"
 
 
+def _cover_div(cover_url: str) -> str:
+    """Steam header rendered as a background-image div, NOT an <img>: Streamlit's markdown
+    CSS forces `margin:auto` on images (centering them and ignoring inline width); a
+    background div sidesteps that and the `background-color` shows through when the CDN
+    has no header.jpg (a missing cover degrades to a dark panel, not a broken-image icon).
+    Steam headers are 460×215 → use that aspect ratio so the banner fills the card width."""
+    return (f"<div style='width:100%;aspect-ratio:460/215;border-radius:4px;"
+            f"background-color:#1b2838;background-position:center;background-size:cover;"
+            f"background-image:url(\"{cover_url}\")'></div>")
+
+
 # ── Per-game display metadata ─────────────────────────────────────────────────
 
 def _game_meta(item_id: str, fs: dict) -> dict:
@@ -168,6 +197,25 @@ def _store_results(df, result_key: str) -> None:
     """Save a results DataFrame to session state and reset to page 0."""
     st.session_state[f'{result_key}_df']   = df
     st.session_state[f'{result_key}_page'] = 0
+
+
+def _pagination_controls(state_key: str, page: int, total_pages: int) -> None:
+    """Prev / page-indicator / Next row shared by the grid and comparison views. Reads
+    and writes st.session_state[f'{state_key}_page'] and reruns on navigation. No-op for
+    a single page."""
+    if total_pages <= 1:
+        return
+    _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
+    if prev_col.button('← Prev', disabled=(page == 0), key=f'{state_key}_prev'):
+        st.session_state[f'{state_key}_page'] = page - 1
+        st.rerun()
+    info_col.markdown(
+        f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
+        unsafe_allow_html=True,
+    )
+    if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{state_key}_next'):
+        st.session_state[f'{state_key}_page'] = page + 1
+        st.rerun()
 
 
 def _show_results(result_key: str) -> None:
@@ -190,44 +238,33 @@ def _show_results(result_key: str) -> None:
         cols = st.columns(_COVER_COLS)
         for col, title, cover_url, dev, year in zip(cols, titles[s], covers[s], devs[s], years[s]):
             with col:
-                st.image(cover_url, use_container_width=True)
+                st.html(_cover_div(cover_url))
                 st.caption(title)
                 meta = ' · '.join(str(x) for x in [dev, year] if x)
                 if meta:
                     st.caption(meta)
 
-    if total_pages > 1:
-        _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
-        if prev_col.button('← Prev', disabled=(page == 0), key=f'{result_key}_prev'):
-            st.session_state[f'{result_key}_page'] = page - 1
-            st.rerun()
-        info_col.markdown(
-            f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
-            unsafe_allow_html=True,
-        )
-        if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{result_key}_next'):
-            st.session_state[f'{result_key}_page'] = page + 1
-            st.rerun()
+    _pagination_controls(result_key, page, total_pages)
 
 
 # ── Tag anchor helpers ────────────────────────────────────────────────────────
 
-def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
-    """Return up to _ANCHORS_PER_TAG item_ids per tag by raw TF-IDF score."""
-    tag_mat  = fs['game_tag_matrix'][:fs['n_items']]  # drop padding row
-    tag_to_i = fs['tag_to_i']
-    item_ids = fs['item_ids']
+def _tag_anchor_triples(fs: dict, tag_names: list, exclude_titles: set) -> list:
+    """Up to _ANCHORS_PER_TAG (tag, iid, title) triples per tag by raw TF-IDF score,
+    skipping titles in exclude_titles and de-duplicating by title across tags. Sorts each
+    tag's TF-IDF column once (positions align to item_ids), not a Python sort with a
+    per-comparison tensor lookup over the whole corpus."""
+    tag_mat     = fs['game_tag_matrix'][:fs['n_items']]  # drop padding row
+    tag_to_i    = fs['tag_to_i']
+    item_ids    = fs['item_ids']
     id_to_title = fs['item_id_to_title']
 
-    valid_tags = [t for t in tag_names if t in tag_to_i]
-    anchors = []
-    seen    = set(exclude)
-
-    for tag in valid_tags:
-        tag_idx = tag_to_i[tag]
-        # One vectorized sort of the tag's TF-IDF column (positions align to item_ids),
-        # not a Python sort with a per-comparison tensor lookup over the whole corpus.
-        order = tag_mat[:, tag_idx].argsort(descending=True).tolist()
+    triples = []
+    seen    = set(exclude_titles)
+    for tag in tag_names:
+        if tag not in tag_to_i:
+            continue
+        order = tag_mat[:, tag_to_i[tag]].argsort(descending=True).tolist()
         count = 0
         for pos in order:
             if count >= _ANCHORS_PER_TAG:
@@ -235,10 +272,15 @@ def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
             iid   = item_ids[pos]
             title = id_to_title[iid]
             if title not in seen:
-                anchors.append(iid)
+                triples.append((tag, iid, title))
                 seen.add(title)
                 count += 1
-    return anchors
+    return triples
+
+
+def _get_tag_anchors(fs: dict, tag_names: list, exclude: set) -> list:
+    """Return up to _ANCHORS_PER_TAG item_ids per tag by raw TF-IDF score."""
+    return [iid for _, iid, _ in _tag_anchor_triples(fs, tag_names, exclude)]
 
 
 # ── User embedding builder ────────────────────────────────────────────────────
@@ -313,7 +355,6 @@ def _cg_candidate_iids(user_emb: torch.Tensor, all_ids: list, all_embs: torch.Te
 def _candidate_df(cg_iids: list, fs: dict):
     """Build the paginated CG-only display DataFrame from the candidate pool, so the
     CG-only view shows exactly the games the ranker will rerank."""
-    import pandas as pd
     return pd.DataFrame([_game_meta(iid, fs) for iid in cg_iids])
 
 
@@ -401,15 +442,9 @@ def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
         meta_el  = (f"<div style='font-size:.72rem;opacity:.6;margin-top:2px;"
                     f"white-space:normal;overflow-wrap:anywhere'>{meta}</div>" if meta else '')
         badge_el = (f"<div style='font-size:.8rem;margin-top:4px'>{badge}</div>" if badge else '')
-        # Cover rendered as a background-image div, NOT an <img>: Streamlit's markdown CSS
-        # forces `margin:auto` on images (centering them and ignoring inline width). A
-        # background div sidesteps that entirely. Steam headers are 460×215 → use that
-        # aspect ratio so the banner fills the card width with no crop or centering.
         return (
             "<div style='min-width:0'>"
-            f"<div style='width:100%;aspect-ratio:460/215;border-radius:4px;"
-            f"background-color:#1b2838;background-position:center;background-size:cover;"
-            f"background-image:url(\"{_cover_url(iid)}\")'></div>"
+            f"{_cover_div(_cover_url(iid))}"
             f"<div style='font-size:.8rem;line-height:1.2;margin-top:4px;"
             f"white-space:normal;overflow-wrap:anywhere;word-break:break-word'>{title}</div>"
             f"{meta_el}{badge_el}</div>"
@@ -439,18 +474,44 @@ def _show_comparison(cg_iids: list, ranker_iids: list, fs: dict, page_key: str,
     # cover rendering.
     st.html("".join(parts))
 
-    if total_pages > 1:
-        _, prev_col, info_col, next_col, _ = st.columns([3, 1, 1, 1, 3])
-        if prev_col.button('← Prev', disabled=(page == 0), key=f'{page_key}_prev'):
-            st.session_state[f'{page_key}_page'] = page - 1
+    _pagination_controls(page_key, page, total_pages)
+
+
+def _render_two_stage(prefix: str, result_key: str, fs: dict, ranker,
+                      liked_iids: list, anchor_iids: list) -> None:
+    """Shared two-stage UI for the Recommend and Examples tabs: the ⚡ Apply Ranker
+    toggle plus the CG-vs-ranker side-by-side (or the plain CG-only grid when not
+    reranked / no ranker). `prefix` namespaces the session-state keys ('rec'/'ex');
+    `result_key` is the _show_results bucket ('rec'/'examples'). liked_iids/anchor_iids
+    are the seed games the rerank rebuilds the ranker's user inputs from."""
+    cg_iids = st.session_state.get(f'{prefix}_cg_iids')
+    ranked  = st.session_state.get(f'{prefix}_ranked', False)
+
+    if ranker is not None and cg_iids:
+        n_cand = len(cg_iids)
+        label  = ("↺  Back to CG-only recommendations" if ranked
+                  else f"⚡  Apply Ranker  ·  rerank all {n_cand} candidates")
+        if st.button(label, use_container_width=True, key=f'{prefix}_supercharge'):
+            if not ranked:
+                with st.spinner("Reranking with the Wide & Deep ranker…"):
+                    st.session_state[f'{prefix}_ranker_iids'] = _ranker_rerank(
+                        ranker, fs, liked_iids, anchor_iids, cg_iids)
+                st.session_state[f'{prefix}_ranked']   = True
+                st.session_state[f'{prefix}_cmp_page'] = 0
+            else:
+                st.session_state[f'{prefix}_ranked'] = False
             st.rerun()
-        info_col.markdown(
-            f"<div style='text-align:center;padding-top:0.4rem'>{page + 1} / {total_pages}</div>",
-            unsafe_allow_html=True,
-        )
-        if next_col.button('Next →', disabled=(page >= total_pages - 1), key=f'{page_key}_next'):
-            st.session_state[f'{page_key}_page'] = page + 1
-            st.rerun()
+
+    if st.session_state.get(f'{prefix}_ranked') and st.session_state.get(f'{prefix}_ranker_iids'):
+        n_cand = len(cg_iids)
+        st.caption(f"Candidate generation retrieves the top {n_cand} by using an ultra-fast "
+                   f"two-tower retrieval model; the ranker reorders those top {n_cand} CG "
+                   f"candidates. Badges show each game's rank movement.")
+        st.divider()
+        _show_comparison(cg_iids, st.session_state[f'{prefix}_ranker_iids'], fs, f'{prefix}_cmp',
+                         ranker_alpha=getattr(ranker, 'serving_alpha', 0.0))
+    else:
+        _show_results(result_key)
 
 
 # ── Tab: Recommend ────────────────────────────────────────────────────────────
@@ -522,38 +583,9 @@ def tab_recommend(model, fs, all_ids, all_embs, ranker=None):
         caption = st.session_state.get('rec_anchor_caption')
         if caption:
             st.caption(caption)
-
-        # ── Two-stage supercharge: CG retrieval → ranker rerank ──────────────
-        ranked = st.session_state.get('rec_ranked', False)
-        if ranker is not None and st.session_state.get('rec_cg_iids'):
-            n_cand = len(st.session_state['rec_cg_iids'])
-            label = ("↺  Back to CG-only recommendations" if ranked
-                     else f"⚡  Apply Ranker  ·  rerank all {n_cand} candidates")
-            if st.button(label, use_container_width=True, key='rec_supercharge'):
-                if not ranked:
-                    with st.spinner("Reranking with the Wide & Deep ranker…"):
-                        st.session_state['rec_ranker_iids'] = _ranker_rerank(
-                            ranker, fs,
-                            st.session_state.get('rec_liked_iids', []),
-                            st.session_state.get('rec_anchor_iids', []),
-                            st.session_state['rec_cg_iids'])
-                    st.session_state['rec_ranked']   = True
-                    st.session_state['rec_cmp_page'] = 0
-                else:
-                    st.session_state['rec_ranked'] = False
-                st.rerun()
-
-        if st.session_state.get('rec_ranked') and st.session_state.get('rec_ranker_iids'):
-            n_cand = len(st.session_state['rec_cg_iids'])
-            st.caption(f"Candidate generation retrieves the top {n_cand} by using an ultra-fast "
-                       f"two-tower retrieval model; the ranker reorders those top {n_cand} CG "
-                       f"candidates. Badges show each game's rank movement.")
-            st.divider()
-            _show_comparison(st.session_state['rec_cg_iids'],
-                             st.session_state['rec_ranker_iids'], fs, 'rec_cmp',
-                             ranker_alpha=getattr(ranker, 'serving_alpha', 0.0))
-        else:
-            _show_results('rec')
+        _render_two_stage('rec', 'rec', fs, ranker,
+                          st.session_state.get('rec_liked_iids', []),
+                          st.session_state.get('rec_anchor_iids', []))
     else:
         _show_results('rec')
 
@@ -561,7 +593,6 @@ def tab_recommend(model, fs, all_ids, all_embs, ranker=None):
 # ── Tab: Similar ──────────────────────────────────────────────────────────────
 
 def tab_similar(be, fs, all_ids, all_norm):
-    import pandas as pd
     st.caption(
         "Each game is represented by a single combined embedding — the concatenation of "
         "its genre, tag, game-ID, developer, year, and price towers. "
@@ -610,8 +641,7 @@ def tab_similar(be, fs, all_ids, all_norm):
 
 # ── Tab: Explore Genres ───────────────────────────────────────────────────────
 
-def tab_explore_genres(model, be, fs, all_ids, all_norm_genre):
-    import pandas as pd
+def tab_explore_genres(model, fs, all_ids, all_norm_genre):
     st.caption(
         "Queries the item genre embedding space directly. "
         "Finds games whose genre embedding best matches the selected genres "
@@ -647,7 +677,6 @@ def tab_explore_genres(model, be, fs, all_ids, all_norm_genre):
 # ── Tab: Explore Tags ─────────────────────────────────────────────────────────
 
 def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
-    import pandas as pd
     st.caption(
         "Select Steam tags to describe what you're looking for — subgenres, moods, mechanics, "
         f"tropes (e.g. 'Open World', 'Rogue-like', 'Dark Souls-like', 'Cozy'). "
@@ -663,29 +692,7 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
         if not selected_tags:
             st.warning("Select at least one tag.")
         else:
-            tag_mat  = fs['game_tag_matrix'][:fs['n_items']]
-            tag_to_i = fs['tag_to_i']
-            item_ids = fs['item_ids']
-
-            anchor_tag_triples = []   # (tag, iid, title)
-            seen_titles = set()
-            for tag in selected_tags:
-                if tag not in tag_to_i:
-                    continue
-                tag_idx = tag_to_i[tag]
-                # Vectorized column sort (positions align to item_ids), not a Python
-                # sort with a per-comparison tensor lookup over the whole corpus.
-                order = tag_mat[:, tag_idx].argsort(descending=True).tolist()
-                count = 0
-                for pos in order:
-                    if count >= _ANCHORS_PER_TAG:
-                        break
-                    iid   = item_ids[pos]
-                    title = fs['item_id_to_title'][iid]
-                    if title not in seen_titles:
-                        anchor_tag_triples.append((tag, iid, title))
-                        seen_titles.add(title)
-                        count += 1
+            anchor_tag_triples = _tag_anchor_triples(fs, selected_tags, exclude_titles=set())
 
             if not anchor_tag_triples:
                 st.warning("No tags matched the vocabulary.")
@@ -773,33 +780,7 @@ def tab_examples(model, fs, all_ids, all_embs, ranker=None):
         st.caption("Tag anchors: " + ", ".join(anchor_names))
 
     # ── Two-stage supercharge: CG retrieval → ranker rerank ──────────────────
-    ranked = st.session_state.get('ex_ranked', False)
-    if ranker is not None and st.session_state.get('ex_cg_iids'):
-        n_cand = len(st.session_state['ex_cg_iids'])
-        label = ("↺  Back to CG-only recommendations" if ranked
-                 else f"⚡  Apply Ranker  ·  rerank all {n_cand} candidates")
-        if st.button(label, use_container_width=True, key='ex_supercharge'):
-            if not ranked:
-                with st.spinner("Reranking with the Wide & Deep ranker…"):
-                    st.session_state['ex_ranker_iids'] = _ranker_rerank(
-                        ranker, fs, liked_iids, anchor_iids, st.session_state['ex_cg_iids'])
-                st.session_state['ex_ranked']   = True
-                st.session_state['ex_cmp_page'] = 0
-            else:
-                st.session_state['ex_ranked'] = False
-            st.rerun()
-
-    if st.session_state.get('ex_ranked') and st.session_state.get('ex_ranker_iids'):
-        n_cand = len(st.session_state['ex_cg_iids'])
-        st.caption(f"Candidate generation retrieves the top {n_cand} by using an ultra-fast "
-                   f"two-tower retrieval model; the ranker reorders those top {n_cand} CG "
-                   f"candidates. Badges show each game's rank movement.")
-        st.divider()
-        _show_comparison(st.session_state['ex_cg_iids'],
-                         st.session_state['ex_ranker_iids'], fs, 'ex_cmp',
-                         ranker_alpha=getattr(ranker, 'serving_alpha', 0.0))
-    else:
-        _show_results('examples')
+    _render_two_stage('ex', 'examples', fs, ranker, liked_iids, anchor_iids)
 
 
 # ── Tab: About ───────────────────────────────────────────────────────────────
@@ -1105,7 +1086,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Steam Game Recommender")
-model, fs, be, all_ids, all_embs, all_norm, all_norm_genre, all_norm_tag, ranker = load_artifacts()
+art = load_artifacts()
 
 st.markdown(
     "<small>Two-Tower retrieval + Wide &amp; Deep ranking neural networks · Built with "
@@ -1121,19 +1102,19 @@ recommend_tab, examples_tab, similar_tab, genres_tab, tags_tab, about_tab = st.t
 )
 
 with recommend_tab:
-    tab_recommend(model, fs, all_ids, all_embs, ranker)
+    tab_recommend(art.model, art.fs, art.all_ids, art.all_embs, art.ranker)
 
 with examples_tab:
-    tab_examples(model, fs, all_ids, all_embs, ranker)
+    tab_examples(art.model, art.fs, art.all_ids, art.all_embs, art.ranker)
 
 with similar_tab:
-    tab_similar(be, fs, all_ids, all_norm)
+    tab_similar(art.be, art.fs, art.all_ids, art.all_norm)
 
 with genres_tab:
-    tab_explore_genres(model, be, fs, all_ids, all_norm_genre)
+    tab_explore_genres(art.model, art.fs, art.all_ids, art.all_norm_genre)
 
 with tags_tab:
-    tab_explore_tags(model, be, fs, all_ids, all_norm_tag)
+    tab_explore_tags(art.model, art.fs, art.all_ids, art.all_norm_tag)
 
 with about_tab:
     tab_about()
