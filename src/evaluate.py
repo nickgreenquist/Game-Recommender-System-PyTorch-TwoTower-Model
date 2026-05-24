@@ -61,16 +61,21 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Need For Speed: Hot Pursuit',
         'Test Drive Unlimited 2',
         'Ford Street Racing',
-        'Test Drive: Ferrari Racing Legends'
+        'Test Drive: Ferrari Racing Legends',
+        'F1 2014',
+        'Ford Street Racing',
+        'GRID Autosport',
+        'Assetto Corsa'
     ],
     'Fighting Lover': [
         'Street Fighter X Tekken',
         'Ultra Street Fighter® IV',
-        'Injustice: Gods Among Us Ultimate Edition',
-        'Divekick',
         'Street Fighter® IV',
-        'DEAD OR ALIVE 5 Last Round: Core Fighters',
         'THE KING OF FIGHTERS XIII STEAM EDITION',
+        'BlazBlue: Calamity Trigger',
+        'GUILTY GEAR XX ACCENT CORE PLUS R',
+        'Mortal Kombat: Legacy',
+        'Street Fighter X Tekken'
     ],
     'Survival Lover': [
         'Rust',
@@ -84,6 +89,32 @@ USER_TYPE_TO_FAVORITE_GAMES = {
         'Prison Architect',
         'Game Dev Tycoon',
         'Euro Truck Simulator 2'
+    ],
+    'Card Game Lover': [
+        'Magic: The Gathering - Duels of the Planeswalkers 2013',
+        'Hand of Fate',
+        'Duelyst',
+        'Magic: The Gathering - Duels of the Planeswalkers 2012'
+    ],
+    'Horror Lover': [
+        'Amnesia: The Dark Descent',
+        'Outlast',
+        'SOMA',
+        'The Evil Within',
+        'Slender: The Arrival'
+    ],
+    'Point & Click Lover': [
+        'The Wolf Among Us',
+        'Grim Fandango Remastered',
+        'Day of the Tentacle Remastered',
+        'Machinarium',
+        'Broken Age',
+        'Tales of Monkey Island Complete Pack: Chapter 4 - The Trial and Execution of Guybrush Threepwood',
+        'Tales of Monkey Island Complete Pack: Chapter 5 - Rise of the Pirate God',
+        'Tales of Monkey Island Complete Pack: Chapter 2 - The Siege of Spinner Cay',
+        'Tales of Monkey Island Complete Pack: Chapter 3 - Lair of the Leviathan',
+        'Tales of Monkey Island Complete Pack',
+        "Broken Sword 5 - the Serpent's Curse",
     ]
 }
 
@@ -96,7 +127,10 @@ USER_TYPE_TO_DISLIKED_GAMES = {
     # 'Racing Lover':      ['The Witcher 2: Assassins of Kings Enhanced Edition', 'Civ V'],
     # 'Fighting Lover':    ['Cities: Skylines', 'Euro Truck Simulator 2'],
     # 'Survival Lover':    ['Street Fighter® IV', 'F1 2012™'],
-    # 'Management Lover':  ['DARK SOULS™: Prepare To Die™ Edition', 'DOOM']
+    # 'Management Lover':  ['DARK SOULS™: Prepare To Die™ Edition', 'DOOM'],
+    # 'Card Game Lover':   ['Need For Speed: Hot Pursuit', 'DOOM'],
+    # 'Horror Lover':      ['Cities: Skylines', 'F1 2012™'],
+    # 'Point & Click Lover': ['F1 2012™', 'DOOM']
 }
 
 USER_TYPE_TO_TAGS = {
@@ -105,10 +139,13 @@ USER_TYPE_TO_TAGS = {
     'FPS Lover':          ['FPS'],
     'Civ Lover':          ['4X'],
     'Indie Lover':        ['Indie', 'Rogue-like', 'Platformer', 'Pixel Graphics'],
-    'Racing Lover':       ['Racing'],
-    'Fighting Lover':     ['Fighting'],
+    'Racing Lover':       [],
+    'Fighting Lover':     [],
     'Survival Lover':     ['Survival'],
-    'Management Lover':   ['Management']
+    'Management Lover':   ['Management'],
+    'Card Game Lover':    ['Card Game'],
+    'Horror Lover':       ['Horror'],
+    'Point & Click Lover': ['Point & Click']
 }
 
 SIMULATED_FAV_LOG_HOURS             = 10.0   # weight for favorite games
