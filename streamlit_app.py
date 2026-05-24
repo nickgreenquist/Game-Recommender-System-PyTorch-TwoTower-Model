@@ -791,32 +791,38 @@ def tab_about():
         st.header("What is this?")
         st.markdown(
             "A **two-stage game recommender** trained on the "
-            "[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) "
-            "(~5,437 games). Like production recommenders (YouTube, TikTok), it splits the problem "
-            "into two phases — a fast **retrieval** model that narrows the full catalog to a shortlist, "
-            "then a **ranker** that carefully reorders that shortlist."
+            "[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html) (~5,437 games)."
         )
+        st.markdown(
+            "Like production recommenders (YouTube, TikTok), it splits the problem into two phases:"
+        )
+        st.markdown("First a fast **retrieval** model narrows the full catalog to a shortlist.")
+        st.markdown("Then a **ranker** carefully reorders that shortlist.")
         st.markdown("""
 | Stage | Model | Job |
 |---|---|---|
 | 1 — Retrieval | Two-tower neural network | Score all ~5,437 games by a dot product, keep the top 100 |
 | 2 — Ranking | Wide & Deep | Rerank those 100 with richer user × item cross-features |
 """, unsafe_allow_html=True)
+        st.markdown("**Stage 1** is a PyTorch two-tower network.")
         st.markdown(
-            "**Stage 1** is a PyTorch two-tower network trained with full softmax cross-entropy over the "
-            "entire corpus (~4.3M examples), following the YouTube DNN retrieval approach "
-            "(Covington et al., 2016). At inference it scores every game by a dot product of the user and "
-            "item embeddings and keeps the top 100."
+            "It's trained with full softmax cross-entropy over the entire corpus (~4.3M examples), "
+            "following the YouTube DNN retrieval approach (Covington et al., 2016)."
         )
         st.markdown(
-            "**Stage 2** is a Wide & Deep ranker that reranks those 100 candidates using user × item "
-            "cross-features a dot product structurally can't compute (genre/tag overlap, price and era "
-            "gaps, niche/rarity matching)."
+            "At inference it scores every game by a dot product of the user and item embeddings, "
+            "then keeps the top 100."
+        )
+        st.markdown("**Stage 2** is a Wide & Deep ranker that reranks those 100 candidates.")
+        st.markdown(
+            "It uses user × item cross-features a dot product structurally can't compute — "
+            "genre/tag overlap, price and era gaps, niche/rarity matching."
         )
         st.markdown(
             "Try it on the **Recommend** tab — results appear from retrieval first, then the "
-            "**⚡ Apply Ranker** button reranks them side-by-side. Both stages are detailed below."
+            "**⚡ Apply Ranker** button reranks them side-by-side."
         )
+        st.markdown("Both stages are detailed below.")
 
         st.subheader("The core design choice: no user ID")
         st.markdown("Most recommender systems embed a unique ID for every user in the training set.")
