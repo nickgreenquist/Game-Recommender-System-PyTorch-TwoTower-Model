@@ -1114,7 +1114,7 @@ with genres_tab:
     tab_explore_genres(art.model, art.fs, art.all_ids, art.all_norm_genre)
 
 with tags_tab:
-    tab_explore_tags(art.model, art.fs, art.all_ids, art.all_norm_tag)
+    tab_explore_tags(art.model, art.be, art.fs, art.all_ids, art.all_norm_tag)
 
 with about_tab:
     tab_about()
