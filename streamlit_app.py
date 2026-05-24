@@ -679,7 +679,7 @@ def tab_explore_genres(model, fs, all_ids, all_norm_genre):
 def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
     st.caption(
         "Select Steam tags to describe what you're looking for — subgenres, moods, mechanics, "
-        f"tropes (e.g. 'Open World', 'Rogue-like', 'Dark Souls-like', 'Cozy'). "
+        f"tropes (e.g. 'Metroidvania', 'Atmospheric', 'Open World', 'Cyberpunk'). "
         f"The top {_ANCHORS_PER_TAG} games per tag by TF-IDF score are averaged into a "
         "query embedding, then all games are ranked by cosine similarity in tag space."
     )
@@ -863,7 +863,7 @@ def tab_about():
 | full_pool | Sum of 32-dim item ID embeddings for all history (equal-weight) | Broad collaborative fingerprint of your overall library |
 | playtime_pool | Sum of 32-dim item ID embeddings weighted by normalized log-playtime | Engagement intensity — games you sank hundreds of hours into dominate |
 | user_genre_tower | Debiased avg log-playtime per genre + genre play fraction | Genre affinity — how strongly you lean toward each broad category |
-| user_tag_tower | Sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like" |
+| user_tag_tower | Sum of TF-IDF tag vectors from play history | Tag affinity — granular community descriptors like "Open World", "Rogue-like", "Metroidvania" |
 """, unsafe_allow_html=True)
 
         st.markdown(
@@ -881,7 +881,7 @@ def tab_about():
 |---|---|---|
 | item_embedding_tower | Game ID (shared lookup with all four user history pools) | Collaborative identity — a learned fingerprint for each game based on who plays it together |
 | item_genre_tower | Uniform-weighted genre vector | Broad genre positioning |
-| item_tag_tower | TF-IDF Steam tag scores (164 tags) | Community descriptors — granular signals like "Open World", "Rogue-like", "Dark Souls-like" |
+| item_tag_tower | TF-IDF Steam tag scores (164 tags) | Community descriptors — granular signals like "Open World", "Rogue-like", "Metroidvania" |
 | developer_tower | Primary developer index | Developer identity — clusters games by studio |
 | year_embedding_tower | Steam release year | Era — captures generational shifts in game design |
 | price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
