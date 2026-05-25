@@ -153,6 +153,72 @@ SIMULATED_ANCHOR_LOG_HOURS          =  2.0   # weight for tag-based anchor games
 SIMULATED_DISLIKE_LOG_HOURS         = 0.5    # weight for disliked games
 ANCHORS_PER_TAG                     =  5
 
+# ── Nick — a real user, built from actual Steam playtime ───────────────────────
+# item_id → total hours played, from the personal Steam library export. All 52 games
+# listed here are in the 5,437-game corpus; heavily-played titles that are absent or
+# Valve-denylisted — notably Civ VI (158h) and Skyrim (107h) — are folded into corpus
+# proxies instead (Civ IV: Beyond the Sword, Civ V, Oblivion, Morrowind, the Witchers).
+# Some playtimes are hand-overridden where the PC hours undercount
+# real engagement (games played mostly on console). Sub-0.1h trace-plays
+# (MIN_HOURS_PER_GAME) are dropped. Unlike the synthetic archetypes this user has NO
+# disliked pool: the ~130 unplayed games in the library were bought-and-never-tried,
+# not disliked. The liked/full/playtime pools derive from these real hours in
+# _build_nick_embedding.
+NICK_PLAYTIME = {
+    '8800': 549.1,    # Civilization IV: Beyond the Sword  (391h + ~158h Civ VI, not in corpus) — most-played
+    '8930': 316.0,    # Sid Meier's Civilization V
+    '22380': 200.0,   # Fallout: New Vegas  (mostly console playtime)
+    '12120': 150.0,   # Grand Theft Auto: San Andreas  (console playtime)
+    '22330': 127.4,   # The Elder Scrolls IV: Oblivion  (+~110h Skyrim, which isn't in the corpus)
+    '22370': 100.0,   # Fallout 3: Game of the Year Edition  (console playtime)
+    '10180': 100.0,   # Call of Duty: Modern Warfare 2  (console playtime)
+    '382900': 100.0,  # Final Fantasy VI  (console playtime)
+    '24780': 71.7,    # SimCity 4 Deluxe
+    '47810': 60.0,    # Dragon Age: Origins - Ultimate Edition  (console playtime)
+    '427190': 60.0,   # Dead Rising  (console playtime)
+    '200710': 55.9,   # Torchlight II
+    '413150': 52.4,   # Stardew Valley
+    '12100': 50.0,    # Grand Theft Auto III  (console playtime)
+    '12110': 50.0,    # Grand Theft Auto: Vice City  (console playtime)
+    '237110': 50.0,   # Mortal Kombat Komplete Edition  (console playtime)
+    '7670': 40.0,     # BioShock  (console playtime)
+    '8850': 40.0,     # BioShock 2  (console playtime)
+    '8980': 31.2,     # Borderlands
+    '377160': 27.3,   # Fallout 4
+    '49520': 26.2,    # Borderlands 2
+    '20900': 23.5,    # The Witcher: Enhanced Edition
+    '233270': 20.0,   # Far Cry 3 - Blood Dragon  (console playtime)
+    '4760': 20.0,     # Rome: Total War  (console/other playtime)
+    '24740': 20.0,    # Burnout Paradise  (console playtime)
+    '3590': 20.0,     # Plants vs. Zombies GOTY  (console playtime)
+    '12220': 20.0,    # Grand Theft Auto: Episodes from Liberty City  (console playtime)
+    '17100': 20.0,    # Children of the Nile: Enhanced Edition  (console playtime)
+    '6860': 20.0,     # Hitman: Blood Money  (console playtime)
+    '20920': 19.1,    # The Witcher 2
+    '220240': 19.0,   # Far Cry 3
+    '55230': 18.2,    # Saints Row: The Third
+    '8870': 15.5,     # BioShock Infinite
+    '40800': 10.8,    # Super Meat Boy
+    '102600': 9.8,    # Orcs Must Die!
+    '201790': 8.6,    # Orcs Must Die! 2
+    '22320': 6.4,     # The Elder Scrolls III: Morrowind
+    '107100': 6.0,    # Bastion
+    '113200': 5.4,    # The Binding of Isaac
+    '206420': 4.2,    # Saints Row IV
+    '104900': 4.0,    # ORION: Prelude
+    '98300': 3.7,     # Toy Soldiers
+    '206440': 3.4,    # To the Moon
+    '500': 2.4,       # Left 4 Dead  (stands in for Left 4 Dead 2, which is Valve-denylisted)
+    '17300': 2.1,     # Crysis
+    '26800': 1.0,     # Braid
+    '204360': 0.85,   # Castle Crashers
+    '205100': 0.83,   # Dishonored
+    '98200': 0.37,    # Frozen Synapse
+    '264200': 0.2,    # One Finger Death Punch
+    '17470': 0.13,    # Dead Space
+    '400': 0.1,       # Portal
+}
+
 
 # ── Game embedding cache ──────────────────────────────────────────────────────
 
@@ -175,6 +241,7 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
     dev_embs   = []
     year_embs  = []
     price_embs = []
+    text_embs  = []
 
     with torch.no_grad():
         for s in range(0, n_items, batch_size):
@@ -186,6 +253,8 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
             dev_embs.append(model.developer_tower(model.developer_embedding_lookup(all_dev_idxs[s:e])))
             year_embs.append(model.year_embedding_tower(model.year_embedding_lookup(all_year_idxs[s:e])))
             price_embs.append(model.price_embedding_tower(model.price_embedding_lookup(all_prices[s:e])))
+            if model.use_item_text:
+                text_embs.append(model.item_text_tower(F.normalize(model.game_text_matrix[gidxs], dim=-1)))
 
     genre_all = torch.cat(genre_embs,  dim=0)
     tag_all   = torch.cat(tag_embs,    dim=0)
@@ -193,9 +262,13 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
     dev_all   = torch.cat(dev_embs,    dim=0)
     year_all  = torch.cat(year_embs,   dim=0)
     price_all = torch.cat(price_embs,  dim=0)
+    text_all  = torch.cat(text_embs,   dim=0) if model.use_item_text else None
 
-    # Re-apply item projection MLP + L2 normalize (matches model.item_embedding())
-    concat_all = torch.cat([genre_all, tag_all, game_all, dev_all, year_all, price_all], dim=1)
+    # Re-apply item projection MLP + L2 normalize (matches model.item_embedding() concat order)
+    parts_all  = [genre_all, tag_all, game_all, dev_all, year_all, price_all]
+    if model.use_item_text:
+        parts_all.append(text_all)
+    concat_all = torch.cat(parts_all, dim=1)
     combined = []
     with torch.no_grad():
         for s in range(0, n_items, batch_size):
@@ -213,6 +286,8 @@ def build_game_embeddings(model: GameRecommender, fs: dict) -> tuple:
             'GAME_PRICE_EMBEDDING':    price_all[i].unsqueeze(0),
             'GAME_EMBEDDING_COMBINED': combined[i].unsqueeze(0),
         }
+        if model.use_item_text:
+            game_embeddings[iid]['GAME_TEXT_EMBEDDING'] = text_all[i].unsqueeze(0)
 
     return game_embeddings, item_ids, combined
 
@@ -307,6 +382,43 @@ def _build_user_embedding(model: GameRecommender, fs: dict, user_type: str) -> t
                                     to_padded(full_ids), pw_t)
 
 
+def _build_nick_embedding(model: GameRecommender, fs: dict) -> torch.Tensor:
+    """
+    Build Nick's user embedding from real Steam playtime (NICK_PLAYTIME), mirroring
+    dataset.py's pool logic instead of the archetypes' fixed fav/anchor weights:
+      • full pool          = every played game in the corpus
+      • playtime weights   = log(1+hours) normalized over the full pool
+      • liked pool         = games played at least the game's global median hours
+      • disliked pool      = empty (unplayed library games are unknown, not disliked)
+      • avg_log            = mean log(1+hours), for in-model genre debiasing
+    """
+    item_to_idx  = {str(k): v for k, v in fs['item_to_idx'].items()}
+    median_hours = fs['game_median_hours']                      # (n_items,) global per-game median
+
+    full_ids, hours = [], []
+    for iid, hrs in NICK_PLAYTIME.items():
+        if str(iid) in item_to_idx:
+            full_ids.append(item_to_idx[str(iid)])
+            hours.append(hrs)
+
+    hours_arr = np.asarray(hours, dtype=np.float32)
+    log_h     = np.log1p(hours_arr)
+    weights   = (log_h / log_h.sum()).tolist()
+    liked_ids = [idx for idx, hrs in zip(full_ids, hours) if hrs >= float(median_hours[idx])]
+    avg_log   = float(log_h.mean())
+
+    device = next(model.parameters()).device
+    def to_padded(ids):
+        if not ids: ids = [model.game_pad_idx]
+        return torch.tensor([ids], dtype=torch.long, device=device)
+
+    X_avg_log_t = torch.tensor([[avg_log]], dtype=torch.float32, device=device)
+    pw_t        = torch.tensor([weights], dtype=torch.float32, device=device)
+    with torch.no_grad():
+        return model.user_embedding(X_avg_log_t, to_padded(liked_ids), to_padded([]),
+                                    to_padded(full_ids), pw_t)
+
+
 def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor, all_ids: list,
                     top_n: int = 20) -> None:
     model.eval()
@@ -349,6 +461,36 @@ def run_canary_eval(model: GameRecommender, fs: dict, all_combined: torch.Tensor
             print("-" * bar_w)
             for a, b in zip_longest(fav_titles, recs, fillvalue=''):
                 print(f"{a:<50}  {b}")
+
+        # ── Nick — real-user canary from actual Steam playtime (no disliked pool) ──
+        nick_emb = _build_nick_embedding(model, fs)
+        played_titles = {fs['item_id_to_title'][iid] for iid in NICK_PLAYTIME
+                         if iid in fs['item_id_to_title']}
+        raw_scores = (all_combined @ nick_emb.T).squeeze(-1)
+        scores = {all_ids[i]: raw_scores[i].item() for i in range(len(all_ids))}
+
+        recs = []
+        seen_titles = set(played_titles)
+        for iid, _ in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+            if len(recs) >= top_n: break
+            title = fs['item_id_to_title'][iid]
+            if title not in seen_titles:
+                seen_titles.add(title)
+                recs.append(title)
+
+        # Show his most-played games (by hours) alongside the recommendations
+        top_played = [fs['item_id_to_title'][iid] for iid, _ in
+                      sorted(NICK_PLAYTIME.items(), key=lambda x: x[1], reverse=True)
+                      if iid in fs['item_id_to_title']]
+        bar_w = 100
+        print(f"\n{'═' * bar_w}")
+        print("Nick (real Steam playtime)  |  playtime-weighted pools, no disliked")
+        print(f"{'═' * bar_w}")
+        print('─' * bar_w)
+        print(f"{'Most-Played Games':<50}  Recommendations")
+        print("-" * bar_w)
+        for a, b in zip_longest(top_played[:top_n], recs, fillvalue=''):
+            print(f"{a:<50}  {b}")
 
 
 # ── Embedding probes ──────────────────────────────────────────────────────────

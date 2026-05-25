@@ -1,12 +1,13 @@
 """
 Stage 5 — Export serving artifacts.
 
-serving/model.pth           — state_dict (game_tag_matrix, game_dev_idx excluded)
+serving/model.pth           — state_dict (game_tag_matrix, game_genre_matrix, game_text_matrix excluded)
 serving/game_embeddings.pt  — {item_id: {GAME_EMBEDDING_COMBINED, sub-embeddings}}
 serving/feature_store.pt    — inference dict (no user data)
 
-game_tag_matrix and game_dev_idx are registered buffers and are excluded
-from model.pth. They are restored from feature_store.pt at app startup.
+game_tag_matrix, game_genre_matrix and game_text_matrix are registered buffers and are
+excluded from model.pth. They are restored from feature_store.pt at app startup.
+(game_text_matrix is present only when the CG was trained with use_item_text — V6a+.)
 
 Usage:
     python main.py export
@@ -59,7 +60,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
 
     # ── model.pth (buffers excluded) ──────────────────────────────────────────
     model_state = {k: v for k, v in model.state_dict().items()
-                   if k not in ('game_tag_matrix', 'game_genre_matrix', 'game_dev_idx')}
+                   if k not in ('game_tag_matrix', 'game_genre_matrix', 'game_text_matrix', 'game_dev_idx')}
     model_path = os.path.join(SERVING_DIR, 'model.pth')
     torch.save(model_state, model_path)
     print(f"Saved {model_path}  ({os.path.getsize(model_path) / 1e6:.1f} MB)")
@@ -136,6 +137,15 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
     dev_idx_arr  = fs['game_developer_idx']          # (n_items,) int64
     game_dev_idx = torch.from_numpy(np.append(dev_idx_arr, n_developers).astype(np.int64))
 
+    # game_text_matrix: frozen bge-base-en-v1.5 description embeddings, padded like the
+    # buffers above. Stored for BOTH CG model reconstruction (V6a item text tower) AND a
+    # future ranker text bucket. None when the CG carries no text tower (legacy / V5).
+    game_text_matrix = None
+    if config.get('use_item_text') and 'game_text_matrix' in fs:
+        text_matrix      = fs['game_text_matrix']        # (n_items, text_dim) numpy float32
+        pad_text         = np.zeros((1, text_matrix.shape[1]), dtype=np.float32)
+        game_text_matrix = torch.from_numpy(np.vstack([text_matrix, pad_text]))
+
     # ── feature_store.pt ──────────────────────────────────────────────────────
     feature_store = {
         # Dropdown ordering
@@ -160,6 +170,7 @@ def run_export(data_dir: str = 'data', checkpoint_path: str = None,
         # Game feature matrices
         'game_genre_matrix':  game_genre_matrix,         # tensor (n_items+1, n_genres) — buffer
         'game_tag_matrix':    game_tag_matrix,           # tensor (n_items+1, n_tags) — buffer
+        'game_text_matrix':   game_text_matrix,          # tensor (n_items+1, text_dim) or None — buffer + ranker source
         'game_dev_idx':       game_dev_idx,              # tensor (n_items+1,) — buffer
         'game_year_idx':      fs['game_year_idx'],       # numpy (n_items,) int64 — ipool hist buf
         'game_price_bucket':  fs['game_price_bucket'],   # numpy (n_items,) int64 — ipool hist buf

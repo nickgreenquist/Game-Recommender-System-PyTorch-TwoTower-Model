@@ -23,6 +23,7 @@ This is a **two-stage** recommender: the two-tower model is the candidate-genera
 - **Valve title filter** — CS:GO, Garry's Mod, Left 4 Dead 2, Portal, and Counter-Strike are hard-removed from the corpus. These appeared in nearly every user's history, were trivially easy prediction targets, and caused cross-genre recommendation pollution.
 - **User tag tower** — sum of TF-IDF Steam tag vectors from play history → 32-dim. Captures granular community descriptors like "Open World", "Rogue-like", "Dark Souls-like".
 - **Developer embedding tower** — analogous to the author tower in the book model. Clusters games by studio and stylistically similar developers.
+- **Game description text feature** — each game's Steam store description is converted to a 768-dim vector with an off-the-shelf sentence-embedding model (`BAAI/bge-base-en-v1.5`), computed once offline. A small trainable adapter projects it into the item tower (the encoder never runs at inference — only corpus games are scored, and their vectors are precomputed). Captures prose mood/setting/mechanics the genre and tag towers miss.
 - **Price embedding tower** — free-to-play vs. indie vs. AAA is a meaningful taste dimension; bucketed into 9 price tiers.
 - **Shuffled history protocol** — Steam provides no per-game timestamps. History is shuffled randomly rather than sorted by release date, which would give the model a temporal shortcut (always predicting newer games). Rollback examples simulate "given a random subset of games this user plays, predict another."
 - **Projection MLP in each tower** — each tower concatenates its sub-embeddings and passes them through a 2-layer MLP (→256→ReLU→128), then L2-normalizes the output. Both towers project to the same 128-dim space; dot product of normalized outputs is cosine similarity.
@@ -47,7 +48,8 @@ Item Tower:
   developer_tower(primary_developer_idx)  → 12-dim
   year_embedding_tower(release_year)      →  8-dim
   price_embedding_tower(price_bucket)     →  4-dim
-  concat → 96-dim
+  item_text_tower(768-dim description embedding) → 32-dim  ← frozen bge-base-en-v1.5 + trainable adapter
+  concat → 128-dim
   item_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
 Prediction: dot_product(user_projection_out, item_projection_out)

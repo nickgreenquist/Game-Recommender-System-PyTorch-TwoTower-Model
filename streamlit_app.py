@@ -96,6 +96,11 @@ def load_artifacts() -> Artifacts:
         developer_embedding_size=cfg['developer_embedding_size'],
         item_year_embedding_size=cfg['item_year_embedding_size'],
         price_embedding_size=cfg['price_embedding_size'],
+        # Match the exported checkpoint's text tower (V6a item text). Default False so a
+        # legacy / no-text feature_store reconstructs the exact V5 tower.
+        use_item_text=cfg.get('use_item_text', False),
+        text_input_dim=cfg.get('text_input_dim', 768),
+        text_embedding_size=cfg.get('text_embedding_size', 32),
         proj_hidden=cfg.get('proj_hidden', 256),
         output_dim=cfg.get('output_dim', 128),
     )
@@ -108,6 +113,13 @@ def load_artifacts() -> Artifacts:
     if not isinstance(genre_mat, torch.Tensor):
         genre_mat = torch.from_numpy(np.array(genre_mat, dtype=np.float32))
     model.game_genre_matrix.copy_(genre_mat)
+
+    # game_text_matrix buffer (V6a item text) — excluded from model.pth, restored here.
+    text_mat = fs.get('game_text_matrix')
+    if text_mat is not None and hasattr(model, 'game_text_matrix'):
+        if not isinstance(text_mat, torch.Tensor):
+            text_mat = torch.from_numpy(np.array(text_mat, dtype=np.float32))
+        model.game_text_matrix.copy_(text_mat)
 
     model.load_state_dict(state_dict, strict=False)
     model.eval()
@@ -893,7 +905,7 @@ def tab_about():
 
         st.subheader("Item Tower")
         st.markdown(
-            "Six sub-embeddings are concatenated (96-dim), then passed through a projection MLP → **128-dim**."
+            "Seven sub-embeddings are concatenated (128-dim), then passed through a projection MLP → **128-dim**."
         )
         st.markdown("""
 | Component | Input | What it learns |
@@ -904,6 +916,7 @@ def tab_about():
 | developer_tower | Primary developer index | Developer identity — clusters games by studio |
 | year_embedding_tower | Steam release year | Era — captures generational shifts in game design |
 | price_embedding_tower | Price bucket (Free / <$5 / … / >$60) | Price tier — free-to-play vs. indie vs. AAA is a meaningful taste dimension |
+| item_text_tower | Game description text → 768-dim vector | Prose mood/setting/mechanics — the store description embedded with an off-the-shelf sentence model (bge-base-en-v1.5), then projected by a small trainable adapter |
 """, unsafe_allow_html=True)
 
         st.subheader("Projection MLP")

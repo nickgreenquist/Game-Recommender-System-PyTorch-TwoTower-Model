@@ -1,12 +1,18 @@
 """
-Two-Tower GameRecommender model (V5).
+Two-Tower GameRecommender model (V6a — item text tower, gated by use_item_text).
 
 Key design points:
 - ReLU everywhere.
 - Shallow sum pooling for history (sum raw 32-dim ID embeddings directly).
 - Four history pools: Liked, Disliked, Full, Playtime-weighted Full (shared ID embedding).
 - In-model genre debiasing + user tag context tower.
+- Item text tower (V6a): frozen bge-base-en-v1.5 description embedding → adapter → item
+  concat, active only when use_item_text=True (False reproduces the V5 tower exactly).
 - F.normalize on both tower outputs (cosine similarity).
+
+Note: a Stage-B user-history text pool (V6b) was tested 2026-05-25 and DROPPED — it
+regressed offline uniformly across every K (the mean text-centroid blurs eclectic taste
+and dilutes the id-history pools). Item text only.
 """
 import torch
 import torch.nn as nn
@@ -29,14 +35,22 @@ class GameRecommender(nn.Module):
                  developer_embedding_size=12,
                  item_year_embedding_size=8,
                  price_embedding_size=4,
+                 text_input_dim=768,
+                 text_embedding_size=32,
+                 use_item_text=True,
                  proj_hidden=256,
                  output_dim=128,
                  ):
         super().__init__()
 
-        self.game_pad_idx = n_games
-        self.dev_pad_idx  = n_developers
-        self.output_dim   = output_dim
+        self.game_pad_idx  = n_games
+        self.dev_pad_idx   = n_developers
+        self.output_dim    = output_dim
+        # use_item_text=False reproduces the V5 item tower exactly (96-d concat, no text
+        # tower) so the A/B can train a same-branch control. TODO: once the text feature
+        # is validated as a win, delete this flag and the `if self.use_item_text` branches
+        # below + in item_embedding() / evaluate.build_game_embeddings — make text always-on.
+        self.use_item_text = use_item_text
 
         # ── Shared item embedding lookup (used by item tower and all 4 user history pools) ──
         self.item_embedding_lookup = nn.Embedding(
@@ -66,6 +80,14 @@ class GameRecommender(nn.Module):
             nn.Linear(n_genres, item_genre_embedding_size),
             nn.ReLU()
         )
+        if self.use_item_text:
+            text_hidden = 128
+            self.item_text_tower = nn.Sequential(
+                nn.Linear(text_input_dim, text_hidden),
+                nn.ReLU(),
+                nn.Linear(text_hidden, text_embedding_size),
+                nn.ReLU()
+            )
         self.year_embedding_lookup = nn.Embedding(n_years, item_year_embedding_size)
         self.year_embedding_tower = nn.Sequential(
             nn.Linear(item_year_embedding_size, item_year_embedding_size),
@@ -101,11 +123,13 @@ class GameRecommender(nn.Module):
                            user_genre_embedding_size +
                            user_tag_embedding_size)
         
-        # Item Concat (default V5 dims):
-        #   genre(8)+tag(32)+id(32)+dev(12)+year(8)+price(4) = 96-dim
-        item_concat_dim = (item_genre_embedding_size + tag_embedding_size + 
-                           item_id_embedding_size + developer_embedding_size + 
-                           item_year_embedding_size + price_embedding_size)
+        # Item Concat:
+        #   V5 control (use_item_text=False): genre(8)+tag(32)+id(32)+dev(12)+year(8)+price(4) = 96
+        #   V6a (use_item_text=True):         + text(32) = 128  (frozen description emb via item_text_tower)
+        item_concat_dim = (item_genre_embedding_size + tag_embedding_size +
+                           item_id_embedding_size + developer_embedding_size +
+                           item_year_embedding_size + price_embedding_size +
+                           (text_embedding_size if self.use_item_text else 0))
 
         self.user_projection = nn.Sequential(
             nn.Linear(user_concat_dim, proj_hidden),
@@ -121,6 +145,12 @@ class GameRecommender(nn.Module):
         # Buffers (stored in model but not trained)
         self.register_buffer('game_tag_matrix', torch.zeros(n_games + 1, n_tags))
         self.register_buffer('game_genre_matrix', torch.zeros(n_games + 1, n_genres))
+        # Frozen per-game description embeddings (bge-base-en-v1.5, 768-d). Padding row
+        # = zeros. Excluded from model.pth, stored in feature_store.pt like the others.
+        # Registered only when the text tower is active, so a use_item_text=False model is
+        # byte-identical to V5 and loads legacy V5 checkpoints under strict load_state_dict.
+        if self.use_item_text:
+            self.register_buffer('game_text_matrix', torch.zeros(n_games + 1, text_input_dim))
 
         self.apply(self._init_weights)
         # Final projection layers need standard gain=1.0 to prevent signal vanishing
@@ -206,9 +236,14 @@ class GameRecommender(nn.Module):
         dev_emb        = self.developer_tower(self.developer_embedding_lookup(target_dev_idx))
         year_emb       = self.year_embedding_tower(self.year_embedding_lookup(target_year_idx))
         price_emb      = self.price_embedding_tower(self.price_embedding_lookup(target_price))
-        
-        concat = torch.cat([item_genre_emb, item_tag_emb, item_emb,
-                            dev_emb, year_emb, price_emb], dim=1)
+
+        parts = [item_genre_emb, item_tag_emb, item_emb, dev_emb, year_emb, price_emb]
+        if self.use_item_text:
+            # Frozen text embedding → L2-norm (stored unit-norm; explicit for encoder swaps) → adapter
+            item_text_vec = F.normalize(self.game_text_matrix[target_game_idx], dim=-1)
+            parts.append(self.item_text_tower(item_text_vec))
+
+        concat = torch.cat(parts, dim=1)
         return F.normalize(self.item_projection(concat), dim=-1)
 
     def forward(self, X_user_avg_log, X_hist_liked, X_hist_disliked, X_hist_full,

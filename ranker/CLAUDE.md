@@ -4,6 +4,8 @@ Guidance for Claude Code when working in the `ranker/` directory. This is the **
 
 ## Status (2026-05-23)
 
+> **OPEN TODO (2026-05-25) — retrain ranker against the new item-text CG.** Serving now ships the **V6a item-text CG** (`best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`), but the PROD ranker below was warm-started + precomputed against the OLD no-text α=0 CG (`…20260515_084320`). Shipped as-is for now (item text was offline-flat → CG top-100 barely moved). To make it correct: (1) `precompute` candidates from the new text CG; (2) re-derive the warm-start key map — `src/model.py` now has `item_text_tower` + `game_text_matrix` buffer (the rule-8 drift), and decide whether the ranker mirrors item-side text in its deep concat; (3) add a **ranker text bucket** — a text-similarity cross feature is the stronger use case (direct signal path the CG dot-product lacks). `game_text_matrix` is already in `serving/feature_store.pt`. See root `TEXT_FEATURE_PLAN.md`.
+
 **Buildout complete. Bucket 6 is the FINAL/PROD ranker and it is now served on Streamlit.**
 
 Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓, 8 ✗, 9 ✗. Roadmap complete — Bucket 9 was the last planned bucket.

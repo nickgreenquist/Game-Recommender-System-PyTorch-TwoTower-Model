@@ -20,7 +20,7 @@ from src.model import GameRecommender
 def run_offline_eval(model: GameRecommender, fs: dict,
                      checkpoint_path: str = '',
                      n_users: int = 2_000,
-                     ks: tuple = (1, 5, 10, 20, 50),
+                     ks: tuple = (1, 5, 10, 20, 50, 100),
                      seed: int = 42) -> None:
     model.eval()
     device = next(model.parameters()).device

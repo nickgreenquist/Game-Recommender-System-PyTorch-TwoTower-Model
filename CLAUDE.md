@@ -126,18 +126,21 @@ User Tower:
   concat → 192-dim
   user_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
-Item Tower:
+Item Tower (V6a):
   item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size=8)
   item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=32)
   item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)
   developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size=12)
   year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size=8)
   price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size=4)
-  concat → 96-dim
+  item_text_tower(text_emb_768)           → item_text_emb    (text_embedding_size=32)
+  concat → 128-dim
   item_projection(Linear 256 → ReLU → Linear 128) → 128-dim
 
 Prediction: dot_product(user_projection_out, item_projection_out)
 ```
+
+**Item text tower (V6a, item-side only):** Each game's store description (`short_description` + `about_the_game`, fetched offline from the Steam Storefront API) is encoded ONCE by a frozen sentence model (`BAAI/bge-base-en-v1.5`, 768-d) into `data/base_game_text_emb.parquet`. At train/serve time the frozen vector is a registered buffer lookup (`game_text_matrix`) → L2-norm → a trainable adapter (`item_text_tower`: 768→128→32) into the item concat. The encoder NEVER runs at train or inference — only corpus games are scored, and their vectors are precomputed. Gated by `use_item_text` (False reproduces the V5 96-d item tower exactly). Offline-flat for CG (item-side-only text has no direct text-vs-text path in a dot product) but kept — the `game_text_matrix` artifact is shared into `feature_store.pt` for a future ranker text bucket. **A user-history text pool (V6b) was tested and dropped** — it regressed offline uniformly (the mean text-centroid blurs eclectic taste and dilutes the id-history pools). See `TEXT_FEATURE_PLAN.md`.
 
 **Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. No LayerNorm after pooling — industry standard (YouTube DNN, TikTok); the projection MLP learns the right scale.
 
@@ -187,12 +190,13 @@ tag_embedding_size          = 32   # item only (was 16 in V1 — increased, tags
 developer_embedding_size    = 12   # item only
 item_year_embedding_size    = 8    # item only
 price_embedding_size        = 4    # item only
+text_embedding_size         = 32   # item only (V6a item_text_tower output; text_input_dim=768)
 
 proj_hidden  = 256
 output_dim   = 128   # only this must match across towers
 
 # user concat: 32+32+32+32 (pools) + 32 (genre) + 32 (tag) = 192 → proj → 128
-# item concat: 8+32+32+12+8+4 = 96 → proj → 128
+# item concat: 8+32+32+12+8+4 + 32 (text, V6a) = 128 → proj → 128
 ```
 
 Only `item_id_embedding_size` and `output_dim` are constrained across towers.
@@ -272,9 +276,26 @@ Each user type has:
 
 ## Offline Evaluation
 
-`python main.py eval [checkpoint_path]` — Recall@K, NDCG@K, Hit Rate@K, MRR at K = 1, 5, 10, 20, 50.
+`python main.py eval [checkpoint_path]` — Recall@K, NDCG@K, Hit Rate@K, MRR at K = 1, 5, 10, 20, 50, 100.
+
+**Checkpoint selection (2026-05-25):** `train.py` saves the 'best' checkpoint on **val NDCG@10**, not val cross-entropy. CE is only a surrogate (it keeps falling via confidence calibration after ranks plateau); NDCG@10 is the ranking metric we ship and report, mirroring `ranker.train`. Computed each log step from the same full-corpus score matrix the CE pass already builds (ranks off raw dot products), plus a final post-loop eval. `val_loss` is still logged as a diagnostic. CG retrains are cheap (~10 min / 50k steps), so all comparisons are same-rule.
 
 ### Current results
+
+**V6a DEPLOYED** (item text tower, α=0, NDCG@10-selected — the served retrieval stage as of 2026-05-25):
+
+| K | Recall@K | NDCG@K |
+|---|---|---|
+| 1 | 0.0279 | 0.0279 |
+| 5 | 0.0875 | 0.0576 |
+| 10 | 0.1444 | 0.0758 |
+| 20 | 0.2299 | 0.0972 |
+| 50 | 0.3968 | 0.1302 |
+| 100 | 0.5575 | 0.1562 |
+
+MRR: 0.0704. **Flat vs the no-text α=0 baseline** (every Δ ≤ .0014, noise) — item text adds no CG lift but is kept for ranker reuse (see Architecture > "Item text tower"). The no-text α=0 control under the same NDCG@10 rule (`…094445`): R@1 .0279 / @10 .1430 / @50 .3958 / @100 .5572 / MRR .0702. The dropped V6b (+user text pool) regressed: R@1 .0268 / @10 .1423 / @50 .3942 / MRR .0694.
+
+
 
 **V5 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm, correct Menon Path 2 formula, α=0.4):
 
@@ -360,17 +381,19 @@ At eval time, val user rollback examples are generated fresh (not from the saved
 | `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline, global game medians, Valve DENYLIST |
 | `features.py`   | Adapted — game column names, developer feature, avg_log_playtime per user (genre context removed) |
 | `dataset.py`    | Rewritten (V3) — pre-allocated numpy arrays, pre-padded tensors, 9-tuple output, genre/tag moved to model |
-| `model.py`      | Extended (V3) — 4 pools, in-model genre/tag context, game_genre_matrix buffer, F.normalize on both towers |
-| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, checkpoint config sidecar |
+| `model.py`      | Extended (V6a) — 4 pools, in-model genre/tag context, game_genre_matrix + game_text_matrix buffers, item text tower (use_item_text), F.normalize on both towers |
+| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, checkpoint config sidecar, best-on-val-NDCG@10 selection |
 | `evaluate.py`   | Adapted — 9 canary user types, POPULARITY_ALPHA_INFERENCE_MULTIPLE, new signatures |
 | `offline_eval.py` | Adapted — V3 9-tuple inputs, pre-padded tensors, 1× popularity bias              |
-| `export.py`     | Adapted — exclude game_tag_matrix and game_genre_matrix buffers from model.pth     |
+| `export.py`     | Adapted — exclude game_tag_matrix, game_genre_matrix and game_text_matrix buffers from model.pth |
 
 ## Serving / Export Notes
 
-`game_tag_matrix` (registered buffer, n_games × n_tags × float32) and `game_dev_idx` are excluded from `model.pth` and stored in `feature_store.pt`. The Streamlit app reconstructs `GameRecommender` using the buffers from `feature_store.pt` and loads weights with `strict=False`.
+`game_tag_matrix`, `game_genre_matrix`, `game_text_matrix` (registered buffers) and `game_dev_idx` are excluded from `model.pth` and stored in `feature_store.pt`. The Streamlit app reconstructs `GameRecommender` using the buffers from `feature_store.pt` and loads weights with `strict=False`. (`game_text_matrix` is present only when the CG carries the V6a text tower; the app copies it when present.)
 
 **Two-stage serving (architecture decision 2026-05-23):** the deployed CG is the **raw α=0** triple CG (the fixed retrieval stage), and the Wide & Deep ranker reranks its top-100. We tested moving the popularity penalty onto the ranker (α=0.2) and rejected it — it hurt offline ~27% with no meaningfully better canary — so **both stages ship raw α=0** with no popularity penalty anywhere; retrieval is recall-maximizing and the ranker reranks purely on its content/cross features. See `ranker/serving.py` for the shared rerank path (used by both canary and Streamlit) and `ranker/CLAUDE.md` for the full ranker subsystem docs.
+
+**Deployed CG is now V6a item-text (2026-05-25).** `serving/` was re-exported from the α=0 item-text CG (`best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`). The **existing PROD ranker is unchanged** — it was warm-started/precomputed against the prior no-text α=0 CG, kept as-is because item text was offline-flat (the CG top-100 barely moved). The ranker needs a retrain against the new text CG to be fully correct (re-precompute + warm-start drift from the new `item_text_tower` + a text bucket) — see the OPEN TODO at the top of `ranker/CLAUDE.md`.
 
 CG serving artifacts (generated by `python main.py export`, or by the ranker export below which calls it with the α=0 CG):
 - `serving/model.pth` — CG weights only (buffers excluded)

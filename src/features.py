@@ -259,6 +259,22 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
     game_price_bucket  = np.array(games_sorted['price_bucket'].tolist(),  dtype=np.int64)
     game_median_hours  = np.array(games_sorted['median_hours'].tolist(),  dtype=np.float32)
 
+    # ── Text tower — frozen per-game description embeddings (bge-base-en-v1.5, 768-d) ──
+    # Built offline by src.embed_text (mirrors base_game_tags → game_tag_matrix). Aligned
+    # to item_idx order here and stored in the FeatureStore so BOTH the CG model and a
+    # future ranker text bucket can consume it (rebuilt as a buffer with a pad row in
+    # train.build_model / ranker.train._buffers_from_fs).
+    text_emb_df     = pd.read_parquet(os.path.join(data_dir, 'base_game_text_emb.parquet'))
+    iid_to_text_emb = dict(zip(text_emb_df['item_id'].astype(str), text_emb_df['embedding']))
+    missing_text    = [iid for iid in item_ids if str(iid) not in iid_to_text_emb]
+    if missing_text:
+        raise RuntimeError(
+            f"base_game_text_emb.parquet missing {len(missing_text)} corpus games "
+            f"(e.g. {missing_text[:3]}). Rebuild with: python -m src.embed_text --force"
+        )
+    game_text_matrix = np.array([iid_to_text_emb[str(iid)] for iid in item_ids],
+                                dtype=np.float32)            # (n_items, text_dim)
+
     # ── Bucket 5 — per-game numeric scalars for "Numeric Matching" cross features ──
     # All derived from existing base_games + features_games columns, written to FeatureStore
     # as (n_items,) float32 arrays parallel to the other game_* fields above. The ranker
@@ -427,6 +443,7 @@ def load_features(data_dir: str, version: str = FEATURES_VERSION) -> dict:
         # Game feature matrices (numpy, loaded as tensors in model)
         'game_genre_matrix':  game_genre_matrix,
         'game_tag_matrix':    game_tag_matrix,
+        'game_text_matrix':   game_text_matrix,
         'game_developer_idx': game_developer_idx,
         'game_year_idx':      game_year_idx,
         'game_price_bucket':  game_price_bucket,

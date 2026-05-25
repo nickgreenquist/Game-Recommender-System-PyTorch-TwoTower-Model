@@ -1,4 +1,4 @@
-── Canary user evaluation ──  (checkpoint: best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth)
+── Canary user evaluation ──  (checkpoint: best_triple_full_softmax_text_user_popularity_alpha_0_20260525_101807.pth)
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Western RPG Lover  |  Tags: Action RPG
@@ -7,26 +7,26 @@ Anchors: Numen: Contest of Heroes, Victor Vran ARPG, Grim Dawn, Hazen: The Dark 
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-The Witcher 2: Assassins of Kings Enhanced Edition  Kingdoms of Amalur: Reckoning™
-The Elder Scrolls IV: Oblivion® Game of the Year Edition  Dragon Age: Origins - Ultimate Edition
-DARK SOULS™: Prepare To Die™ Edition                Fallout 4
+The Witcher 2: Assassins of Kings Enhanced Edition  Fallout 4
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Borderlands 2
+DARK SOULS™: Prepare To Die™ Edition                Torchlight II
 Divinity: Original Sin (Classic)                    DARK SOULS™ II
-Fallout: New Vegas                                  Dungeons and Dragons: Daggerdale
-Mass Effect 2                                       Pillars of Eternity
-                                                    The Witcher: Enhanced Edition Director's Cut
-                                                    Borderlands 2
-                                                    DARK SOULS™ III
-                                                    RIFT
-                                                    Fallout 3: Game of the Year Edition
-                                                    Mass Effect
-                                                    Torchlight II
-                                                    Baldur's Gate II: Enhanced Edition
+Fallout: New Vegas                                  Kingdoms of Amalur: Reckoning™
+Mass Effect 2                                       Dragon Age: Origins - Ultimate Edition
+                                                    Sid Meier's Civilization® V
                                                     Borderlands
-                                                    Dragon's Dogma: Dark Arisen
+                                                    Pillars of Eternity
+                                                    The Witcher: Enhanced Edition Director's Cut
+                                                    Middle-earth™: Shadow of Mordor™
+                                                    Dishonored
+                                                    DARK SOULS™ III
+                                                    BioShock Infinite
+                                                    Fallout 3: Game of the Year Edition
+                                                    Dragon Age: Origins
                                                     Torchlight
-                                                    Dungeon Siege III
-                                                    Lords Of The Fallen™
-                                                    DARK SOULS™ II: Scholar of the First Sin
+                                                    Warframe
+                                                    PlanetSide 2
+                                                    Terraria
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 JRPG Lover  |  Tags: JRPG
@@ -36,25 +36,25 @@ Anchors: I am Setsuna, The Legend of Heroes: Trails in the Sky SC, Grandia® II 
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 Mugen Souls                                         Fairy Fencer F
-OH! RPG!                                            Megadimension Neptunia VII
+OH! RPG!                                            Hyperdimension Neptunia Re;Birth2: Sisters Generation / 超次次元ゲイム ネプテューヌRe;Birth2
 Ys VI: The Ark of Napishtim                         Hyperdimension Neptunia Re;Birth3 V Generation / 神次次元ゲイム ネプテューヌRe;Birth3 V CENTURY
-Wild Season                                         Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテューヌRe;Birth1 / 超次次元遊戲戰機少女重生1
-Disgaea PC / 魔界戦記ディスガイア PC                          Hyperdimension Neptunia Re;Birth2: Sisters Generation / 超次次元ゲイム ネプテューヌRe;Birth2
-Hyperdevotion Noire: Goddess Black Heart (Neptunia)  FINAL FANTASY TYPE-0™ HD
-FINAL FANTASY® XIII                                 Hyperdimension Neptunia U: Action Unleashed
-                                                    Tales of Zestiria
-                                                    Borderlands 2
+Wild Season                                         Terraria
+Disgaea PC / 魔界戦記ディスガイア PC                          Hyperdimension Neptunia Re;Birth1 / 超次次元ゲイム ネプテューヌRe;Birth1 / 超次次元遊戲戰機少女重生1
+Hyperdevotion Noire: Goddess Black Heart (Neptunia)  Borderlands 2
+FINAL FANTASY® XIII                                 FINAL FANTASY TYPE-0™ HD
                                                     Agarest: Generations of War Zero
-                                                    The Legend of Heroes: Trails in the Sky
-                                                    FINAL FANTASY IX
+                                                    Aura Kingdom
+                                                    Tales of Zestiria
+                                                    Hyperdimension Neptunia U: Action Unleashed
                                                     FINAL FANTASY X/X-2 HD Remaster
-                                                    FINAL FANTASY XIV Online
-                                                    FINAL FANTASY IV: THE AFTER YEARS
-                                                    FINAL FANTASY IV
-                                                    Fortune Summoners
-                                                    FINAL FANTASY VII
                                                     FINAL FANTASY VIII
-                                                    Epic Battle Fantasy 4
+                                                    The Legend of Heroes: Trails in the Sky
+                                                    Sid Meier's Civilization® V
+                                                    Ragnarok Online
+                                                    Ragnarok Online 2
+                                                    TERA
+                                                    Warframe
+                                                    Megadimension Neptunia VII
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 FPS Lover  |  Tags: FPS
@@ -64,25 +64,25 @@ Anchors: STAR WARS™ - Dark Forces, Singularity™, Quake Live™, Far Cry 3 - 
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 QUAKE II                                            Left 4 Dead
-Unreal Tournament 2004: Editor's Choice Edition     Half-Life 2: Episode One
-Quake IV                                            Half-Life 2: Deathmatch
-Final DOOM                                          Half-Life 2: Episode Two
-Serious Sam HD: The First Encounter                 Half-Life 2
-Quake III Arena                                     DOOM 3
-Doom 3: BFG Edition                                 Portal
-                                                    QUAKE
-                                                    Half-Life: Opposing Force
+Unreal Tournament 2004: Editor's Choice Edition     Half-Life 2: Deathmatch
+Quake IV                                            Half-Life 2: Episode One
+Final DOOM                                          Half-Life 2
+Serious Sam HD: The First Encounter                 Half-Life 2: Episode Two
+Quake III Arena                                     Call of Duty®: Black Ops
+Doom 3: BFG Edition                                 DOOM 3
                                                     Half-Life 2: Lost Coast
+                                                    QUAKE
+                                                    Portal
+                                                    Half-Life: Opposing Force
+                                                    Aliens vs. Predator™
+                                                    Call of Duty®: Modern Warfare® 2
+                                                    DOOM 3 Resurrection of Evil
+                                                    Killing Floor
                                                     Half-Life
                                                     Unreal Tournament 3 Black
-                                                    Half-Life: Blue Shift
-                                                    DOOM 3 Resurrection of Evil
-                                                    Ultimate Doom
-                                                    Half-Life: Source
-                                                    Unreal Gold
-                                                    Call of Duty®: Black Ops
-                                                    Counter-Strike
+                                                    DOOM
                                                     Day of Defeat: Source
+                                                    Aliens versus Predator Classic 2000
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Civ Lover  |  Tags: 4X
@@ -92,25 +92,25 @@ Anchors: Galactic Civilizations® II: Ultimate Edition, StarDrive, Star Ruler 2,
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 Sid Meier's Civilization® V                         Empire: Total War™
-Civilization IV®: Warlords                          Napoleon: Total War™
-Sid Meier's Civilization IV: Colonization           Europa Universalis IV
+Civilization IV®: Warlords                          Sid Meier's Civilization® IV
+Sid Meier's Civilization IV: Colonization           Civilization IV: Beyond the Sword
 Total War™: ROME II - Emperor Edition               Sid Meier's Civilization®: Beyond Earth™
-                                                    Crusader Kings II
+                                                    Napoleon: Total War™
                                                     Medieval II: Total War™
-                                                    Warhammer 40,000: Dawn of War II
+                                                    Age of Empires II HD
                                                     Endless Space® - Collection
-                                                    Rome: Total War™ - Collection
-                                                    Civilization IV: Beyond the Sword
+                                                    Europa Universalis IV
+                                                    Portal
+                                                    Crusader Kings II
+                                                    Half-Life 2
+                                                    Warhammer 40,000: Dawn of War II
                                                     Sins of a Solar Empire®: Rebellion
-                                                    Sid Meier's Civilization® IV
-                                                    Stronghold 3 Gold
-                                                    Total War: ATTILA
-                                                    Hearts of Iron III
-                                                    Stellaris
-                                                    Warhammer® 40,000: Dawn of War® II Chaos Rising
+                                                    Age of Empires® III: Complete Collection
+                                                    Rome: Total War™ - Collection
                                                     Banished
                                                     XCOM: Enemy Unknown
-                                                    Age of Empires® III: Complete Collection
+                                                    Stronghold 3 Gold
+                                                    Sid Meier's Civilization® III Complete
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Indie Lover  |  Tags: Indie, Rogue-like, Platformer, Pixel Graphics
@@ -120,25 +120,25 @@ Anchors: Hotline Miami 2: Wrong Number Digital Comic, Typefighters (Steam Editio
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 Terraria                                            Crypt of the NecroDancer
-FTL: Faster Than Light                              Enter the Gungeon
-The Binding of Isaac: Rebirth                       Nuclear Throne
-Rogue Legacy                                        Risk of Rain
-Spelunky                                            Hero Siege
-                                                    Undertale
-                                                    Dungeon of the Endless™
-                                                    Magicite
-                                                    Darkest Dungeon®
-                                                    Downwell
-                                                    The Binding of Isaac
+FTL: Faster Than Light                              Nuclear Throne
+The Binding of Isaac: Rebirth                       Enter the Gungeon
+Rogue Legacy                                        Darkest Dungeon®
+Spelunky                                            Undertale
+                                                    Risk of Rain
                                                     Shovel Knight: Treasure Trove
+                                                    Dungeon of the Endless™
+                                                    Hero Siege
+                                                    Magicite
+                                                    The Binding of Isaac
+                                                    Desktop Dungeons
+                                                    Downwell
                                                     Starbound
-                                                    bit Dungeon II
                                                     Don't Starve Together
-                                                    Overture
-                                                    One Way Heroics
-                                                    Castle Crashers®
+                                                    Dungeon Souls
+                                                    Realm of the Mad God
                                                     Quest of Dungeons
-                                                    Hammerwatch
+                                                    Castle Crashers®
+                                                    Transistor
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Racing Lover  |  Tags: —
@@ -148,24 +148,24 @@ Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 F1 2012™                                            RaceRoom Racing Experience
 Need For Speed: Hot Pursuit                         Project CARS
-Test Drive Unlimited 2                              rFactor 2
-Ford Street Racing                                  Train Simulator
-Test Drive: Ferrari Racing Legends                  Microsoft Flight Simulator X: Steam Edition
-F1 2014                                             Euro Truck Simulator 2
-Ford Street Racing                                  F1 2015
-GRID Autosport                                      American Truck Simulator
-Assetto Corsa                                       RACE 07
-                                                    GRID 2
-                                                    DiRT Rally
-                                                    Stock Car Extreme
-                                                    OMSI 2: Steam Edition
-                                                    F1 2011
-                                                    F1 2016
-                                                    iRacing
-                                                    Need for Speed: Shift
-                                                    SPINTIRES™
-                                                    Copa Petrobras de Marcas
+Test Drive Unlimited 2                              Euro Truck Simulator 2
+Ford Street Racing                                  Shift 2 Unleashed
+Test Drive: Ferrari Racing Legends                  Train Simulator
+F1 2014                                             rFactor 2
+Ford Street Racing                                  F1 2011
+GRID Autosport                                      DiRT Rally
+Assetto Corsa                                       GRID 2
+                                                    F1 2015
+                                                    RACE 07
+                                                    Microsoft Flight Simulator X: Steam Edition
+                                                    Call of Duty®: Modern Warfare® 2
+                                                    Call of Duty®: Black Ops
                                                     WRC 4 FIA World Rally Championship
+                                                    Need for Speed: Shift
+                                                    Battlefield: Bad Company™ 2
+                                                    F1 2016
+                                                    F1 RACE STARS™
+                                                    War Thunder
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Fighting Lover  |  Tags: —
@@ -174,25 +174,25 @@ Fighting Lover  |  Tags: —
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
 Street Fighter X Tekken                             Street Fighter V
-Ultra Street Fighter® IV                            Skullgirls
-Street Fighter® IV                                  GUILTY GEAR Xrd -SIGN-
-THE KING OF FIGHTERS XIII STEAM EDITION             FINAL FANTASY VII
-BlazBlue: Calamity Trigger                          BlazBlue: Continuum Shift Extend
-GUILTY GEAR XX ACCENT CORE PLUS R                   Borderlands 2
+Ultra Street Fighter® IV                            GUILTY GEAR Xrd -SIGN-
+Street Fighter® IV                                  Skullgirls
+THE KING OF FIGHTERS XIII STEAM EDITION             THE KING OF FIGHTERS 2002 UNLIMITED MATCH
+BlazBlue: Calamity Trigger                          THE KING OF FIGHTERS '98 ULTIMATE MATCH FINAL EDITION
+GUILTY GEAR XX ACCENT CORE PLUS R                   BlazBlue: Continuum Shift Extend
 Mortal Kombat: Legacy                               Sonic & All-Stars Racing Transformed
-Street Fighter X Tekken                             Magicka
-                                                    Torchlight II
-                                                    THE KING OF FIGHTERS 2002 UNLIMITED MATCH
-                                                    Devil May Cry 4
-                                                    Killing Floor
-                                                    Devil May Cry® 3 Special Edition
-                                                    Warframe
-                                                    Castle Crashers®
-                                                    MapleStory
-                                                    Sonic Generations Collection
-                                                    Counter-Strike
-                                                    TERA
+Street Fighter X Tekken                             Guilty Gear Isuka
                                                     METAL SLUG 3
+                                                    Sonic Generations Collection
+                                                    FINAL FANTASY VII
+                                                    Jet Set Radio
+                                                    DEAD OR ALIVE 5 Last Round: Core Fighters
+                                                    Borderlands 2
+                                                    Rocket League®
+                                                    Counter-Strike
+                                                    Quake Live™
+                                                    Warframe
+                                                    Lethal League
+                                                    PAYDAY™ The Heist
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Survival Lover  |  Tags: Survival
@@ -201,26 +201,26 @@ Anchors: Vortex: The Gateway, Project Explore, Miasmata, FarSky, UnReal World
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-Rust                                                Terraria
-ARK: Survival Evolved                               Unturned
+Rust                                                Unturned
+ARK: Survival Evolved                               Terraria
 Don't Starve Together                               DayZ
-The Forest                                          Arma 2: Operation Arrowhead
+The Forest                                          Arma 3
+                                                    Arma 2: Operation Arrowhead
                                                     PAYDAY 2
-                                                    Starbound
-                                                    Borderlands 2
-                                                    Arma 3
                                                     Fallout 4
-                                                    Killing Floor
-                                                    Warframe
-                                                    Reign Of Kings
-                                                    Fallout: New Vegas
-                                                    Robocraft
-                                                    Arma II: DayZ Mod
-                                                    SPORE™
-                                                    Sid Meier's Civilization® V
+                                                    Borderlands 2
+                                                    Starbound
                                                     Grand Theft Auto V
-                                                    Chivalry: Medieval Warfare
+                                                    Warframe
                                                     PlanetSide 2
+                                                    Heroes & Generals
+                                                    War Thunder
+                                                    Sid Meier's Civilization® V
+                                                    Chivalry: Medieval Warfare
+                                                    Fallout: New Vegas
+                                                    Tom Clancy’s The Division™
+                                                    Reign Of Kings
+                                                    Subnautica
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Management Lover  |  Tags: Management
@@ -229,26 +229,26 @@ Anchors: Mad Games Tycoon, Big Pharma, Ride! Carnival Tycoon, Hotel Giant 2, Gam
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-Cities: Skylines                                    Farming Simulator 15
-Kerbal Space Program                                Banished
-Prison Architect                                    Train Simulator
-Game Dev Tycoon                                     Sid Meier's Civilization® V
-Euro Truck Simulator 2                              SimCity™ 4 Deluxe Edition
-                                                    RollerCoaster Tycoon® 3: Platinum
+Cities: Skylines                                    Banished
+Kerbal Space Program                                Sid Meier's Civilization® V
+Prison Architect                                    SimCity™ 4 Deluxe Edition
+Game Dev Tycoon                                     RollerCoaster Tycoon® 3: Platinum
+Euro Truck Simulator 2                              Democracy 3
                                                     Tropico 5
-                                                    Terraria
-                                                    Farming Simulator 2013 Titanium Edition
-                                                    Democracy 3
-                                                    Cities in Motion
-                                                    Train Fever
-                                                    American Truck Simulator
-                                                    SPORE™
+                                                    Train Simulator
+                                                    Farming Simulator 15
                                                     Sid Meier's Civilization®: Beyond Earth™
-                                                    The Sims™ 3
-                                                    Planetbase
-                                                    Airline Tycoon 2
+                                                    Farming Simulator 2013 Titanium Edition
+                                                    Europa Universalis IV
+                                                    Terraria
                                                     Hearts of Iron IV
-                                                    Microsoft Flight Simulator X: Steam Edition
+                                                    Factorio
+                                                    Cities in Motion
+                                                    SPORE™
+                                                    FTL: Faster Than Light
+                                                    Plague Inc: Evolved
+                                                    Papers, Please
+                                                    Tropico 4
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Card Game Lover  |  Tags: Card Game
@@ -257,26 +257,26 @@ Anchors: Sentinels of the Multiverse, Prominence Poker, Chronicle: RuneScape Leg
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-Magic: The Gathering - Duels of the Planeswalkers 2013  TERA
+Magic: The Gathering - Duels of the Planeswalkers 2013  Sid Meier's Civilization® V
 Hand of Fate                                        Torchlight II
-Duelyst                                             Terraria
-Magic: The Gathering - Duels of the Planeswalkers 2012  Dungeon Defenders II
-                                                    Tree of Savior (English Ver.)
-                                                    Dungeon Defenders
-                                                    Warframe
-                                                    Dragon Nest
+Duelyst                                             Warframe
+Magic: The Gathering - Duels of the Planeswalkers 2012  Borderlands 2
+                                                    Terraria
+                                                    TERA
                                                     Magic Duels
-                                                    MapleStory
-                                                    Magicka
-                                                    Faeria
-                                                    Borderlands 2
-                                                    Spiral Knights
-                                                    Sid Meier's Civilization® V
-                                                    Torchlight
+                                                    PlanetSide 2
+                                                    Dungeon Defenders
+                                                    Dungeon Defenders II
                                                     RIFT
-                                                    Ragnarok Online
-                                                    Realm of the Mad God
-                                                    Elsword
+                                                    Magicka
+                                                    Neverwinter
+                                                    Age of Empires II HD
+                                                    SMITE®
+                                                    PAYDAY 2
+                                                    Clicker Heroes
+                                                    Warhammer 40,000: Dawn of War II
+                                                    Spiral Knights
+                                                    Portal
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Horror Lover  |  Tags: Horror
@@ -285,26 +285,26 @@ Anchors: Clown House (Palyaço Evi), Real Horror Stories Ultimate Edition, Demen
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-Amnesia: The Dark Descent                           Penumbra: Black Plague Gold Edition
-Outlast                                             Left 4 Dead
-SOMA                                                Half-Life 2
-The Evil Within                                     Portal
-Slender: The Arrival                                Amnesia: A Machine for Pigs
-                                                    Penumbra Overture
-                                                    Killing Floor
-                                                    Borderlands 2
-                                                    Fallout: New Vegas
-                                                    PAYDAY 2
-                                                    Fallout 4
-                                                    The Walking Dead
-                                                    Half-Life 2: Episode One
-                                                    Call of Duty®: Black Ops
-                                                    The Walking Dead: Season 2
-                                                    BioShock Infinite
-                                                    Unturned
-                                                    DOOM 3
-                                                    DayZ
+Amnesia: The Dark Descent                           Amnesia: A Machine for Pigs
+Outlast                                             Fallout 4
+SOMA                                                DayZ
+The Evil Within                                     Penumbra: Black Plague Gold Edition
+Slender: The Arrival                                Left 4 Dead
+                                                    Portal
+                                                    Half-Life 2
                                                     The Forest
+                                                    Fallout: New Vegas
+                                                    Rust
+                                                    Unturned
+                                                    The Walking Dead: Season 2
+                                                    Five Nights at Freddy's
+                                                    PAYDAY 2
+                                                    The Walking Dead
+                                                    Call of Duty®: Black Ops
+                                                    Penumbra Overture
+                                                    Life is Strange - Episode 1
+                                                    Borderlands 2
+                                                    Arma 2: Operation Arrowhead
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Point & Click Lover  |  Tags: Point & Click
@@ -313,26 +313,26 @@ Anchors: Time Gentlemen, Please! and Ben There, Dan That! Special Edition  Doubl
 ────────────────────────────────────────────────────────────────────────────────────────────────────
 Favorite Games                                      Recommendations
 ----------------------------------------------------------------------------------------------------
-The Wolf Among Us                                   Sam & Max 203: Night of the Raving Dead
+The Wolf Among Us                                   The Secret of Monkey Island: Special Edition
 Grim Fandango Remastered                            Portal
-Day of the Tentacle Remastered                      Sam & Max 202: Moai Better Blues
-Machinarium                                         Sam & Max 205: What&#146;s New Beelzebub?
-Broken Age                                          Sam & Max 204: Chariots of the Dogs
-Tales of Monkey Island Complete Pack: Chapter 4 - The Trial and Execution of Guybrush Threepwood  The Secret of Monkey Island: Special Edition
-Tales of Monkey Island Complete Pack: Chapter 5 - Rise of the Pirate God  Sam & Max 201: Ice Station Santa
-Tales of Monkey Island Complete Pack: Chapter 2 - The Siege of Spinner Cay  Sam & Max 106: Bright Side of the Moon
-Tales of Monkey Island Complete Pack: Chapter 3 - Lair of the Leviathan  The Walking Dead
-Tales of Monkey Island Complete Pack                Left 4 Dead
-Broken Sword 5 - the Serpent's Curse                Sam & Max 102: Situation: Comedy
-                                                    Sam & Max 105: Reality 2.0
-                                                    BioShock Infinite
-                                                    Half-Life 2
-                                                    Sam & Max 103: The Mole, the Mob and the Meatball
-                                                    LIMBO
-                                                    Midnight Mysteries 4: Haunted Houdini
-                                                    Fallout: New Vegas
-                                                    Borderlands 2
+Day of the Tentacle Remastered                      The Dig®
+Machinarium                                         Broken Sword 3 - the Sleeping Dragon
+Broken Age                                          LIMBO
+Tales of Monkey Island Complete Pack: Chapter 4 - The Trial and Execution of Guybrush Threepwood  Life is Strange - Episode 1
+Tales of Monkey Island Complete Pack: Chapter 5 - Rise of the Pirate God  Sam & Max 205: What&#146;s New Beelzebub?
+Tales of Monkey Island Complete Pack: Chapter 2 - The Siege of Spinner Cay  Sid Meier's Civilization® V
+Tales of Monkey Island Complete Pack: Chapter 3 - Lair of the Leviathan  Undertale
+Tales of Monkey Island Complete Pack                Indiana Jones® and the Last Crusade™
+Broken Sword 5 - the Serpent's Curse                Sam & Max 203: Night of the Raving Dead
                                                     The Stanley Parable
+                                                    The Walking Dead
+                                                    King's Quest
+                                                    Broken Sword 2 - the Smoking Mirror: Remastered
+                                                    Sam & Max 204: Chariots of the Dogs
+                                                    The Book of Unwritten Tales 2
+                                                    LOOM™
+                                                    Sam & Max 202: Moai Better Blues
+                                                    Cities: Skylines
 
 ════════════════════════════════════════════════════════════════════════════════════════════════════
 Nick (real Steam playtime)  |  playtime-weighted pools, no disliked
@@ -341,22 +341,22 @@ Nick (real Steam playtime)  |  playtime-weighted pools, no disliked
 Most-Played Games                                   Recommendations
 ----------------------------------------------------------------------------------------------------
 Civilization IV: Beyond the Sword                   The Walking Dead
-Sid Meier's Civilization® V                         Half-Life 2
-Fallout: New Vegas                                  Age of Empires II HD
-Grand Theft Auto: San Andreas                       Terraria
-The Elder Scrolls IV: Oblivion® Game of the Year Edition  Batman: Arkham Asylum Game of the Year Edition
-Fallout 3: Game of the Year Edition                 Mass Effect
-Call of Duty®: Modern Warfare® 2                    XCOM: Enemy Unknown
-FINAL FANTASY VI                                    Magicka
-SimCity™ 4 Deluxe Edition                           Batman: Arkham City - Game of the Year Edition
-Dragon Age: Origins - Ultimate Edition              Half-Life
-DEAD RISING®                                        STAR WARS™ - Knights of the Old Republic™
-Torchlight II                                       L.A. Noire
-Stardew Valley                                      PAYDAY 2
-Grand Theft Auto III                                Chivalry: Medieval Warfare
-Grand Theft Auto: Vice City                         Tomb Raider
-Mortal Kombat Komplete Edition                      Age of Empires® III: Complete Collection
-BioShock™                                           Killing Floor
-BioShock® 2                                         FTL: Faster Than Light
-Borderlands                                         DARK SOULS™: Prepare To Die™ Edition
+Sid Meier's Civilization® V                         Batman: Arkham Asylum Game of the Year Edition
+Fallout: New Vegas                                  Half-Life 2
+Grand Theft Auto: San Andreas                       Age of Empires II HD
+The Elder Scrolls IV: Oblivion® Game of the Year Edition  Mass Effect
+Fallout 3: Game of the Year Edition                 Terraria
+Call of Duty®: Modern Warfare® 2                    Batman: Arkham City - Game of the Year Edition
+FINAL FANTASY VI                                    Assassin's Creed 2 Deluxe Edition
+SimCity™ 4 Deluxe Edition                           STAR WARS™ - Knights of the Old Republic™
+Dragon Age: Origins - Ultimate Edition              Assassin's Creed™: Director's Cut Edition
+DEAD RISING®                                        L.A. Noire
+Torchlight II                                       Tomb Raider
+Stardew Valley                                      Torchlight
+Grand Theft Auto III                                XCOM: Enemy Unknown
+Grand Theft Auto: Vice City                         Magicka
+Mortal Kombat Komplete Edition                      Just Cause 2
+BioShock™                                           Hitman: Absolution™
+BioShock® 2                                         South Park™: The Stick of Truth™
+Borderlands                                         Mass Effect 2
 Fallout 4                                           Sleeping Dogs
