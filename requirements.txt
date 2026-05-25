@@ -4,3 +4,4 @@ numpy
 tqdm
 streamlit
 pyarrow
+sentence-transformers
