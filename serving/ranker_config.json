@@ -4,8 +4,8 @@
     128
   ],
   "dropout": 0.0,
-  "n_cross_features": 23,
-  "n_wide_normalized": 13,
+  "n_cross_features": 24,
+  "n_wide_normalized": 14,
   "item_id_emb_dim": 32,
   "item_genre_emb_dim": 8,
   "item_tag_emb_dim": 32,
@@ -14,10 +14,12 @@
   "price_emb_dim": 4,
   "user_genre_emb_dim": 32,
   "user_tag_emb_dim": 32,
+  "text_emb_dim": 32,
   "item_tag_hidden": 128,
   "user_tag_hidden": 256,
   "user_genre_hidden": 128,
+  "item_text_hidden": 128,
   "popularity_alpha": 0.0,
-  "ranker_checkpoint": "ranker_wd_alpha_0_20260520_204654.pth",
-  "cg_checkpoint": "best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth"
+  "ranker_checkpoint": "ranker_wd_alpha_0_20260525_113932.pth",
+  "cg_checkpoint": "best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth"
 }
