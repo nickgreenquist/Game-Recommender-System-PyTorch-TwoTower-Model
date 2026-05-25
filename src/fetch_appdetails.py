@@ -20,6 +20,7 @@ Usage:
     python -m src.fetch_appdetails --force  # re-fetch even if a file exists
 """
 import argparse
+import http.client
 import json
 import os
 import time
@@ -67,7 +68,11 @@ def _fetch_one(appid):
                 continue
             tqdm.write(f"  HTTP {e.code} on {appid} (attempt {attempt + 1})")
             time.sleep(BACKOFF_BASE_SECONDS)
-        except (urllib.error.URLError, json.JSONDecodeError, TimeoutError) as e:
+        except (urllib.error.URLError, OSError, http.client.HTTPException,
+                json.JSONDecodeError) as e:
+            # OSError covers ConnectionReset/Timeout; http.client.HTTPException
+            # covers RemoteDisconnected / IncompleteRead (Steam drops connections
+            # mid-read under load) — retry these rather than crash the batch.
             tqdm.write(f"  {type(e).__name__} on {appid} (attempt {attempt + 1})")
             time.sleep(BACKOFF_BASE_SECONDS)
 
