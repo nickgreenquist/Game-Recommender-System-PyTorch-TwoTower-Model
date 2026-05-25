@@ -999,7 +999,7 @@ This lets the model learn cross-feature interactions, such as:
 - Tag cluster × release era (roguelikes from 2012 vs. 2020 are different products)
 
 Both towers project to the same 128-dim output space — only this final dim needs to match.
-The internal concat sizes (192 user, 96 item) are independent of each other.
+The internal concat sizes (192 user, 128 item) are independent of each other.
 
 Each tower's 128-dim output is L2-normalized, so the final dot product is a cosine similarity.
 """)
@@ -1046,7 +1046,7 @@ learns to align user taste with item identity through training.
         )
         st.markdown(
             "The **deployed retrieval stage uses alpha=0** — recall-maximizing, so it scores *higher* "
-            "offline (NDCG@10 0.0752 vs 0.0645)."
+            "offline (NDCG@10 0.0753 vs 0.0645)."
         )
         st.markdown("That alpha=0 score is the baseline the ranker improves on in Stage 2 below.")
 
@@ -1134,9 +1134,9 @@ MRR: **0.0875** (random: 0.0017, +51×)
 
         st.subheader("Why Wide & Deep")
         st.markdown("""
-- **Deep side** — mirrors the two-tower model exactly (same per-feature towers, same dimensions) and is
-  warm-started from the trained retrieval weights. All sub-embeddings concatenate (288-dim) into an MLP, carrying
-  over everything the retrieval model already learned.
+- **Deep side** — mirrors the two-tower model exactly (same per-feature towers, same dimensions, including the
+  game-description text tower) and is warm-started from the trained retrieval weights. All sub-embeddings
+  concatenate (320-dim) into an MLP, carrying over everything the retrieval model already learned.
 - **Wide side** — hand-crafted **cross-features** that bypass the MLP and connect straight to the output, each with
   its own learned weight. A single scalar like "genre overlap" would be drowned out among ~290 deep dimensions, so
   it gets a direct path instead.
@@ -1148,6 +1148,7 @@ MRR: **0.0875** (random: 0.0017, +51×)
 | Categorical overlap | Genre / tag / developer overlap between the candidate and your history (full, liked, and most-recent-3 slices) |
 | Numeric matching | Price gap, release-era gap, playtime calibration, popularity and sentiment match between your averages and the candidate |
 | Niche / rarity | IDF-weighted tag overlap + rarest-tag / studio-scale matching — suppresses popular cross-genre titles leaking into niche-taste lists |
+| Text similarity | Cosine between your playtime-weighted description-embedding centroid and the candidate's description — the direct text-vs-text match a dot product can't represent |
 """, unsafe_allow_html=True)
 
         st.markdown(
@@ -1164,12 +1165,12 @@ MRR: **0.0875** (random: 0.0017, +51×)
         st.markdown("""
 | Metric | Retrieval (raw alpha=0 CG) | + Ranker | Lift |
 |---|---|---|---|
-| NDCG@10 | 0.0752 | **0.0867** | +15% |
-| Hit@10 | 0.1430 | **0.1625** | +14% |
-| MRR | 0.0726 | **0.0813** | +12% |
+| NDCG@10 | 0.0753 | **0.0873** | +16% |
+| Hit@10 | 0.1433 | **0.1629** | +14% |
+| MRR | 0.0726 | **0.0820** | +13% |
 """, unsafe_allow_html=True)
         st.markdown(
-            "On the pure-reranking subset (where retrieval surfaced the target), NDCG@10 rises 0.1361 → 0.1569 (+15%). "
+            "On the pure-reranking subset (where retrieval surfaced the target), NDCG@10 rises 0.1361 → 0.1577 (+16%). "
             "Beyond the metrics, the ranker visibly cleans up niche-taste lists — for example, removing JRPGs that "
             "leak into a fighting-game query. See it live on the **Recommend** tab."
         )

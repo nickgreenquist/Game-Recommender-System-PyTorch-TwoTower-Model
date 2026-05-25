@@ -83,7 +83,7 @@ Evaluated on a sample of 2,000 users drawn from the held-out validation set (10%
 **Which checkpoint these tables describe.** The `alpha` popularity-bias knob produces two CG variants that matter (same architecture, different training-time bias):
 
 - **Standalone CG (alpha=0.4)** — the tables below. Trades raw recall for cleaner niche-taste lists; this was the pre-ranker single-model serving choice.
-- **Deployed retrieval stage (alpha=0)** — recall-maximizing, so it scores *higher* on these offline metrics (NDCG@10 **0.0752** vs 0.0645). This is the retrieval stage in the two-stage system and the baseline the ranker improves on in [Two-Stage Serving](#two-stage-serving-wide--deep-ranker) below.
+- **Deployed retrieval stage (alpha=0)** — recall-maximizing, so it scores *higher* on these offline metrics (NDCG@10 **0.0753** vs 0.0645). This is the retrieval stage in the two-stage system and the baseline the ranker improves on in [Two-Stage Serving](#two-stage-serving-wide--deep-ranker) below.
 
 ### V5 PROD — corpus: 5,437 games (Valve titles removed, no LayerNorm, correct Menon Path 2)
 
@@ -150,7 +150,7 @@ Retrieval is the raw **alpha=0** CG — recall-maximizing, no popularity penalty
 
 The ranker is a [Wide & Deep network](https://arxiv.org/abs/1606.07792):
 
-- **Deep side** — mirrors the two-tower model exactly (same per-feature towers, same dimensions), warm-started from the trained CG weights. All sub-embeddings are concatenated (288-dim) and fed through an MLP. This carries over everything the retrieval model already learned.
+- **Deep side** — mirrors the two-tower model exactly (same per-feature towers, same dimensions, including the game-description text tower), warm-started from the trained CG weights. All sub-embeddings are concatenated (320-dim) and fed through an MLP. This carries over everything the retrieval model already learned.
 - **Wide side** — a set of hand-crafted **cross-features** that bypass the MLP and connect directly to the output, each with its own learned weight. A scalar like "genre overlap" would be drowned out among ~290 deep dimensions in the first layer, so it gets a direct path instead.
 
 The cross-features are what the two-tower model structurally cannot compute:
@@ -160,6 +160,7 @@ The cross-features are what the two-tower model structurally cannot compute:
 | Categorical overlap | genre / tag / developer overlap between the candidate and the user's history (full, liked, and most-recent-3 slices) |
 | Numeric matching | price gap, release-era gap, playtime calibration, popularity match, sentiment match between user averages and the candidate |
 | Niche / rarity | IDF-weighted tag overlap and rarest-tag / developer-catalog-scale matching, to suppress popular cross-genre titles leaking into niche-taste lists |
+| Text similarity | cosine between the user's playtime-weighted description-embedding centroid and the candidate's description embedding — the direct text-vs-text match a dot product can't represent |
 
 ### Training
 
@@ -171,11 +172,11 @@ Reranking lifts every metric over the retrieval model on the same held-out users
 
 | Metric | Retrieval (raw alpha=0 CG) | + Ranker | Lift |
 |---|---:|---:|---:|
-| NDCG@10 | 0.0752 | **0.0867** | +15% |
-| Hit@10 | 0.1430 | **0.1625** | +14% |
-| MRR | 0.0726 | **0.0813** | +12% |
+| NDCG@10 | 0.0753 | **0.0873** | +16% |
+| Hit@10 | 0.1433 | **0.1629** | +14% |
+| MRR | 0.0726 | **0.0820** | +13% |
 
-On the pure-reranking subset (cases where retrieval surfaced the target), NDCG@10 rises from 0.1361 → 0.1569 (+15%). Beyond the metrics, the ranker visibly cleans up niche-taste lists — e.g. removing JRPGs that leak into a fighting-game query.
+On the pure-reranking subset (cases where retrieval surfaced the target), NDCG@10 rises from 0.1361 → 0.1577 (+16%). Beyond the metrics, the ranker visibly cleans up niche-taste lists — e.g. removing JRPGs that leak into a fighting-game query.
 
 The Streamlit demo's **Recommend** tab shows this live: results appear from retrieval first, and a **⚡ Apply Ranker** button reranks the same 100 candidates side-by-side, with badges showing how far each game moved.
 

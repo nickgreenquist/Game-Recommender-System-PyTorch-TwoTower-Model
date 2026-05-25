@@ -2,7 +2,7 @@
 
 Guidance for Claude Code when working in the `ranker/` directory. This is the **Wide & Deep ranker** — stage 2 of the two-stage recommender. The root `CLAUDE.md` documents the candidate-generation (CG) two-tower model; this file documents the reranker that sits on top of it. The CG model in `src/` is read-only from here.
 
-## Status (2026-05-23)
+## Status (2026-05-25)
 
 > **SHIPPED (2026-05-25) — item-text ranker is the new FINAL/PROD.** `ranker_wd_alpha_0_20260525_113932.pth`, warm-started + precomputed from the served V6a item-text CG (`…100022`), with deep-tower item-text parity + the `text_cosine` cross feature. It replaces Bucket 6 as the deployed reranker. What landed:
 > 1. **`_ALPHA_TO_CG_GLOB[0.0]` → the text CG** (`…text_popularity_alpha_0_*` → `…100022`). One glob drives all four consumers — warm-start source, precompute retrieval, canary, export.
@@ -37,7 +37,7 @@ Headline metric is full-val NDCG@10, each bucket measured against the previous *
 
 **Permanently dropped signal classes** (don't re-propose in any shape — see §10 rule 9): disliked-history variants (Bucket 3); dev-catalog aggregates (Bucket 4); engagement-level crosses (Bucket 8). **Bucket 7** (Item-Intrinsic Priors) was dropped in planning; 2 of its 3 features were absorbed into Bucket 6 as proper user × item crosses (`niche_dev_match`, `max_tag_idf_match`), the third (`dev_specialization`, item-only) dropped.
 
-The FINAL ranker (Bucket 6) has **no frozen-CG runtime dependency** — Bucket 9 would have introduced one and was dropped, so serving only needs the ranker's own content buffers + the CG retrieval already in place.
+The FINAL ranker (item-text, 2026-05-25) has **no frozen-CG runtime dependency** — Bucket 9 would have introduced one and was dropped, so serving only needs the ranker's own content buffers + the CG retrieval already in place.
 
 > **Terminology:** "pool" means an embedding aggregation (the deep tower's `pool_liked/disliked/full/playtime`). Cross features compute weighted overlap / categorical affinity *directly over the history arrays* — no embedding aggregation. Code uses `weighted_overlap` / `dev_affinity` with `history_indices` / `history_weights`.
 
@@ -52,7 +52,7 @@ Two-stage retrieve-and-rank:
 
 ### CG checkpoints
 
-- **Raw CG α=0** — as of 2026-05-25 the **V6a item-text CG** (`best_triple_full_softmax_text_popularity_alpha_0_…100022.pth`); `_ALPHA_TO_CG_GLOB[0.0]` points here so warm-start / precompute / canary / export all use it. The **deployed retrieval stage**: retrieves recall-maximizing top-100, ranker reranks them; also the honest offline yardstick (ranker runs α=0, measured against this). (Pre-2026-05-25 this was the no-text `…alpha_00_20260515_084320.pth`; metrics were flat between the two, so the prior Bucket-6 ranker shipped against the no-text CG — see the top OPEN item.)
+- **Raw CG α=0** — as of 2026-05-25 the **V6a item-text CG** (`best_triple_full_softmax_text_popularity_alpha_0_…100022.pth`); `_ALPHA_TO_CG_GLOB[0.0]` points here so warm-start / precompute / canary / export all use it. The **deployed retrieval stage**: retrieves recall-maximizing top-100, ranker reranks them; also the honest offline yardstick (ranker runs α=0, measured against this). (Pre-2026-05-25 this was the no-text `…alpha_00_20260515_084320.pth`; metrics were flat between the two, so the prior Bucket-6 ranker shipped against the no-text CG; the current PROD ranker was retrained against this text CG — see the top status note.)
 - **CG α=0.4** — the pre-ranker standalone-serving compromise (popularity correction baked into the CG to keep niche-taste lists clean). In the two-stage world the CG no longer carries the popularity work, so α=0.4 is no longer deployed; it remains the reference for the CG α-tradeoff (see root `CLAUDE.md`).
 
 CG v5 prod baseline (α=0.4, for reference):
@@ -440,11 +440,11 @@ col 15-16: tag_overlap_idf, full/liked        (Bucket 6 ✓)
 col 17-18: niche_tag_match, full/liked        (Bucket 6 ✓)
 col 19-20: max_tag_idf_match, full/liked      (Bucket 6 ✓)
 col 21-22: niche_dev_match, full/liked        (Bucket 6 ✓)
-col 23   : text_cosine                        (B-10, item-text CG integration — pending retrain)
+col 23   : text_cosine                        (item-text CG integration ✓ SHIPPED 2026-05-25)
 (Bucket 9 cg_log_rank ✗ was dropped + reverted; col 23 is now reused by text_cosine)
 ```
 
-**Ranker = 24 features (cols 0–23), n_wide_normalized=14** with the pending item-text integration (was 23 / 13 at the last shipped Bucket-6 checkpoint). Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–23 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. **text_cosine (col 23) is itself a bounded cosine like tag_cosine (col 0), but appended at the END it lands in the trailing Z-scored block** — Z-scoring a bounded cosine is harmless and keeps the normalized columns contiguous (the "trailing N" `_normalize_wide` design can't host a raw column after a normalized one). Dropped buckets 3/4/8/9 transiently occupied cols 10+ and were reverted, so those slots are free again. New wide-head weights init at 0.1.
+**Ranker = 24 features (cols 0–23), n_wide_normalized=14** as of the shipped item-text ranker (was 23 / 13 at the prior Bucket-6 checkpoint). Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–23 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. **text_cosine (col 23) is itself a bounded cosine like tag_cosine (col 0), but appended at the END it lands in the trailing Z-scored block** — Z-scoring a bounded cosine is harmless and keeps the normalized columns contiguous (the "trailing N" `_normalize_wide` design can't host a raw column after a normalized one). Dropped buckets 3/4/8/9 transiently occupied cols 10+ and were reverted, so those slots are free again. New wide-head weights init at 0.1.
 
 ### Wide-feature normalization
 
@@ -484,7 +484,7 @@ Wide features beyond cosines/overlaps are Z-scored before the head using fixed t
 
 The ranker is wired into both canary and Streamlit through one shared path in `ranker/serving.py` (so the demo and the eval use identical feature engineering).
 
-**Two-stage flow:** build user context → raw α=0 CG retrieves top-100 → ranker reranks those 100 → return reranked order. `serving.rerank_candidates` builds all 23 cross features (Buckets 0/1/2/5/6) for the candidate set and calls `ranker.score_pairs`.
+**Two-stage flow:** build user context → raw α=0 CG retrieves top-100 → ranker reranks those 100 → return reranked order. `serving.rerank_candidates` builds all 24 cross features (Buckets 0/1/2/5/6 + `text_cosine`) for the candidate set and calls `ranker.score_pairs`.
 
 **Artifacts** (generated by `python ranker/main.py export [ranker.pth]` — re-exports the CG from the α=0 checkpoint via `src.export`, then adds the ranker):
 - `serving/model.pth`, `serving/game_embeddings.pt` — raw α=0 CG (retrieval stage)
