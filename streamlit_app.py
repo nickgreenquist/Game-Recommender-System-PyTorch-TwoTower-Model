@@ -672,43 +672,41 @@ def tab_similar(be, fs, all_ids, all_norm):
     )
     all_titles   = fs['popularity_ordered_titles']
     title_to_iid = fs['title_to_item_id']
-    selections   = st.multiselect(
-        "Game(s) to find similar titles for",
-        all_titles, key='sim_title', max_selections=10,
+    selected     = st.selectbox(
+        "Game to find similar titles for",
+        options=[None] + all_titles,
+        format_func=lambda x: "Choose a game..." if x is None else x,
+        key='sim_title', label_visibility="collapsed",
     )
 
-    if st.button("Find Similar Games"):
-        if not selections:
-            st.warning("Select at least one game.")
-        else:
-            for old_title in st.session_state.get('sim_active_titles', []):
-                st.session_state.pop(f'sim_{old_title}_df', None)
-                st.session_state.pop(f'sim_{old_title}_shown', None)
-            active_titles = []
-            for title in selections:
-                iid = title_to_iid.get(title)
-                if iid not in be:
-                    st.error(f"'{title}' not in corpus.")
-                    continue
-                with torch.no_grad():
-                    seed_norm = F.normalize(be[iid]['GAME_EMBEDDING_COMBINED'], dim=1)
-                    sims      = (all_norm @ seed_norm.T).squeeze(-1)
-                rows = []
-                for idx in sims.argsort(descending=True).tolist():
-                    candidate = all_ids[idx]
-                    if candidate == iid:
-                        continue
-                    rows.append(_game_meta(candidate, fs))
-                    if len(rows) >= _TOTAL_RESULTS:
-                        break
-                _store_results(pd.DataFrame(rows), f'sim_{title}')
-                active_titles.append(title)
-            st.session_state['sim_active_titles'] = active_titles
+    if not selected:
+        for key in ('sim_seed_title', 'sim_df', 'sim_shown'):
+            st.session_state.pop(key, None)
+        return
 
-    for title in selections:
-        if f'sim_{title}_df' in st.session_state:
-            st.subheader(f"Similar to: {title}")
-            _show_results(f'sim_{title}')
+    # Recompute only when the selection changes (mirrors the Examples tab) — results
+    # appear immediately on selection, no button press.
+    if st.session_state.get('sim_seed_title') != selected:
+        iid = title_to_iid.get(selected)
+        if iid not in be:
+            st.error(f"'{selected}' not in corpus.")
+            return
+        with torch.no_grad():
+            seed_norm = F.normalize(be[iid]['GAME_EMBEDDING_COMBINED'], dim=1)
+            sims      = (all_norm @ seed_norm.T).squeeze(-1)
+        rows = []
+        for idx in sims.argsort(descending=True).tolist():
+            candidate = all_ids[idx]
+            if candidate == iid:
+                continue
+            rows.append(_game_meta(candidate, fs))
+            if len(rows) >= _TOTAL_RESULTS:
+                break
+        _store_results(pd.DataFrame(rows), 'sim')
+        st.session_state['sim_seed_title'] = selected
+
+    st.subheader(f"Similar to: {selected}")
+    _show_results('sim')
 
 
 # ── Tab: Explore Genres ───────────────────────────────────────────────────────
@@ -750,53 +748,59 @@ def tab_explore_genres(model, fs, all_ids, all_norm_genre):
 
 def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
     st.caption(
-        "Select Steam tags to describe what you're looking for — subgenres, moods, mechanics, "
-        f"tropes (e.g. 'Metroidvania', 'Atmospheric', 'Open World', 'Cyberpunk'). "
-        f"The top {_ANCHORS_PER_TAG} games per tag by TF-IDF score are averaged into a "
+        "Select a Steam tag to describe what you're looking for — a subgenre, mood, mechanic, "
+        f"or trope (e.g. 'Metroidvania', 'Atmospheric', 'Open World', 'Cyberpunk'). "
+        f"The top {_ANCHORS_PER_TAG} games for that tag by TF-IDF score are averaged into a "
         "query embedding, then all games are ranked by cosine similarity in tag space."
     )
-    tags_sorted   = sorted(t for t in fs['tags_ordered'] if t)
-    selected_tags = st.multiselect(
-        "Tags", tags_sorted, key='explore_tag', max_selections=10
+    tags_sorted  = sorted(t for t in fs['tags_ordered'] if t)
+    selected_tag = st.selectbox(
+        "Tag",
+        options=[None] + tags_sorted,
+        format_func=lambda x: "Choose a tag..." if x is None else x,
+        key='explore_tag', label_visibility="collapsed",
     )
 
-    if st.button("Explore", key='btn_tag'):
-        if not selected_tags:
-            st.warning("Select at least one tag.")
-        else:
-            anchor_tag_triples = _tag_anchor_triples(fs, selected_tags, exclude_titles=set())
+    if not selected_tag:
+        for key in ('tags_active', 'tags_df', 'tags_shown', 'tags_anchor_caption'):
+            st.session_state.pop(key, None)
+        return
 
-            if not anchor_tag_triples:
-                st.warning("No tags matched the vocabulary.")
-            else:
-                anchor_iids = [iid for _, iid, _ in anchor_tag_triples]
-                anchor_set  = set(anchor_iids)
-                with torch.no_grad():
-                    query_emb  = torch.stack([
-                        be[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchor_iids
-                    ]).mean(dim=0)
-                    query_norm = F.normalize(query_emb.unsqueeze(0), dim=1)
-                    sims       = (all_norm_tag @ query_norm.T).squeeze(-1)
+    # Recompute only when the selection changes (mirrors the Examples tab) — results
+    # appear immediately on selection, no button press.
+    if st.session_state.get('tags_active') != selected_tag:
+        anchor_tag_triples = _tag_anchor_triples(fs, [selected_tag], exclude_titles=set())
+        if not anchor_tag_triples:
+            st.warning("Tag did not match the vocabulary.")
+            return
+        anchor_iids = [iid for _, iid, _ in anchor_tag_triples]
+        anchor_set  = set(anchor_iids)
+        with torch.no_grad():
+            query_emb  = torch.stack([
+                be[iid]['GAME_TAG_EMBEDDING'].view(-1) for iid in anchor_iids
+            ]).mean(dim=0)
+            query_norm = F.normalize(query_emb.unsqueeze(0), dim=1)
+            sims       = (all_norm_tag @ query_norm.T).squeeze(-1)
 
-                rows = []
-                for idx in sims.argsort(descending=True).tolist():
-                    iid = all_ids[idx]
-                    row = _game_meta(iid, fs)
-                    if iid in anchor_set:
-                        row['Title'] = row['Title'] + '  ◀ anchor'
-                    rows.append(row)
-                    if len(rows) >= _TOTAL_RESULTS:
-                        break
-                _store_results(pd.DataFrame(rows), 'tags')
-                st.session_state['tags_anchor_caption'] = (
-                    "Tag anchors — "
-                    + " · ".join(f"{tag}: {title}" for tag, _, title in anchor_tag_triples)
-                )
+        rows = []
+        for idx in sims.argsort(descending=True).tolist():
+            iid = all_ids[idx]
+            row = _game_meta(iid, fs)
+            if iid in anchor_set:
+                row['Title'] = row['Title'] + '  ◀ anchor'
+            rows.append(row)
+            if len(rows) >= _TOTAL_RESULTS:
+                break
+        _store_results(pd.DataFrame(rows), 'tags')
+        st.session_state['tags_anchor_caption'] = (
+            "Tag anchors — "
+            + " · ".join(f"{tag}: {title}" for tag, _, title in anchor_tag_triples)
+        )
+        st.session_state['tags_active'] = selected_tag
 
-    if 'tags_df' in st.session_state:
-        caption = st.session_state.get('tags_anchor_caption')
-        if caption:
-            st.caption(caption)
+    caption = st.session_state.get('tags_anchor_caption')
+    if caption:
+        st.caption(caption)
     _show_results('tags')
 
 
