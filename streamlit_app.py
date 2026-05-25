@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 
 from src.evaluate import (
+    NICK_PLAYTIME,
     USER_TYPE_TO_FAVORITE_GAMES,
     USER_TYPE_TO_TAGS,
 )
@@ -30,6 +31,7 @@ from ranker.train import build_ranker
 
 _FAV_WEIGHT      = 10.0   # simulated log-hours weight for explicitly liked games
 _ANCHOR_WEIGHT   =  2.0   # simulated log-hours weight for tag-anchor games
+_NICK_PROFILE    = "Nick — real Steam library"  # Examples-tab profile backed by NICK_PLAYTIME
 _ANCHORS_PER_TAG =  5
 _COVER_COLS      =  5     # columns in the Steam cover grid
 _PAGE_SIZE       = 20     # games per page
@@ -363,6 +365,45 @@ def _build_user_embedding(model: GameRecommender, fs: dict,
 
     X_avg_log = torch.tensor([[avg_log]], dtype=torch.float32)
     return model.user_embedding(X_avg_log, X_liked, X_disliked, X_full, X_pw)
+
+
+def _build_nick_user_embedding(model: GameRecommender, fs: dict) -> torch.Tensor:
+    """
+    Build Nick's CG user embedding from real Steam playtime (NICK_PLAYTIME), mirroring
+    src/evaluate._build_nick_embedding instead of the archetypes' fixed fav/anchor weights:
+      • full pool        = every played game in the corpus
+      • playtime weights = log(1+hours) normalized over the full pool
+      • liked pool       = games played at least the game's global median hours
+      • disliked pool    = empty (unplayed library games are unknown, not disliked)
+      • avg_log          = mean log(1+hours), for in-model genre debiasing
+
+    The serving feature store carries game_median_log_hours (log1p of the per-game median),
+    not the raw game_median_hours the offline canary reads — so the liked threshold is
+    applied in log space. log1p is monotonic, so log1p(hours) >= median_log is identical
+    to hours >= median.
+    """
+    item_to_idx    = {str(k): v for k, v in fs['item_to_idx'].items()}
+    median_log_hrs = fs['game_median_log_hours']                 # (n_items,) log1p of per-game median
+
+    full_ids, hours = [], []
+    for iid, hrs in NICK_PLAYTIME.items():
+        if str(iid) in item_to_idx:
+            full_ids.append(item_to_idx[str(iid)])
+            hours.append(hrs)
+
+    log_h     = np.log1p(np.asarray(hours, dtype=np.float32))
+    weights   = (log_h / log_h.sum()).tolist()
+    liked_ids = [idx for idx, lh in zip(full_ids, log_h) if lh >= float(median_log_hrs[idx])]
+    avg_log   = float(log_h.mean())
+
+    pad = model.game_pad_idx
+    def to_padded(ids):
+        return torch.tensor([ids if ids else [pad]], dtype=torch.long)
+
+    X_avg_log = torch.tensor([[avg_log]], dtype=torch.float32)
+    X_pw      = torch.tensor([weights], dtype=torch.float32)
+    return model.user_embedding(X_avg_log, to_padded(liked_ids), to_padded([]),
+                                to_padded(full_ids), X_pw)
 
 
 # ── Two-stage: CG retrieval → ranker rerank ─────────────────────────────────────
@@ -764,7 +805,9 @@ def tab_explore_tags(model, be, fs, all_ids, all_norm_tag):
 def tab_examples(model, fs, all_ids, all_embs, ranker=None):
     st.caption("Select a pre-built user profile to see what the model recommends for that taste.")
 
-    profiles = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
+    # Nick is a real user (pools built from actual Steam playtime); the rest are the
+    # synthetic archetypes. He leads the dropdown.
+    profiles = [_NICK_PROFILE] + list(USER_TYPE_TO_FAVORITE_GAMES.keys())
     selected = st.selectbox(
         "Profile",
         options=[None] + profiles,
@@ -778,20 +821,34 @@ def tab_examples(model, fs, all_ids, all_embs, ranker=None):
             st.session_state.pop(key, None)
         return
 
-    fav_titles   = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
-    tag_names    = USER_TYPE_TO_TAGS.get(selected, [])
-    title_to_iid = fs['title_to_item_id']
+    is_nick = (selected == _NICK_PROFILE)
+    if is_nick:
+        # Real-user profile: full/liked/playtime pools come from NICK_PLAYTIME hours,
+        # no tag anchors. fav_titles is just his most-played list for the caption; the
+        # ranker (when applied) reranks with the same flat-weighted liked pool as the
+        # archetypes — only the displayed CG retrieval uses his real playtime weights.
+        fav_titles  = [fs['item_id_to_title'][iid] for iid, _ in
+                       sorted(NICK_PLAYTIME.items(), key=lambda x: x[1], reverse=True)
+                       if iid in fs['item_id_to_title']]
+        liked_iids  = [iid for iid in NICK_PLAYTIME if iid in fs['item_id_to_title']]
+        anchor_iids = []
+    else:
+        fav_titles   = USER_TYPE_TO_FAVORITE_GAMES.get(selected, [])
+        tag_names    = USER_TYPE_TO_TAGS.get(selected, [])
+        title_to_iid = fs['title_to_item_id']
 
-    missing = [t for t in fav_titles if t not in title_to_iid]
-    if missing:
-        st.warning("Not found in corpus (check title format): " + ", ".join(missing))
+        missing = [t for t in fav_titles if t not in title_to_iid]
+        if missing:
+            st.warning("Not found in corpus (check title format): " + ", ".join(missing))
 
-    liked_iids  = [title_to_iid[t] for t in fav_titles if t in title_to_iid]
-    anchor_iids = _get_tag_anchors(fs, tag_names, exclude=set(fav_titles))
+        liked_iids  = [title_to_iid[t] for t in fav_titles if t in title_to_iid]
+        anchor_iids = _get_tag_anchors(fs, tag_names, exclude=set(fav_titles))
 
     if st.session_state.get('examples_profile') != selected:
         with torch.no_grad():
-            user_emb = _build_user_embedding(model, fs, liked_iids, anchor_iids, anchor_in_liked=False)
+            user_emb = (_build_nick_user_embedding(model, fs) if is_nick else
+                        _build_user_embedding(model, fs, liked_iids, anchor_iids,
+                                              anchor_in_liked=False))
         # Retrieve the top-100 pool (exclude liked AND anchors — matches the canary's
         # exclude set so the side-by-side mirrors the canary artifact). Both the CG-only
         # browse view and the ranker rerank operate on this same pool.
@@ -804,11 +861,14 @@ def tab_examples(model, fs, all_ids, all_embs, ranker=None):
         st.session_state['examples_profile'] = selected
 
     st.subheader(f"Recommendations for: {selected}")
-    if fav_titles:
-        st.caption("Because you like: " + ", ".join(fav_titles))
-    if anchor_iids:
-        anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
-        st.caption("Tag anchors: " + ", ".join(anchor_names))
+    if is_nick:
+        st.caption("Built from real Steam playtime · most-played: " + ", ".join(fav_titles[:12]))
+    else:
+        if fav_titles:
+            st.caption("Because you like: " + ", ".join(fav_titles))
+        if anchor_iids:
+            anchor_names = [fs['item_id_to_title'][iid] for iid in anchor_iids]
+            st.caption("Tag anchors: " + ", ".join(anchor_names))
 
     # ── Two-stage supercharge: CG retrieval → ranker rerank ──────────────────
     _render_two_stage('ex', 'examples', fs, ranker, liked_iids, anchor_iids)
