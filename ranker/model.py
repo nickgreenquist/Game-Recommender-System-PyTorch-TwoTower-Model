@@ -1,8 +1,9 @@
 """
-Wide & Deep ranker (serving stage 2 — reranks the CG's top-100) with STRICT V5 CG
-feature parity.
+Wide & Deep ranker (serving stage 2 — reranks the CG's top-100) with STRICT V6a CG
+feature parity (V5 towers + the item_text_tower added when the served CG gained item
+text — see the Item concat note below).
 
-Mirrors src/model.GameRecommender (V5) exactly:
+Mirrors src/model.GameRecommender (V6a) exactly:
   - 4 user history pools (liked / disliked / full / playtime-weighted full)
   - Shared item_id_lookup across pools and item-side tower
   - In-model genre debiasing context (uses game_genre_matrix, playtime weights, avg_log
