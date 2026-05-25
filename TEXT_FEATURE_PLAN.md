@@ -128,3 +128,47 @@ On branch `text-feature` (env: `conda activate pytorch_env`). Two V6a runs, text
 After Stage A: report numbers here; if text helps → Stage B (#4, user-history text pool). Per workflow, commit the V6a wiring (+ `use_item_text` flag, Nick canary, K=100, backward-compat loader — all currently uncommitted on `text-feature`) only after results confirm.
 
 > Note: the "Step sequence" numbers above are narrative; live TaskCreate IDs differ (done: #1,2,3,5,10 · next: #11 Stage A · then #4,#12,#13 Stage B · #6,#14 finalize). Rebuild the task list from this file if a new session starts empty.
+
+---
+
+## Ranker text integration (2026-05-25) — SHIPPED
+
+**Result:** retrained `ranker_wd_alpha_0_20260525_113932.pth` (warm-start + precompute from the
+text CG). Eval vs the text CG: prod NDCG@10 **0.0873** / MRR **0.0820**, pure-rerank NDCG@10
+**0.1577** / MRR 0.1401, lift over CG **+0.0120** (beats Bucket 6's +0.0115). Head-to-head vs
+Bucket 6: uniformly ≥ on every metric. Canary: comparable-or-better on all 9 archetypes (Civ
+clearly better, FPS/Indie/Racing slightly better, rest even); added Nick + Card/Horror/Point&Click,
+Point & Click cleanest. New PROD ranker.
+
+The served CG is now V6a item-text, so the Wide & Deep ranker was brought onto the
+same CG to stay coherent. Per user direction this was a **single retrain** (no keep/drop
+A/B): ship unless eval is a clear, large regression. Architecture chosen:
+**Both** — deep-tower parity + cross feature:
+
+1. **`_ALPHA_TO_CG_GLOB[0.0]` → text CG** (`…text_popularity_alpha_0_*`, resolves to `…100022`).
+   One glob re-grounds all four consumers: warm-start, precompute retrieval, canary, export.
+2. **Deep-tower item-text parity** — `WideDeepRanker.item_text_tower` (768→128→32) +
+   `game_text_matrix`/`game_text_matrix_l2` buffers. Item concat 96→128, deep_in 288→320.
+   Warm-start map +4 `item_text_tower` keys (26→30 transfers, verified from `…100022`).
+   Deep tower feeds L2 rows = bit-identical to CG's `F.normalize(raw)`.
+3. **`text_cosine` cross feature (col 23)** — `cosine(user playtime-weighted text centroid,
+   candidate text)`, the direct text-vs-text path the CG dot product lacks. Mirrors
+   `tag_cosine` across train/precompute/eval/serving. n_cross 23→24, n_wide_normalized 13→14
+   (joins the trailing Z-scored block; harmless for a bounded cosine, keeps cols contiguous).
+
+Files touched: `ranker/model.py`, `ranker/train.py`, `ranker/dataset.py`, `ranker/evaluate.py`,
+`ranker/serving.py`, `ranker/precompute.py`, `ranker/export.py`, `ranker/canary.py`,
+`streamlit_app.py` (serving pad-strip for `game_text_matrix`). `game_text_matrix` already
+ships in `serving/feature_store.pt`.
+
+**TO RUN (user, one pass, ~2h train):**
+```
+python ranker/main.py precompute   # regenerates parquets from text CG WITH text_cosine_* cols
+python ranker/main.py train        # warm-starts from text CG; NDCG@10-selected
+python ranker/main.py evaluate     # vs CG α=0 (now the text CG) — fair-α
+python ranker/main.py canary       # list-shape check
+python ranker/main.py export       # re-export serving/ranker.pth + ranker_config.json
+```
+The OLD `ranker_candidates_{train,val}.parquet` lack `text_cosine_*` → eval/train will
+KeyError until re-precomputed. Results/verdict tables in `ranker/CLAUDE.md` are NOT yet
+filled — update after the run.

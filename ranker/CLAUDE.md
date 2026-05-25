@@ -4,13 +4,20 @@ Guidance for Claude Code when working in the `ranker/` directory. This is the **
 
 ## Status (2026-05-23)
 
-> **OPEN TODO (2026-05-25) — retrain ranker against the new item-text CG.** Serving now ships the **V6a item-text CG** (`best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`), but the PROD ranker below was warm-started + precomputed against the OLD no-text α=0 CG (`…20260515_084320`). Shipped as-is for now (item text was offline-flat → CG top-100 barely moved). To make it correct: (1) `precompute` candidates from the new text CG; (2) re-derive the warm-start key map — `src/model.py` now has `item_text_tower` + `game_text_matrix` buffer (the rule-8 drift), and decide whether the ranker mirrors item-side text in its deep concat; (3) add a **ranker text bucket** — a text-similarity cross feature is the stronger use case (direct signal path the CG dot-product lacks). `game_text_matrix` is already in `serving/feature_store.pt`. See root `TEXT_FEATURE_PLAN.md`.
+> **SHIPPED (2026-05-25) — item-text ranker is the new FINAL/PROD.** `ranker_wd_alpha_0_20260525_113932.pth`, warm-started + precomputed from the served V6a item-text CG (`…100022`), with deep-tower item-text parity + the `text_cosine` cross feature. It replaces Bucket 6 as the deployed reranker. What landed:
+> 1. **`_ALPHA_TO_CG_GLOB[0.0]` → the text CG** (`…text_popularity_alpha_0_*` → `…100022`). One glob drives all four consumers — warm-start source, precompute retrieval, canary, export.
+> 2. **Deep-tower item-text parity** — `item_text_tower` (768→128→32) + `game_text_matrix`/`_l2` buffers; item concat 96→128, deep_in 288→320; warm-start map 26→30 (verified, feeds L2 rows == CG's `F.normalize(raw)`).
+> 3. **`text_cosine` cross feature (col 23)** — `cosine(user playtime-weighted text centroid, candidate text)`; n_cross 23→24, n_wide_normalized 13→14 (joins the trailing Z-scored block).
+>
+> **Results (vs the text CG; fair-α).** Prod-realistic NDCG@10 **0.0873** / MRR **0.0820** / Hit@10 0.1629; pure-rerank NDCG@10 **0.1577** / MRR 0.1401. Lift over the text CG **+0.0120** NDCG@10 / +0.0093 MRR — *better* than Bucket 6's +0.0115 over the no-text CG. Head-to-head vs Bucket 6 (each vs its own near-identical α=0 CG, 0.0753 vs 0.0752): uniformly +, prod +0.0006 NDCG@10 / +0.0007 MRR, pure-rerank +0.0008 / +0.0010.
+> **Canary:** comparable-or-better on all 9 overlapping archetypes — Civ clearly better (grand-strategy/4X vs old trade-sim drift), FPS/Indie/Racing slightly better, RPG/Survival/Management even, JRPG/Fighting even (tail diffs are text-CG pool artifacts, not ranker misses). Adds Nick (real-playtime canary, mirrors Streamlit) + Card Game / Horror / Point & Click; **Point & Click was the cleanest list in the run** — the slice where distinctive descriptions help most.
 
-**Buildout complete. Bucket 6 is the FINAL/PROD ranker and it is now served on Streamlit.**
+**Bucket 6 was the prior FINAL; the item-text ranker (2026-05-25) is now the deployed reranker on Streamlit.**
 
 Phase A ✓. Phase B: Buckets 1 ✓, 2 ✓, 3 ✗, 4 ✗, 5 ✓, 6 ✓, 8 ✗, 9 ✗. Roadmap complete — Bucket 9 was the last planned bucket.
 
-**FINAL ranker** (Bucket 6, last kept): `saved_models/ranker/ranker_wd_alpha_0_20260520_204654.pth` — NDCG@10 0.0867, MRR 0.0813, pure-rerank NDCG@10 0.1569 / MRR 0.1391. CG comparator (α=0): `saved_models/best_triple_full_softmax_popularity_alpha_00_20260515_084320.pth`.
+**FINAL ranker (2026-05-25, item-text):** `saved_models/ranker/ranker_wd_alpha_0_20260525_113932.pth` — prod NDCG@10 0.0873, MRR 0.0820, pure-rerank NDCG@10 0.1577 / MRR 0.1401. CG comparator (α=0, now the text CG): `saved_models/best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`.
+**Prior FINAL (Bucket 6, no-text):** `ranker_wd_alpha_0_20260520_204654.pth` — NDCG@10 0.0867, MRR 0.0813, pure-rerank 0.1569 / 0.1391, vs the no-text CG `…alpha_00_20260515_084320.pth`. Superseded by the item-text ranker above.
 
 **Popularity penalty stays OFF the ranker (α=0).** A ranker trained with `popularity_alpha=0.2` was tested 2026-05-23 and rejected: it hurt offline ~27% (the ranker's lift over CG dropped from +0.0115 to +0.0084 NDCG@10) and did not produce meaningfully better canary lists (cleaner on Fighting/Western-RPG, but worse on Survival — GTA V/PAYDAY climbed, genre-defining DayZ fell). The CG stays raw α=0 as the fixed retrieval stage and the ranker stays raw α=0; neither stage applies a popularity penalty in the shipped config. The Menon Path 2 plumbing (`popularity_alpha`, `warm_start_alpha`) remains in `train.py` set to 0.
 
@@ -45,7 +52,7 @@ Two-stage retrieve-and-rank:
 
 ### CG checkpoints
 
-- **Raw CG α=0** — `best_triple_full_softmax_popularity_alpha_00_<date>.pth`. This is now the **deployed retrieval stage**: it retrieves recall-maximizing top-100 and the ranker reranks them. It is also the honest offline-metrics yardstick — the ranker runs at α=0 and is measured against this checkpoint.
+- **Raw CG α=0** — as of 2026-05-25 the **V6a item-text CG** (`best_triple_full_softmax_text_popularity_alpha_0_…100022.pth`); `_ALPHA_TO_CG_GLOB[0.0]` points here so warm-start / precompute / canary / export all use it. The **deployed retrieval stage**: retrieves recall-maximizing top-100, ranker reranks them; also the honest offline yardstick (ranker runs α=0, measured against this). (Pre-2026-05-25 this was the no-text `…alpha_00_20260515_084320.pth`; metrics were flat between the two, so the prior Bucket-6 ranker shipped against the no-text CG — see the top OPEN item.)
 - **CG α=0.4** — the pre-ranker standalone-serving compromise (popularity correction baked into the CG to keep niche-taste lists clean). In the two-stage world the CG no longer carries the popularity work, so α=0.4 is no longer deployed; it remains the reference for the CG α-tradeoff (see root `CLAUDE.md`).
 
 CG v5 prod baseline (α=0.4, for reference):
@@ -96,7 +103,11 @@ self.register_buffer('game_dev_idx',      dev_idx,      persistent=False)  # (n_
 self.register_buffer('game_price_idx',    price_idx,    persistent=False)  # (n_games+1,) int64
 self.register_buffer('game_tag_matrix',   tag_matrix,   persistent=False)  # (n_games+1, n_tags)   float32 — TF-IDF
 self.register_buffer('game_genre_matrix', genre_matrix, persistent=False)  # (n_games+1, n_genres) float32 — one-hot
+self.register_buffer('game_text_matrix',    text_matrix,    persistent=False)  # (n_games+1, 768) float32 — RAW desc emb (V6a)
+self.register_buffer('game_text_matrix_l2', text_matrix_l2, persistent=False)  # (n_games+1, 768) float32 — L2-normalized rows
 ```
+
+`game_text_matrix` (RAW) feeds the user-side `text_cosine` pool (sum-then-normalize); `game_text_matrix_l2` feeds BOTH the deep `item_text_tower` (== CG's `F.normalize(raw)`) and the `text_cosine` candidate side — the same two-buffer split as the tag pair.
 
 CG already registers `game_tag_matrix` and `game_genre_matrix` — the ranker mirrors them exactly (same names, dtypes, vocab orderings) so warm-started towers consume the right rows. The persistent `wide_norm_mean/std` buffers ARE saved in the checkpoint.
 
@@ -124,13 +135,16 @@ ITEM SIDE — mirrors v5 CG item tower:
   item_dev_emb      : 12   dev_lookup(game_dev_idx[cand_idx]) → Linear(12 → 12) → ReLU
   year_emb          :  8   year_lookup(game_year_idx[cand_idx]) → Linear(8 → 8) → ReLU
   price_emb         :  4   price_lookup(game_price_idx[cand_idx]) → Linear(4 → 4) → ReLU
+  item_text_emb     : 32   item_text_tower(game_text_matrix_l2[cand_idx])  ← V6a CG parity
+                            2-layer: Linear(768 → 128) → ReLU → Linear(128 → 32) → ReLU
+                            input = L2-normalized 768-d desc emb (== CG's F.normalize(raw))
 
 TOTAL deep concat:
   user side  = 4×32 + 32 + 32 = 192    ← matches CG exactly
-  item side  = 32 + 8 + 32 + 12 + 8 + 4 = 96
-  total      = 288
+  item side  = 32 + 8 + 32 + 12 + 8 + 4 + 32 = 128   ← V6a (+text 32)
+  total      = 320
 
-Deep MLP:  Linear(288 → 256) → ReLU → Linear(256 → 128)   ← NO final ReLU/activation
+Deep MLP:  Linear(320 → 256) → ReLU → Linear(256 → 128)   ← NO final ReLU/activation
            → deep_out (128)
 Wide:      cat(cross_features)  — bypasses MLP, direct to head
 Head:      Linear(128 + |wide| → 1) → raw logit
@@ -153,7 +167,7 @@ Tower shapes are listed inline in the deep-concat layout above (2-layer: item_ta
 
 ### Warm-start mapping (init from v5 CG state_dict)
 
-**Default ON** (`get_config()['warm_start'] = True`). A from-scratch ablation produced materially worse NDCG — the deep MLP needs CG's content-tower head start. The full CG→ranker key map lives in `train._CG_TO_RANKER_KEY_MAP`: 26 tensor transfers (4 lookups + 5 one-layer towers × 2 + 3 two-layer towers × 4); anything short means shape drift or key mismatch. **Not transferred:** deep MLP, head, cross-feature weights (random init — no CG counterpart); `user_projection.*` / `item_projection.*` (ranker has no projection MLP); all buffers (rebuilt from FeatureStore).
+**Default ON** (`get_config()['warm_start'] = True`). A from-scratch ablation produced materially worse NDCG — the deep MLP needs CG's content-tower head start. The full CG→ranker key map lives in `train._CG_TO_RANKER_KEY_MAP`: **30 tensor transfers** (4 lookups + 5 one-layer towers × 2 + 4 two-layer towers × 4 — the 4th two-layer tower is V6a `item_text_tower`); anything short means shape drift or key mismatch. **Not transferred:** deep MLP, head, cross-feature weights (random init — no CG counterpart); `user_projection.*` / `item_projection.*` (ranker has no projection MLP); all buffers (rebuilt from FeatureStore).
 
 `warm_start_alpha` decouples the warm-start CG source from the penalty: the α=0 ranker warm-starts from the raw α=0 CG. (Used by the rejected α=0.2 experiment to keep its warm-start source raw; now both are α=0.)
 
@@ -223,6 +237,9 @@ python ranker/main.py export [ranker.pth]   # serving artifacts (α=0 CG + given
 | `cg_neg_scores` | list[float] | CG dot per negative |
 | `tag_cosine_label` | float | `cosine(user_tag_pool_tfidf, game_tag_matrix[label])` |
 | `tag_cosine_negs` | list[float] | tag cosine per negative |
+| `text_cosine_label` | float | `cosine(user_text_centroid, game_text_matrix[label])` (V6a) |
+| `text_cosine_negs` | list[float] | text cosine per negative |
+| …Bucket 1/2/5/6 cross cols | | (unchanged — see `_CROSS_COLS`) |
 | `user_avg_log_playtime` | float | per-user mean log(1+hours) |
 | `user_interaction_count` | int | |
 | `X_hist_liked` | list[int] | padded indices, MAX_HISTORY_LEN |
@@ -268,6 +285,8 @@ grad_clip:        1.0
 temperature:      0.1
 scheduler:        CosineAnnealingLR, T_max=training_steps, eta_min=1e-4
 hidden_dims:      [256, 128]                ← matches CG's projection shape (no final ReLU)
+n_cross_features: 24                         ← 23 (Bucket 6) + text_cosine (col 23, V6a)
+n_wide_normalized:14                         ← trailing cols 10-23 Z-scored
 dropout:          0.0
 popularity_alpha: 0.0                        ← raw; the α=0.2 experiment was rejected
 warm_start_alpha: 0.0                        ← warm-start source CG α (decoupled from penalty)
@@ -421,10 +440,11 @@ col 15-16: tag_overlap_idf, full/liked        (Bucket 6 ✓)
 col 17-18: niche_tag_match, full/liked        (Bucket 6 ✓)
 col 19-20: max_tag_idf_match, full/liked      (Bucket 6 ✓)
 col 21-22: niche_dev_match, full/liked        (Bucket 6 ✓)
-(col 23 : cg_log_rank — Bucket 9 ✗, dropped + reverted; PROD ranker stops at col 22)
+col 23   : text_cosine                        (B-10, item-text CG integration — pending retrain)
+(Bucket 9 cg_log_rank ✗ was dropped + reverted; col 23 is now reused by text_cosine)
 ```
 
-**FINAL PROD ranker = 23 features (cols 0–22), n_wide_normalized=13.** Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–22 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. Dropped buckets 3/4/8/9 transiently occupied cols 10+ and were reverted, so those slots are free again. New wide-head weights init at 0.1.
+**Ranker = 24 features (cols 0–23), n_wide_normalized=14** with the pending item-text integration (was 23 / 13 at the last shipped Bucket-6 checkpoint). Cols are append-only — never reorder, or older checkpoints mis-align at load. Cols 10–23 are Z-scored at forward time (`wide_norm_mean/std` persistent buffers); cols 0–9 are bounded ([−1,1]/[0,1]) and pass through raw. **text_cosine (col 23) is itself a bounded cosine like tag_cosine (col 0), but appended at the END it lands in the trailing Z-scored block** — Z-scoring a bounded cosine is harmless and keeps the normalized columns contiguous (the "trailing N" `_normalize_wide` design can't host a raw column after a normalized one). Dropped buckets 3/4/8/9 transiently occupied cols 10+ and were reverted, so those slots are free again. New wide-head weights init at 0.1.
 
 ### Wide-feature normalization
 

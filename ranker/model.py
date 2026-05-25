@@ -15,8 +15,9 @@ Mirrors src/model.GameRecommender (V5) exactly:
     in train.py to match CG's logit range)
 
 User concat (192):  liked(32) + disliked(32) + full(32) + playtime(32) + genre(32) + tag(32)
-Item concat  (96):  item_id(32) + item_genre(8) + item_tag(32) + dev(12) + year(8) + price(4)
-Deep MLP   (288 → [256, 128]):  Linear(288→256) → ReLU → Linear(256→128)
+Item concat (128):  item_id(32) + item_genre(8) + item_tag(32) + dev(12) + year(8) + price(4)
+                    + text(32)   ← V6a item_text_tower (frozen 768-d desc emb → 32-d adapter)
+Deep MLP   (320 → [256, 128]):  Linear(320→256) → ReLU → Linear(256→128)
                                 — matches CG's projection shape exactly; NO final ReLU
                                   (would clamp deep_out ≥ 0 and break parity with CG's
                                   dot-product geometry).
@@ -73,6 +74,14 @@ class WideDeepRanker(nn.Module):
                  game_tag_mean_idf:          torch.Tensor,  # (n_games+1,)        float32 — mean IDF over the game's tags
                  game_tag_max_idf:           torch.Tensor,  # (n_games+1,)        float32 — max IDF over the game's tags
                  game_dev_log_catalog_size:  torch.Tensor,  # (n_games+1,)        float32 — log1p(# corpus games by this game's dev)
+                 # Item text (V6a CG parity) — frozen bge-base-en-v1.5 description embeddings.
+                 # game_text_matrix is RAW (as exported); game_text_matrix_l2 is per-row
+                 # L2-normalized. The deep tower's item_text_tower consumes the L2 rows
+                 # (bit-identical to CG's F.normalize(game_text_matrix[idx])); the user-side
+                 # text_cosine cross feature sums RAW rows then normalizes the pool, and reads
+                 # the L2 matrix on the candidate side (same two-buffer split as the tag pair).
+                 game_text_matrix:    torch.Tensor,  # (n_games+1, text_input_dim) float32 — RAW
+                 game_text_matrix_l2: torch.Tensor,  # (n_games+1, text_input_dim) float32 — L2-normalized rows
                  # Sub-tower output dims (V5 CG defaults)
                  item_id_emb_dim:        int = 32,
                  item_genre_emb_dim:     int = 8,
@@ -82,10 +91,12 @@ class WideDeepRanker(nn.Module):
                  price_emb_dim:          int = 4,
                  user_genre_emb_dim:     int = 32,
                  user_tag_emb_dim:       int = 32,
+                 text_emb_dim:           int = 32,
                  # Hardcoded hidden dims of CG's 2-layer towers (must match for warm-start)
                  item_tag_hidden:        int = 128,
                  user_tag_hidden:        int = 256,
                  user_genre_hidden:      int = 128,
+                 item_text_hidden:       int = 128,  # CG item_text_tower hidden (768→128→32)
                  # Deep MLP
                  hidden_dims: list = None,
                  dropout:    float = 0.0,
@@ -163,6 +174,13 @@ class WideDeepRanker(nn.Module):
         self.register_buffer('game_tag_mean_idf',         game_tag_mean_idf,         persistent=False)
         self.register_buffer('game_tag_max_idf',          game_tag_max_idf,          persistent=False)
         self.register_buffer('game_dev_log_catalog_size', game_dev_log_catalog_size, persistent=False)
+        # Item text (V6a) — RAW rows feed the user-side text_cosine pool (sum-then-norm);
+        # L2 rows feed BOTH the deep item_text_tower (== CG's F.normalize(raw)) and the
+        # text_cosine candidate side. Non-persistent — rebuilt from feature_store on load,
+        # same as the tag/genre matrices.
+        text_input_dim = game_text_matrix.shape[1]
+        self.register_buffer('game_text_matrix',    game_text_matrix,    persistent=False)
+        self.register_buffer('game_text_matrix_l2', game_text_matrix_l2, persistent=False)
 
         # ── Embedding lookups (all CG-warm-startable) ───────────────────────
         self.item_id_lookup    = nn.Embedding(n_games + 1,       item_id_emb_dim,
@@ -193,6 +211,14 @@ class WideDeepRanker(nn.Module):
             nn.Linear(user_genre_hidden, user_genre_emb_dim), nn.ReLU(),
         )
 
+        # ── Item text tower (V6a CG parity) — frozen 768-d desc emb → 32-d adapter ─
+        # Same shape as src/model.GameRecommender.item_text_tower so the warm-start map
+        # transfers .0 and .2 Linear layers. Input is the L2-normalized text row.
+        self.item_text_tower  = nn.Sequential(
+            nn.Linear(text_input_dim, item_text_hidden), nn.ReLU(),
+            nn.Linear(item_text_hidden, text_emb_dim), nn.ReLU(),
+        )
+
         # ── Deep MLP ─────────────────────────────────────────────────────────
         # User concat dim matches CG exactly (192): 4 pools + genre + tag. The
         # X_user_avg_log scalar is used internally for genre debiasing but NOT
@@ -201,8 +227,11 @@ class WideDeepRanker(nn.Module):
         user_concat_dim = (4 * item_id_emb_dim
                            + user_genre_emb_dim
                            + user_tag_emb_dim)
+        # Item concat 128 (V6a): + text_emb_dim(32) over the V5 96-d tower. Matches the
+        # served text CG's item tower so the deep item embedding reproduces CG's.
         item_concat_dim = (item_id_emb_dim + item_genre_emb_dim + item_tag_emb_dim
-                           + developer_emb_dim + year_emb_dim + price_emb_dim)
+                           + developer_emb_dim + year_emb_dim + price_emb_dim
+                           + text_emb_dim)
         deep_in = user_concat_dim + item_concat_dim
 
         # NO final ReLU after the last hidden layer — mirrors CG's projection
@@ -331,8 +360,11 @@ class WideDeepRanker(nn.Module):
         dev_emb        = self.developer_tower(self.developer_lookup(self.game_dev_idx[cand_idx]))
         year_emb       = self.year_tower(self.year_lookup(self.game_year_idx[cand_idx]))
         price_emb      = self.price_tower(self.price_lookup(self.game_price_idx[cand_idx]))
+        # game_text_matrix_l2[idx] == F.normalize(game_text_matrix[idx]) → bit-identical
+        # to CG's item_text_tower input.
+        item_text_emb  = self.item_text_tower(self.game_text_matrix_l2[cand_idx])
         return torch.cat([item_id_emb, item_genre_emb, item_tag_emb,
-                          dev_emb, year_emb, price_emb], dim=1)
+                          dev_emb, year_emb, price_emb, item_text_emb], dim=1)
 
     # ── Score pairs ──────────────────────────────────────────────────────────
 

@@ -66,8 +66,14 @@ def get_device() -> torch.device:
 # the deep MLP + head to spend early gradient steps undoing a prior they don't want.
 # Auto-resolving here prevents the silent footgun where popularity_alpha changes but
 # warm_start_cg_checkpoint doesn't.
+# α=0 now points at the V6a item-text CG (the deployed retrieval stage as of 2026-05-25).
+# This one glob drives ALL four consumers — warm-start source, precompute retrieval,
+# canary CG, and export CG — so flipping it here re-grounds the entire ranker pipeline
+# on the served text CG. The glob excludes the dropped V6b user-text CG
+# (`..._text_user_popularity_...`) and the pre-text α=0 CG (`..._popularity_alpha_00_...`).
+# sorted()[-1] picks the latest matching checkpoint (…100022, the deployed one).
 _ALPHA_TO_CG_GLOB = {
-    0.0: 'saved_models/best_triple_full_softmax_popularity_alpha_00_*.pth',
+    0.0: 'saved_models/best_triple_full_softmax_text_popularity_alpha_0_*.pth',
     0.4: 'saved_models/PROD_best_triple_full_softmax_popularity_alpha_04_*.pth',
 }
 
@@ -126,10 +132,12 @@ def get_config() -> dict:
         'price_emb_dim':      4,
         'user_genre_emb_dim': 32,
         'user_tag_emb_dim':   32,
+        'text_emb_dim':       32,   # V6a item_text_tower output (768→128→32)
         # Hidden dims hardcoded in src/model.py — must match for warm-start parity.
         'item_tag_hidden':    128,
         'user_tag_hidden':    256,
         'user_genre_hidden':  128,
+        'item_text_hidden':   128,
         # Deep MLP — matches CG's projection shape [256, 128] exactly (Linear→ReLU→Linear,
         # no final activation). See ranker/model.py docstring.
         'hidden_dims':        [256, 128],
@@ -160,16 +168,23 @@ def get_config() -> dict:
         #   20 max_tag_idf_match_liked (B-9f) ← Bucket 6
         #   21 niche_dev_match_full (B-9g)    ← Bucket 6
         #   22 niche_dev_match_liked (B-9h)   ← Bucket 6
+        #   23 text_cosine (B-10)             ← item-text CG integration (full slice)
         # Bucket 3 (disliked slice) and Bucket 4 (dev-catalog) were tried + dropped;
         # Bucket 7 (item-intrinsic priors) was dropped in planning and its 2 keep-able
         # features were absorbed into Bucket 6 as proper crosses — see plan §9.
-        'n_cross_features':   23,
-        # Bucket 6 — the trailing 13 cross-feature columns (10-22) get Z-scored by the
-        # model's persistent `wide_norm_mean` / `wide_norm_std` buffers; cols 0-9 are
-        # already bounded in [-1, 1] / [0, 1] and pass through raw. Populated by
-        # populate_wide_norm_buffers below once the model is built and the train
-        # dataset is loaded. Was 5 in Bucket 5; +8 for Bucket 6's 8 features.
-        'n_wide_normalized':  13,
+        # Col 23 text_cosine = cosine(user playtime-weighted text centroid, candidate text)
+        # — the direct text-vs-text path the CG dot product can't express. Added alongside
+        # the deep item_text_tower when the served CG gained item text (V6a).
+        'n_cross_features':   24,
+        # The trailing 14 cross-feature columns (10-23) get Z-scored by the model's
+        # persistent `wide_norm_mean` / `wide_norm_std` buffers; cols 0-9 are already
+        # bounded in [-1, 1] / [0, 1] and pass through raw. Populated by
+        # populate_wide_norm_buffers below once the model is built and the train dataset
+        # is loaded. Was 5 (Bucket 5), 13 (Bucket 6), now +1 for col 23 text_cosine.
+        # text_cosine is a bounded cosine like tag_cosine (col 0) but appended at the END,
+        # so it joins the trailing normalized block rather than the leading raw block —
+        # Z-scoring a bounded cosine is harmless and keeps cols 10-22 contiguous.
+        'n_wide_normalized':  14,
 
         # Menon α — popularity penalty ADDED to TRAINING logits only (Path 2; raw dot
         # products at inference/eval, same as CG). Architecture decision (2026-05-23):
@@ -281,6 +296,17 @@ def _buffers_from_fs(fs: dict) -> dict:
     tag_max_idf_b            = _pad_1d_float(fs['game_tag_max_idf'])
     dev_log_catalog_size_b   = _pad_1d_float(fs['game_dev_log_catalog_size'])
 
+    # Item text (V6a) — frozen 768-d desc embeddings. RAW (pad row = zeros) feeds the
+    # user-side text_cosine pool; the L2-normalized variant feeds the deep item_text_tower
+    # (== CG's F.normalize(raw)) and the text_cosine candidate side. Same two-buffer split
+    # as the tag matrices above; pre-normalize once so train/precompute don't re-run it.
+    text_dim     = fs['game_text_matrix'].shape[1]
+    text_matrix  = np.vstack([fs['game_text_matrix'].astype(np.float32),
+                              np.zeros((1, text_dim), dtype=np.float32)])
+    text_norm    = np.linalg.norm(text_matrix, ord=2, axis=-1, keepdims=True)
+    text_norm    = np.where(text_norm > 0.0, text_norm, 1.0)
+    text_matrix_l2 = (text_matrix / text_norm).astype(np.float32)
+
     return {
         'game_tag_matrix':        torch.from_numpy(tag_matrix),
         'game_tag_matrix_l2':     torch.from_numpy(tag_matrix_l2),
@@ -301,6 +327,8 @@ def _buffers_from_fs(fs: dict) -> dict:
         'game_tag_mean_idf':          torch.from_numpy(tag_mean_idf_b),
         'game_tag_max_idf':           torch.from_numpy(tag_max_idf_b),
         'game_dev_log_catalog_size':  torch.from_numpy(dev_log_catalog_size_b),
+        'game_text_matrix':           torch.from_numpy(text_matrix),
+        'game_text_matrix_l2':        torch.from_numpy(text_matrix_l2),
     }
 
 
@@ -338,6 +366,11 @@ _CG_TO_RANKER_KEY_MAP = {
     'user_genre_tower.0.bias':              'user_genre_tower.0.bias',
     'user_genre_tower.2.weight':            'user_genre_tower.2.weight',
     'user_genre_tower.2.bias':              'user_genre_tower.2.bias',
+    # Item text tower (V6a CG parity — both .0 and .2 Linear layers transfer)
+    'item_text_tower.0.weight':             'item_text_tower.0.weight',
+    'item_text_tower.0.bias':               'item_text_tower.0.bias',
+    'item_text_tower.2.weight':             'item_text_tower.2.weight',
+    'item_text_tower.2.bias':               'item_text_tower.2.bias',
 }
 
 
@@ -426,6 +459,9 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
         game_tag_mean_idf=bufs['game_tag_mean_idf'],
         game_tag_max_idf=bufs['game_tag_max_idf'],
         game_dev_log_catalog_size=bufs['game_dev_log_catalog_size'],
+        # Item text (V6a) — 2 buffers + dims for the deep item_text_tower / text_cosine.
+        game_text_matrix=bufs['game_text_matrix'],
+        game_text_matrix_l2=bufs['game_text_matrix_l2'],
         item_id_emb_dim=config['item_id_emb_dim'],
         item_genre_emb_dim=config['item_genre_emb_dim'],
         item_tag_emb_dim=config['item_tag_emb_dim'],
@@ -434,9 +470,11 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
         price_emb_dim=config['price_emb_dim'],
         user_genre_emb_dim=config['user_genre_emb_dim'],
         user_tag_emb_dim=config['user_tag_emb_dim'],
+        text_emb_dim=config['text_emb_dim'],
         item_tag_hidden=config['item_tag_hidden'],
         user_tag_hidden=config['user_tag_hidden'],
         user_genre_hidden=config['user_genre_hidden'],
+        item_text_hidden=config['item_text_hidden'],
         hidden_dims=config['hidden_dims'],
         dropout=config['dropout'],
         n_cross_features=config['n_cross_features'],
@@ -453,11 +491,12 @@ def build_ranker(config: dict, fs: dict) -> WideDeepRanker:
 
 # ── Wide-feature Z-score buffer populate (Bucket 5+ scalars) ────────────────
 
-# Buckets 5+6 cross-feature parquet column names. Order MUST match
-# compute_cross_features column slots 10-22 — the model's wide_norm_mean[k] /
+# Normalized cross-feature parquet column names. Order MUST match
+# compute_cross_features column slots 10-23 — the model's wide_norm_mean[k] /
 # wide_norm_std[k] line up with cross_features[..., 10 + k] at forward time.
-# Buckets 5 (cols 10-14, 5 features) + 6 (cols 15-22, 8 features) = 13 normalized
-# columns total. Cols 0-9 are bounded ([-1, 1] / [0, 1]) and pass through raw.
+# Buckets 5 (cols 10-14, 5 features) + 6 (cols 15-22, 8 features) + text_cosine
+# (col 23) = 14 normalized columns. Cols 0-9 are bounded ([-1, 1] / [0, 1]) and
+# pass through raw.
 _WIDE_NORM_PARQUET_COLS = (
     # Bucket 5 — numeric matching (cols 10-14)
     'price_match_label',
@@ -474,6 +513,8 @@ _WIDE_NORM_PARQUET_COLS = (
     'max_tag_idf_match_liked_label',
     'niche_dev_match_full_label',
     'niche_dev_match_liked_label',
+    # Item-text integration (col 23)
+    'text_cosine_label',
 )
 
 
@@ -564,10 +605,11 @@ def train(checkpoint_dir: str | None = None) -> str:
     print(f"  user_concat({model.user_concat_dim}) + item_concat({model.item_concat_dim}) "
           f"= deep_in({model.deep_in})")
     print(f"  → hidden={config['hidden_dims']} → head({config['hidden_dims'][-1]}+{n_cross}→1)")
-    print(f"  cross features ({n_cross}, Bucket 6): tag_cosine | "
+    print(f"  cross features ({n_cross}): tag_cosine | "
           f"genre/tag/dev overlap (full | liked | recent-3-liked) | "
           f"price/era/median-playtime/popularity/sentiment match (Z-scored) | "
-          f"tag IDF overlap + niche scalar triple × (full | liked) (Z-scored)")
+          f"tag IDF overlap + niche scalar triple × (full | liked) (Z-scored) | "
+          f"text_cosine (Z-scored)")
     print(f"  ({n_params:,} trainable params)")
 
     # Bucket 5 — populate Z-score buffers from train-parquet stats. Single pass over
@@ -697,6 +739,14 @@ def train(checkpoint_dir: str | None = None) -> str:
         full_tag_cos  = user_tag_norm @ model.game_tag_matrix_l2.t()                     # (B, n_items+1)
         tag_cos       = full_tag_cos.gather(1, cand_b)                                   # (B, n_cand)
 
+        # ── text_cosine (B-10): playtime-weighted user TEXT centroid, cosine ─────
+        # Identical shape to tag_cosine — sum RAW 768-d rows weighted, L2-normalize the
+        # pool, dot with the pre-normalized candidate text rows. Direct text-vs-text path.
+        user_text_pool = (model.game_text_matrix[h_full] * h_pw.unsqueeze(-1)).sum(dim=1)  # (B, 768)
+        user_text_norm = F.normalize(user_text_pool, p=2, dim=1)
+        full_text_cos  = user_text_norm @ model.game_text_matrix_l2.t()                    # (B, n_items+1)
+        text_cos       = full_text_cos.gather(1, cand_b)                                   # (B, n_cand)
+
         # ── Buckets 1+2 — one categorical_overlap_triple call per history slice ───
         # Bucket 1 (full):       (h_full,    h_pw)
         # Bucket 2A (liked):     (h_lkd,     h_lkd_pw)
@@ -744,6 +794,7 @@ def train(checkpoint_dir: str | None = None) -> str:
             niche_tag_f.reshape(-1),      niche_tag_l.reshape(-1),
             max_tag_idf_f.reshape(-1),    max_tag_idf_l.reshape(-1),
             niche_dev_f.reshape(-1),      niche_dev_l.reshape(-1),
+            text_cos.reshape(-1),
         )
         # score_pairs_batched factorizes the first MLP layer over the (B, n_cand) layout
         # — runs user-side projection on B rows (not B*n_cand) and avoids materializing

@@ -11,7 +11,7 @@ computes all cross features on the fly via ranker.cross_features utils (same cod
 path as precompute → bit-exact parquet identity), then calls compute_cross_features
 to stack them for the wide head.
 
-Active cross features (23 total — **Bucket 6** roster, plan §9). Bucket 3 (disliked
+Active cross features (24 total — Bucket 6 roster + text_cosine). Bucket 3 (disliked
 slice), Bucket 4 (dev-catalog), and Bucket 7 (item-intrinsic priors) were tried and
 dropped / dropped in planning — see plan §9 / git log.
 
@@ -44,9 +44,12 @@ dropped / dropped in planning — see plan §9 / git log.
    21. max_tag_idf_match_liked     (B-9f) — abs max-tag-IDF diff (weighted max), liked.
    22. niche_dev_match_full        (B-9g) — abs log-dev-catalog-size diff, full slice.
    23. niche_dev_match_liked       (B-9h) — abs log-dev-catalog-size diff, liked slice.
+  Item-text integration:
+   24. text_cosine                 (B-10) — cosine(user playtime-weighted text centroid,
+                                            candidate text) over frozen 768-d desc embeddings.
 
-  Bucket 5 + 6 features are RAW values in the parquet — the model Z-scores them
-  (cols 10-22, n_wide_normalized=13) inside score_pairs / score_pairs_batched using
+  Bucket 5 + 6 + text_cosine are RAW values in the parquet — the model Z-scores them
+  (cols 10-23, n_wide_normalized=14) inside score_pairs / score_pairs_batched using
   `wide_norm_mean` / `wide_norm_std` persistent buffers, populated once on training
   start via ranker.train.populate_wide_norm_buffers.
 
@@ -116,6 +119,7 @@ _CROSS_FEATURE_COLS = [
     ('max_tag_idf_match_liked_label',    'max_tag_idf_match_liked_negs'),
     ('niche_dev_match_full_label',       'niche_dev_match_full_negs'),
     ('niche_dev_match_liked_label',      'niche_dev_match_liked_negs'),
+    ('text_cosine_label',                'text_cosine_negs'),
 ]
 _EVAL_ONLY_COLS = ['neg_item_idxs', 'cg_label_rank']
 for _l, _n in _CROSS_FEATURE_COLS:
@@ -217,7 +221,7 @@ class RankerDataset:
         self.X_user_b5         = _fixed_list_to_numpy(table, 'X_user_b5',                     5,        np.float32)
 
         # ── Eval-only columns ──────────────────────────────────────────────
-        # neg_idx + cg_label_rank + all 23 cross-feature pairs (Bucket 1 → 6).
+        # neg_idx + cg_label_rank + all 24 cross-feature pairs (Bucket 1 → 6 + text_cosine).
         # See `_CROSS_FEATURE_COLS` at module level for the full list / order.
         # Used by evaluate.compute_label_ranks; NOT referenced by sample_batch.
         if mode == 'full':
@@ -299,12 +303,13 @@ def compute_cross_features(tag_cosine:                 torch.Tensor,
                            max_tag_idf_match_full:     torch.Tensor,
                            max_tag_idf_match_liked:    torch.Tensor,
                            niche_dev_match_full:       torch.Tensor,
-                           niche_dev_match_liked:      torch.Tensor) -> torch.Tensor:
+                           niche_dev_match_liked:      torch.Tensor,
+                           text_cosine:                torch.Tensor) -> torch.Tensor:
     """
-    Bucket 6 wide-path stacker. Returns (B, 23).
+    Wide-path stacker. Returns (B, 24).
 
     Inputs are 1-D (B,) tensors of per-(row, candidate) scalars. Column order in
-    the output tensor must match `n_cross_features=23` and the head weight slot
+    the output tensor must match `n_cross_features=24` and the head weight slot
     interpretation — checkpoints rely on this stable ordering:
 
         column  0 : tag_cosine                   (B-0,  Phase A)
@@ -330,13 +335,17 @@ def compute_cross_features(tag_cosine:                 torch.Tensor,
         column 20 : max_tag_idf_match_liked      (B-9f, Bucket 6)
         column 21 : niche_dev_match_full         (B-9g, Bucket 6)
         column 22 : niche_dev_match_liked        (B-9h, Bucket 6)
+        column 23 : text_cosine                  (B-10, item-text CG integration)
 
-    Cols 10-22 are RAW values — the model Z-scores them inside score_pairs /
-    score_pairs_batched (model.wide_norm_mean / wide_norm_std, populated by
+    Cols 10-23 are Z-scored by the model inside score_pairs / score_pairs_batched
+    (model.wide_norm_mean / wide_norm_std, populated by
     train.populate_wide_norm_buffers from train-parquet stats). Cols 0-9 are
-    bounded in [-1, 1] or [0, 1] and pass through unchanged.
+    bounded in [-1, 1] or [0, 1] and pass through unchanged. text_cosine (col 23)
+    is itself a bounded cosine like tag_cosine (col 0) but, being appended at the
+    end, lands in the trailing normalized block — Z-scoring it is harmless and keeps
+    the normalized columns contiguous.
 
-    Future buckets append further columns at indices ≥ 23; do not reorder existing
+    Future buckets append further columns at indices ≥ 24; do not reorder existing
     columns or older checkpoints become silently mis-aligned at load time.
     """
     return torch.stack([tag_cosine, genre_overlap, tag_overlap, dev_affinity,
@@ -347,7 +356,8 @@ def compute_cross_features(tag_cosine:                 torch.Tensor,
                         tag_overlap_idf_full, tag_overlap_idf_liked,
                         niche_tag_match_full, niche_tag_match_liked,
                         max_tag_idf_match_full, max_tag_idf_match_liked,
-                        niche_dev_match_full, niche_dev_match_liked],
+                        niche_dev_match_full, niche_dev_match_liked,
+                        text_cosine],
                        dim=-1)
 
 

@@ -107,6 +107,8 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
         max_tag_l_flat    = _gather(dataset.max_tag_idf_match_liked_label, dataset.max_tag_idf_match_liked_negs)
         niche_dev_f_flat  = _gather(dataset.niche_dev_match_full_label,    dataset.niche_dev_match_full_negs)
         niche_dev_l_flat  = _gather(dataset.niche_dev_match_liked_label,   dataset.niche_dev_match_liked_negs)
+        # Item-text integration (col 23)
+        text_cos_flat     = _gather(dataset.text_cosine_label,             dataset.text_cosine_negs)
         cross = compute_cross_features(tag_cos_flat, genre_ov_flat, tag_ov_flat, dev_aff_flat,
                                        genre_ov_l_flat, tag_ov_l_flat, dev_aff_l_flat,
                                        genre_ov_r3_flat, tag_ov_r3_flat, dev_aff_r3_flat,
@@ -114,7 +116,8 @@ def compute_label_ranks(model, dataset: RankerDataset, device: torch.device,
                                        tag_ov_idf_f_flat, tag_ov_idf_l_flat,
                                        niche_tag_f_flat,  niche_tag_l_flat,
                                        max_tag_f_flat,    max_tag_l_flat,
-                                       niche_dev_f_flat,  niche_dev_l_flat)
+                                       niche_dev_f_flat,  niche_dev_l_flat,
+                                       text_cos_flat)
 
         # ── Score: factorized MLP layer-1 over the (B, n_cand) layout ───────
         # See model.score_pairs_batched — math identity, runs user-side projection

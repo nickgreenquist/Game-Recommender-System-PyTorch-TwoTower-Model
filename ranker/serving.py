@@ -37,7 +37,7 @@ from src.features import SENTIMENT_UNKNOWN_FILL
 # Width of the cross-feature tensor compute_cross_features produces here. Bump in
 # lockstep with the compute path when a new bucket lands. Callers compare this to the
 # checkpoint's n_cross_features to decide slice-vs-zero-pad alignment.
-COMPUTED_CROSS_FEATURES = 23   # Bucket 6 roster (tag_cosine + 9 overlaps + 5 numeric + 8 niche)
+COMPUTED_CROSS_FEATURES = 24   # tag_cosine + 9 overlaps + 5 numeric + 8 niche + text_cosine
 
 
 # ── User-side inputs (index-driven; mirrors the old _build_synthetic_user_inputs) ──
@@ -120,6 +120,22 @@ def tag_cosine_for_user(ranker, full_ids: list, full_pw: list, cand_idx: torch.T
     user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
     cand_tag_norm = ranker.game_tag_matrix_l2[cand_idx]                                 # (n_cand, n_tags)
     return (user_tag_norm * cand_tag_norm).sum(dim=1)                                   # (n_cand,)
+
+
+def text_cosine_for_user(ranker, full_ids: list, full_pw: list, cand_idx: torch.Tensor,
+                         device: torch.device) -> torch.Tensor:
+    """Recreate precompute's text_cosine (B-10). Same shape as tag_cosine_for_user but
+    over the frozen 768-d description embeddings: user side is sum-weighted RAW text rows
+    then L2-normalized; candidate side reads the pre-normalized buffer — identical to
+    train._forward_batch."""
+    if not full_ids:
+        return torch.zeros(cand_idx.shape[0], device=device)
+    full_t = torch.tensor(full_ids, dtype=torch.long, device=device)
+    pw_t   = torch.tensor(full_pw,  dtype=torch.float32, device=device).unsqueeze(-1)   # (L, 1)
+    user_text_pool = (ranker.game_text_matrix[full_t] * pw_t).sum(dim=0, keepdim=True)  # (1, 768)
+    user_text_norm = F.normalize(user_text_pool, p=2, dim=1)
+    cand_text_norm = ranker.game_text_matrix_l2[cand_idx]                               # (n_cand, 768)
+    return (user_text_norm * cand_text_norm).sum(dim=1)                                 # (n_cand,)
 
 
 # ── User-side Bucket 5 scalars (price / year / sentiment / log_count / median log pt) ──
@@ -215,7 +231,8 @@ def rerank_candidates(ranker, device, user_inputs: dict,
                                                   cand_idx=cand_t1)
             return g.squeeze(0), t.squeeze(0), d.squeeze(0)
 
-        tag_cos = tag_cosine_for_user(ranker, full_ids, full_pw, cand_t, device)
+        tag_cos  = tag_cosine_for_user(ranker, full_ids, full_pw, cand_t, device)
+        text_cos = text_cosine_for_user(ranker, full_ids, full_pw, cand_t, device)
 
         # Bucket 1 — full-history slice; Bucket 2A — liked slice; Bucket 2B — last-3-liked.
         genre_ov,    tag_ov,    dev_aff    = _slice_triple(h_full, h_pw)
@@ -258,7 +275,8 @@ def rerank_candidates(ranker, device, user_inputs: dict,
                                        tag_ov_idf_f, tag_ov_idf_l,
                                        niche_tag_f,  niche_tag_l,
                                        max_tag_f,    max_tag_l,
-                                       niche_dev_f,  niche_dev_l)
+                                       niche_dev_f,  niche_dev_l,
+                                       text_cos)
 
         model_expected = ranker.n_cross_features
         if model_expected != COMPUTED_CROSS_FEATURES:

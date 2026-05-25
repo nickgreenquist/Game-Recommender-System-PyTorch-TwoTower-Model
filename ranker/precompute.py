@@ -10,6 +10,10 @@ Cross features (precomputed; columns written per (label, neg) per row):
                     Computed off game_tag_matrix (the registered buffer CG uses),
                     *not* off the tag tower outputs — model-independent so the
                     parquet stays valid if tower hidden dims change.
+  - text_cosine   (B-10) — cosine of user playtime-weighted text centroid vs candidate
+                    text, over the frozen 768-d description embeddings (game_text_matrix).
+                    Same model-independent path as tag_cosine; the direct text-vs-text
+                    signal the CG dot product can't express (V6a item-text integration).
 
   Bucket 1 (full-history slice — X_hist_full + X_hist_playtime_weights):
   - genre_overlap (B-1)  — playtime-weighted binary genre overlap, normalized by
@@ -402,6 +406,8 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     cg_neg_scores      = np.zeros((n, n_neg), dtype=np.float32)
     tag_cos_label      = np.zeros(n,          dtype=np.float32)
     tag_cos_negs       = np.zeros((n, n_neg), dtype=np.float32)
+    text_cos_label     = np.zeros(n,          dtype=np.float32)
+    text_cos_negs      = np.zeros((n, n_neg), dtype=np.float32)
     # Bucket 1 — full-history slice
     genre_ov_label     = np.zeros(n,          dtype=np.float32)
     genre_ov_negs      = np.zeros((n, n_neg), dtype=np.float32)
@@ -464,6 +470,16 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     # (B, n_neg, n_tags) gather tensor in the tag_cosine compute. Mirrors what the
     # model registers as game_tag_matrix_l2 in ranker.train._buffers_from_fs.
     tag_matrix_dev_l2 = F.normalize(tag_matrix_dev, p=2, dim=1)
+
+    # Item text (V6a) on device once — RAW rows for the user-side text centroid, L2 rows
+    # for the candidate side. Same two-buffer split as tags; mirrors what the model
+    # registers as game_text_matrix / game_text_matrix_l2 in ranker.train._buffers_from_fs.
+    text_dim = fs['game_text_matrix'].shape[1]
+    text_matrix_dev = torch.from_numpy(np.vstack([
+        fs['game_text_matrix'].astype(np.float32),
+        np.zeros((1, text_dim), dtype=np.float32),
+    ])).to(device)
+    text_matrix_dev_l2 = F.normalize(text_matrix_dev, p=2, dim=1)
 
     # Genre BINARY matrix + per-item genre count on device once. fs['game_genre_matrix']
     # is L1-row-normalized (each entry = 1/k per genre, sums to 1); for the cross feature
@@ -550,7 +566,7 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
     # the NEGS. cg_score occupies slot 0 (col 0 = label CG score, cols 1: = neg CG
     # scores from topk.values) so a single stack + one sync covers CG-score + all
     # 23 cross features.
-    N_STACKED = 1 + 23                                          # cg_score + 23 cross features
+    N_STACKED = 1 + 24                                          # cg_score + 24 cross features
 
     for s in tqdm(range(0, n, batch_size), desc=f"  Scoring [{row_start:,}:{row_end:,}]"):
         e = min(s + batch_size, n)
@@ -596,6 +612,14 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         user_tag_norm = F.normalize(user_tag_pool, p=2, dim=1)
         full_tag_cos  = user_tag_norm @ tag_matrix_dev_l2.t()                             # (B, n_items+1)
         tag_cos       = full_tag_cos.gather(1, cand_b)                                    # (B, 1 + n_neg)
+
+        # ── Text cosine over frozen description embeddings (B-10) ────────────
+        # Same shape/path as tag_cosine over the 768-d text rows. Direct text-vs-text.
+        hist_text = text_matrix_dev[h_full]                                               # (B, H, 768)
+        user_text_pool = (hist_text * h_pw.unsqueeze(-1)).sum(dim=1)                      # (B, 768)
+        user_text_norm = F.normalize(user_text_pool, p=2, dim=1)
+        full_text_cos  = user_text_norm @ text_matrix_dev_l2.t()                          # (B, n_items+1)
+        text_cos       = full_text_cos.gather(1, cand_b)                                  # (B, 1 + n_neg)
 
         # ── Buckets 1+2 — categorical-overlap triple per history slice ──────
         # categorical_overlap_triple → (genre, tag, dev_affinity) each (B, 1 + n_neg).
@@ -646,6 +670,7 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
             niche_tag_f,  niche_tag_l,                             # slots 18-19 (Bucket 6 mean)
             max_tag_idf_f, max_tag_idf_l,                          # slots 20-21 (Bucket 6 max)
             niche_dev_f,  niche_dev_l,                             # slots 22-23 (Bucket 6 dev)
+            text_cos,                                              # slot 24    (B-10 text cosine)
         ], dim=2)                                                  # (B, 1 + n_neg, N_STACKED)
         st_np            = stacked.cpu().numpy()                   # ONE big sync
         cg_label_rank[s:e] = full_rank.clamp(max=top_k).cpu().numpy()
@@ -684,6 +709,8 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         max_tag_idf_l_label[s:e] = st_np[:,  0, 21];  max_tag_idf_l_negs[s:e]  = st_np[:, 1:, 21]
         niche_dev_f_label[s:e]   = st_np[:,  0, 22];  niche_dev_f_negs[s:e]    = st_np[:, 1:, 22]
         niche_dev_l_label[s:e]   = st_np[:,  0, 23];  niche_dev_l_negs[s:e]    = st_np[:, 1:, 23]
+        # Item-text integration (B-10)
+        text_cos_label[s:e]      = st_np[:,  0, 24];  text_cos_negs[s:e]       = st_np[:, 1:, 24]
 
     return {
         'neg_item_idxs':                neg_item_idxs,
@@ -741,6 +768,9 @@ def _score_candidates(model, V_all: torch.Tensor, arrays: dict, fs: dict,
         'niche_dev_match_full_negs':        niche_dev_f_negs,
         'niche_dev_match_liked_label':      niche_dev_l_label,
         'niche_dev_match_liked_negs':       niche_dev_l_negs,
+        # Item-text integration (text_cosine, B-10)
+        'text_cosine_label':                text_cos_label,
+        'text_cosine_negs':                 text_cos_negs,
     }
 
 
@@ -858,6 +888,8 @@ _CROSS_COLS = [
     ('max_tag_idf_match_liked_label',    'max_tag_idf_match_liked_negs',    pa.float32()),
     ('niche_dev_match_full_label',       'niche_dev_match_full_negs',       pa.float32()),
     ('niche_dev_match_liked_label',      'niche_dev_match_liked_negs',      pa.float32()),
+    # Item-text integration (text_cosine, B-10)
+    ('text_cosine_label',                'text_cosine_negs',                pa.float32()),
 ]
 
 

@@ -31,8 +31,10 @@ from src.evaluate import (USER_TYPE_TO_DISLIKED_GAMES,
                            SIMULATED_FAV_LOG_HOURS,
                            SIMULATED_ANCHOR_LOG_HOURS,
                            SIMULATED_DISLIKE_LOG_HOURS,
+                           NICK_PLAYTIME,
                            _get_anchor_titles,
                            _build_user_embedding,
+                           _build_nick_embedding,
                            build_game_embeddings)
 from src.features import load_features
 from src.train import (build_model as build_cg_model,
@@ -41,7 +43,11 @@ from src.train import (build_model as build_cg_model,
 
 TOP_K_CG              = 100      # candidates from CG to rerank (matches precompute)
 TOP_N_DISPLAY_DEFAULT = 10
-DEFAULT_CANARIES      = list(USER_TYPE_TO_FAVORITE_GAMES.keys())
+# Nick — the real-user canary (real Steam playtime), same profile Streamlit's Examples
+# tab surfaces. Leads the list, like the Streamlit dropdown. Not a USER_TYPE_TO_* key;
+# handled by a dedicated branch in run_canary.
+NICK_CANARY           = "Nick (real Steam playtime)"
+DEFAULT_CANARIES      = [NICK_CANARY] + list(USER_TYPE_TO_FAVORITE_GAMES.keys())
 # Width of the cross-feature tensor the shared rerank path computes. Imported from
 # ranker.serving (single source of truth) — the alignment warning below uses it to
 # decide slice vs zero-pad when a historical checkpoint expects a different width.
@@ -139,6 +145,36 @@ def _build_synthetic_user_inputs(fs: dict, user_type: str, pad_idx: int):
     return user_inputs, fav_titles, anchor_titles, dis_titles, full_ids, full_pw, raw_pw
 
 
+def _build_nick_user_inputs(fs: dict, pad_idx: int):
+    """
+    Nick (real Steam user) ranker inputs — mirrors Streamlit's Examples tab exactly.
+
+    CG retrieval (handled by the caller via src.evaluate._build_nick_embedding) uses his
+    real playtime-weighted pools. The ranker side here puts every played corpus game into
+    the liked pool at the synthetic fav weight — the shared build_user_inputs_from_indices
+    takes per-CLASS weights, not per-item playtime, same as Streamlit's `_ranker_rerank`.
+    No anchors, no disliked (unplayed library games are unknown, not disliked).
+
+    Returns (user_inputs, played_titles_sorted, full_ids, full_pw, raw_pw); played_titles
+    is sorted by hours desc (most-played first) for display + the retrieval exclude set.
+    """
+    item_to_idx = {str(k): v for k, v in fs['item_to_idx'].items()}
+    played = [(iid, hrs) for iid, hrs in NICK_PLAYTIME.items() if str(iid) in item_to_idx]
+    played.sort(key=lambda x: x[1], reverse=True)
+    liked_idxs    = [item_to_idx[str(iid)] for iid, _ in played]
+    played_titles = [fs['item_id_to_title'][iid] for iid, _ in played
+                     if iid in fs['item_id_to_title']]
+
+    user_inputs, full_ids, full_pw, raw_pw = build_user_inputs_from_indices(
+        liked_idxs=liked_idxs, anchor_idxs=[], disliked_idxs=[],
+        pad_idx=pad_idx,
+        fav_weight=SIMULATED_FAV_LOG_HOURS,
+        anchor_weight=SIMULATED_ANCHOR_LOG_HOURS,
+        dis_weight=SIMULATED_DISLIKE_LOG_HOURS,
+    )
+    return user_inputs, played_titles, full_ids, full_pw, raw_pw
+
+
 # ── Main canary loop ────────────────────────────────────────────────────────
 
 def _format_title(title: str, max_w: int) -> str:
@@ -206,8 +242,8 @@ def run_canary(cg_checkpoint: str | None = None,
         for k in ('hidden_dims', 'dropout', 'n_cross_features', 'n_wide_normalized',
                   'item_id_emb_dim', 'item_genre_emb_dim', 'item_tag_emb_dim',
                   'developer_emb_dim', 'year_emb_dim', 'price_emb_dim',
-                  'user_genre_emb_dim', 'user_tag_emb_dim',
-                  'item_tag_hidden', 'user_tag_hidden', 'user_genre_hidden',
+                  'user_genre_emb_dim', 'user_tag_emb_dim', 'text_emb_dim',
+                  'item_tag_hidden', 'user_tag_hidden', 'user_genre_hidden', 'item_text_hidden',
                   'popularity_alpha'):
             if k in saved:
                 cfg[k] = saved[k]
@@ -245,18 +281,31 @@ def run_canary(cg_checkpoint: str | None = None,
     emit('')
 
     for user_type in canaries:
-        if user_type not in USER_TYPE_TO_FAVORITE_GAMES:
+        is_nick = (user_type == NICK_CANARY)
+        if not is_nick and user_type not in USER_TYPE_TO_FAVORITE_GAMES:
             print(f"[skip] unknown canary: {user_type}")
             continue
 
-        # ── 1. CG retrieval ──────────────────────────────────────────────────
-        with torch.no_grad():
-            user_emb  = _build_user_embedding(cg, fs, user_type)               # (1, output_dim)
-            cg_scores = (V_all @ user_emb.T).squeeze(-1)                       # (n_items,)
+        # ── 1. CG retrieval user-emb + ranker user inputs ────────────────────
+        if is_nick:
+            # Real-user profile: CG retrieval from real playtime pools; ranker side from
+            # the flat-weighted liked pool (same split Streamlit's Examples tab uses).
+            with torch.no_grad():
+                user_emb = _build_nick_embedding(cg, fs)                       # (1, output_dim)
+            ui, played_titles, full_ids, full_pw, full_raw_pw = \
+                _build_nick_user_inputs(fs, pad_idx)
+            anchor_titles, dis_titles = [], []
+            exclude_titles = set(played_titles)        # exclude ALL of Nick's played games
+            fav_titles     = played_titles[:15]        # display cap — most-played first
+        else:
+            with torch.no_grad():
+                user_emb = _build_user_embedding(cg, fs, user_type)            # (1, output_dim)
+            ui, fav_titles, anchor_titles, dis_titles, full_ids, full_pw, full_raw_pw = \
+                _build_synthetic_user_inputs(fs, user_type, pad_idx)
+            exclude_titles = set(fav_titles) | set(anchor_titles) | set(dis_titles)
 
-        ui, fav_titles, anchor_titles, dis_titles, full_ids, full_pw, full_raw_pw = \
-            _build_synthetic_user_inputs(fs, user_type, pad_idx)
-        exclude_titles = set(fav_titles) | set(anchor_titles) | set(dis_titles)
+        with torch.no_grad():
+            cg_scores = (V_all @ user_emb.T).squeeze(-1)                       # (n_items,)
 
         # Take top-K by CG score, excluding seed titles.
         sorted_cg = torch.argsort(cg_scores, descending=True).tolist()

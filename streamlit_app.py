@@ -165,6 +165,10 @@ def _load_ranker(fs: dict):
     afs = dict(fs)
     afs['game_tag_matrix']   = fs['game_tag_matrix'][:n_items].numpy()
     afs['game_genre_matrix'] = fs['game_genre_matrix'][:n_items].numpy()
+    # game_text_matrix (V6a) is stored padded for the CG too — strip the pad row so
+    # _buffers_from_fs re-pads + derives the _l2 variant for the item_text_tower /
+    # text_cosine cross feature.
+    afs['game_text_matrix']  = fs['game_text_matrix'][:n_items].numpy()
 
     ranker = build_ranker(cfg, afs)
     ranker.load_state_dict(torch.load('serving/ranker.pth', weights_only=True, map_location='cpu'))

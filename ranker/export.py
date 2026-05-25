@@ -39,8 +39,8 @@ _RANKER_CONFIG_KEYS = (
     'hidden_dims', 'dropout', 'n_cross_features', 'n_wide_normalized',
     'item_id_emb_dim', 'item_genre_emb_dim', 'item_tag_emb_dim',
     'developer_emb_dim', 'year_emb_dim', 'price_emb_dim',
-    'user_genre_emb_dim', 'user_tag_emb_dim',
-    'item_tag_hidden', 'user_tag_hidden', 'user_genre_hidden',
+    'user_genre_emb_dim', 'user_tag_emb_dim', 'text_emb_dim',
+    'item_tag_hidden', 'user_tag_hidden', 'user_genre_hidden', 'item_text_hidden',
     'popularity_alpha',
 )
 
