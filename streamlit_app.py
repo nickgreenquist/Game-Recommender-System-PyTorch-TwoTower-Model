@@ -671,7 +671,7 @@ def tab_recommend(model, fs, all_ids, all_embs, ranker=None):
 def tab_similar(be, fs, all_ids, all_norm):
     st.caption(
         "Each game is represented by a single combined embedding — the concatenation of "
-        "its genre, tag, game-ID, developer, year, and price towers. "
+        "its genre, tag, game-ID, developer, year, price, and store-description text towers. "
         "This tab ranks all games by cosine similarity to your selected seed."
     )
     all_titles   = fs['popularity_ordered_titles']
