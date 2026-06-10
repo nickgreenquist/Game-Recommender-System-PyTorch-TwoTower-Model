@@ -885,8 +885,11 @@ def tab_examples(model, fs, all_ids, all_embs, ranker=None):
 # ── Tab: About ───────────────────────────────────────────────────────────────
 
 def tab_about():
-    col, _ = st.columns([1, 1])
-    with col:
+    # Single centered readable-width column. width caps at the parent width on
+    # narrow screens, so this is full-width on mobile and ~75 chars/line on
+    # desktop — unlike the old st.columns([1, 1]) hack, which scaled with
+    # monitor width. The outer container centers the fixed-width inner one.
+    with st.container(horizontal_alignment="center"), st.container(width=760, key="about"):
         st.header("What is this?")
         st.markdown(
             "A **two-stage game recommender** trained on the "
@@ -941,8 +944,6 @@ def tab_about():
         )
         st.markdown("No retraining required. No cold-start problem at the user level. The same trained model works for users who never existed when the model was trained.")
 
-    col, _ = st.columns([1, 1])
-    with col:
         st.header("Stage 1: Two-Tower Retrieval")
         st.markdown(
             "The first stage is a two-tower model — a **user tower** and an **item tower** that each project into the "
@@ -1189,7 +1190,11 @@ MRR: **0.0875** (random: 0.0017, +51×)
 st.set_page_config(page_title="Steam Game Recommender", layout="wide")
 st.markdown("""
     <style>
-    div[data-testid="stTabs"] > div:first-child {
+    /* Keep the tab bar on one horizontally-scrollable line on mobile.
+       Scope to the baseweb tab-list only — `stTabs > div:first-child` wraps the
+       tab panels too in newer Streamlit, leaking white-space:nowrap into all
+       tab content (unwrappable paragraphs running off-screen). */
+    div[data-testid="stTabs"] div[data-baseweb="tab-list"] {
         overflow-x: auto;
         white-space: nowrap;
         flex-wrap: nowrap;
@@ -1199,6 +1204,20 @@ st.markdown("""
     div[data-testid="stCaptionContainer"] p {
         word-break: break-word;
         white-space: normal;
+    }
+    /* About tab tables: fill the readable column on desktop; on phones, wide
+       tables cap at 560px and scroll inside the markdown wrapper (instead of
+       crushing prose columns into tall slivers), narrow numeric tables just
+       fill the screen. */
+    .st-key-about div[data-testid="stMarkdownContainer"] { overflow-x: auto; }
+    .st-key-about table { display: table; width: 100%; }
+    @media (max-width: 640px) {
+        .st-key-about table {
+            font-size: 0.8rem;
+            width: max-content;
+            min-width: 100%;
+            max-width: 560px;
+        }
     }
     a.cover-link { transition: filter .15s ease, transform .15s ease; cursor: pointer; }
     a.cover-link:hover { filter: brightness(1.12); transform: scale(1.02); }
