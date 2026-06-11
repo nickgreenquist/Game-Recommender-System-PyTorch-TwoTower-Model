@@ -1,441 +1,157 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code working in this repo. **The ranker subsystem under `ranker/` has its own guide at `ranker/CLAUDE.md` — read it before working there.** This file covers the CG model and `src/`.
 
 ## Project Overview
 
-A PyTorch Two-Tower neural network recommender system trained on the Steam dataset. The model predicts game preferences via dot product of user and item embeddings.
+A PyTorch Two-Tower recommender trained on the UCSD Steam dataset (McAuley lab). Predicts game preferences via dot product of user and item embeddings.
 
-**Two-stage serving.** This is a two-stage recommender: the two-tower model is the candidate-generation (CG) / retrieval stage documented in this file, and a **Wide & Deep ranker** (in `ranker/`) reranks its top-100 candidates. Streamlit and the canary both run the full two-stage pipeline (raw α=0 CG retrieval → ranker rerank). This CLAUDE.md covers the CG model and `src/`; **the ranker subsystem has its own guide at `ranker/CLAUDE.md`** — read it before working anywhere under `ranker/`.
+**Two-stage serving.** The two-tower model is the candidate-generation (CG) / retrieval stage documented here; a **Wide & Deep ranker** (`ranker/`) reranks its top-100. Streamlit and the canary run the full pipeline: raw α=0 CG retrieval → ranker rerank.
 
-This is a sibling project to:
-- `/Users/nickgreenquist/Documents/Movie-Recommender-System-PyTorch-TwoTower-Model` — MovieLens, MSE objective
-- `/Users/nickgreenquist/Documents/Book-Recommender-System-PyTorch-TwoTower-Model` — Goodreads, softmax objective (primary reference)
+**No user ID embedding.** Users are represented entirely by taste signals: four behavior-partitioned play-history pools (Liked, Disliked, Full, Playtime-weighted Full) + rolling genre and tag affinity. Any user can be represented at inference from just a few games — no retraining.
 
-The architecture follows the same two-tower design as the book model. The book model is the primary reference — it uses the softmax objective (3× better than MSE), and adds a domain-specific embedding tower (author) not present in the movie model. Here, the analogous addition is a **developer embedding tower**.
+**Rating signal: playtime hours.** Steam has no star ratings. `playtime_forever` (minutes → hours, `log(1+hours)` for weighting) is the implicit feedback signal; the review `recommend` boolean is supplementary explicit feedback. Playtime is the primary training signal but is never a prediction target.
 
-**Critical design choice: no user ID embedding.** Users are represented entirely by their taste signals: four behavior-partitioned play history pools (Liked, Disliked, Full, Playtime-weighted Full), rolling genre affinity, and rolling tag affinity. Any user can be represented at inference time with just a few games they've played — no retraining required.
-
-**Rating signal: playtime hours.** Steam does not have star ratings. The `playtime_forever` field (total hours played per game, from `australian_user_items.json`) serves as the implicit feedback signal. Playtime is a strong preference proxy — a user who played 500 hours loves that game. Reviews provide a binary `recommend` signal as supplementary explicit feedback. The primary training signal is playtime.
+Sibling projects (same two-tower design): `../Movie-Recommender-System-PyTorch-TwoTower-Model` (MovieLens, MSE) and `../Book-Recommender-System-PyTorch-TwoTower-Model` (Goodreads, softmax — **primary reference**). The book model's author tower maps to a **developer tower** here.
 
 ## Running the Code
 
 ```bash
-python main.py preprocess games          # Step 1: filter games → data/base_games.parquet
-python main.py preprocess interactions   # Step 2: process user items → remaining parquets
-python main.py preprocess                # Run both steps in order
-python main.py features                  # Stage 2: base parquets → data/features_*.parquet
-python main.py dataset                   # Stage 3: features → data/dataset_*_v1.pt
-python main.py train                     # Stage 4: train, save checkpoints (softmax)
-python main.py canary                    # Canary user recommendations (most recent checkpoint)
-python main.py canary <path>             # Canary user recommendations (specific checkpoint)
-python main.py probe                     # Embedding probes (most recent checkpoint)
-python main.py probe <path>              # Embedding probes (specific checkpoint)
-python main.py eval                      # Offline eval: Recall@K, NDCG@K, Hit Rate@K, MRR
-python main.py eval <path>               # Same, specific checkpoint
-python main.py export                    # Export serving artifacts for Streamlit
-python main.py export <path>             # Export using specific checkpoint
-python main.py                           # Run all stages in order
+python main.py preprocess games          # filter games → data/base_games.parquet
+python main.py preprocess interactions   # process user items → remaining parquets
+python main.py preprocess                # both steps in order
+python main.py features                  # base parquets → data/features_*.parquet
+python main.py dataset                   # features → data/dataset_*_v1.pt
+python main.py train                     # train, save checkpoints (softmax)
+python main.py canary [path]             # canary user recs (latest or specific checkpoint)
+python main.py probe  [path]             # embedding probes
+python main.py eval   [path]             # offline eval: Recall@K, NDCG@K, Hit Rate@K, MRR
+python main.py export [path]             # export serving artifacts for Streamlit
+python main.py                           # all stages in order
 ```
+
+`streamlit run streamlit_app.py` — tabs: **Recommend** (pick games → α=0 CG top-100; ⚡ Apply Ranker reranks side-by-side with rank-delta badges, degrades to CG-only if `serving/ranker.pth` absent), **Similar** / **Genres** / **Tags** (cosine-nearest in the respective embedding space). Steam covers fetched live from `cdn.cloudflare.steamstatic.com`.
 
 ## Dataset
 
-Raw data lives in `data/` (not in git). All files are gzipped JSONL. This project uses the UCSD Steam dataset (McAuley lab). Required files:
-
-- `australian_users_items.json.gz` (**primary**) — 88,310 users: `user_id, items_count, steam_id, user_url, items[{item_id, item_name, playtime_forever, playtime_2weeks}]`
-- `australian_user_reviews.json.gz` (**supplementary**) — 25,799 users: `user_id, user_url, reviews[{item_id, recommend, review, posted, helpful, funny}]`
-- `steam_games.json.gz` (**item metadata**) — 32,135 games: `id, app_name, title, genres, tags, developer, publisher, release_date, price, discount_price, early_access, sentiment`
-
-**Not used: `steam_reviews.json.gz`** — 7.8M individual V2 review records. Has `hours` and `text` but no `recommend` boolean, no stable `user_id` (uses `username`), and records are not grouped by user. Gives us nothing the other three files don't already provide better.
+Raw gzipped-JSONL files live in `data/` (not in git). UCSD Steam dataset:
+- `australian_users_items.json.gz` (**primary**, 88,310 users) — `items[{item_id, playtime_forever, playtime_2weeks}]`
+- `australian_user_reviews.json.gz` (**supplementary**, 25,799 users) — `reviews[{item_id, recommend, posted, ...}]`
+- `steam_games.json.gz` (**item metadata**, 32,135 games) — `id, app_name, genres, tags, developer, publisher, release_date, price, sentiment`
+- **Not used:** `steam_reviews.json.gz` — no `recommend` boolean, no stable `user_id`, not grouped by user.
 
 ### Filtering thresholds
 
 ```python
-MIN_INTERACTIONS_PER_GAME    = 10      # minimum users who have played the game
-MIN_PLAYTIME_PER_USER        = 5       # minimum total hours played (across corpus games)
-MAX_PLAYTIME_PER_USER        = 10_000  # cap on total hours (removes bots/outliers)
-MIN_HOURS_PER_GAME           = 0.1     # minimum hours for a single game to count as an interaction
-MIN_TAG_COUNT                = 50      # tag must appear in this many corpus games
-MAX_ROLLBACK_EXAMPLES_PER_USER = 50   # rollback cap per user (see note below)
+MIN_INTERACTIONS_PER_GAME       = 10      # users who played the game (100→10 ~triples corpus, near-free)
+MIN_PLAYTIME_PER_USER           = 5       # min total hours
+MAX_PLAYTIME_PER_USER           = 10_000  # cap (removes bots/outliers)
+MIN_HOURS_PER_GAME              = 0.1     # min hours for a single game to count
+MIN_TAG_COUNT                   = 50      # tag must appear in this many corpus games
+MAX_ROLLBACK_EXAMPLES_PER_USER  = 50      # cap per user (small dataset; hour ceiling handles power users)
 ```
 
-Games below `MIN_INTERACTIONS_PER_GAME` are filtered out entirely. Users outside the playtime bounds are dropped.
+**Valve DENYLIST:** `{'730','550','620','240','4000'}` (CS:GO, L4D2, Portal, Counter-Strike, Garry's Mod) are hard-filtered in `preprocess.py` Pass 1 regardless of count — they appeared in nearly every history, were trivial prediction targets that inflated Recall@K and polluted cross-genre recs.
 
-**Valve DENYLIST:** Five ultra-popular titles are hard-filtered from the corpus regardless of interaction count: `{'730', '550', '620', '240', '4000'}` (CS:GO, Left 4 Dead 2, Portal, Counter-Strike, Garry's Mod). These appeared in nearly every user's history and were trivially easy prediction targets that inflated Recall@K metrics and polluted cross-genre recommendations. Removed in `preprocess.py` Pass 1.
+**N_SHUFFLES=3:** `_build_rollback_dataset` runs 3× per user with independent seeded shuffles → ~4.3M training examples, each yielding different (context, target) pairs at varied context lengths. **Val and offline eval always use n_shuffles=1** so metrics aren't inflated by repeated targets.
 
-**Why MIN_INTERACTIONS_PER_GAME=10 (not 100):** Lowering to 10 nearly triples the recommendation corpus (6,258 games vs 2,509) with almost no cost — rollback examples change by less than 1,000. Games with few interactions have undertrained ID embeddings but their content towers (tags, genres, developer) still give them a reasonable representation.
+**Quality label filter:** target games need `hours > 0.5`. Low-playtime interactions stay in history pools as signal but are never targets.
 
-**Why MAX_ROLLBACK_EXAMPLES_PER_USER=50 (not 10):** This dataset is much smaller than Goodreads — 66k users vs 229k, producing only ~575k rollback examples at cap=10 vs Goodreads' 4.7M. Cap=50 brings us to ~1.4M examples per shuffle pass; with N_SHUFFLES=3 this yields ~4.3M training examples. The YouTube DNN paper caps to prevent power users from dominating — that concern is already handled by the hour ceiling here.
+### Preprocessing pipeline (two steps)
 
-**N_SHUFFLES=3:** Training data is augmented by running `_build_rollback_dataset` 3× per user with independent random shuffles of each user's history. Each shuffle produces genuinely different (context, target) pairs while preserving varied context lengths (early rollback positions still have 1–2 game contexts). Val and offline eval always use `n_shuffles=1` — a single clean pass per user so metrics are not inflated by repeated targets.
-
-**Quality label filter:** Target games must have `hours > 0.5`. Low-quality interactions (very short playtime) stay in the history pools as signal but are never training targets.
-
-### Preprocessing pipeline
-
-Two separate steps — run `preprocess games` first to inspect corpus size, then `preprocess interactions`.
-
-**Step 1 (`preprocess games`)** — reads `steam_games.json.gz`, filters by interaction count (requires a first pass over user items to count per-game interactions), collects game metadata (genres, tags, developer, publisher, release year, price). Also computes **global per-game median playtime** (stored as `median_hours` in `base_games.parquet`) — used by `dataset.py` for Liked/Disliked pool partitioning. Writes `base_games.parquet` and `base_game_tags.parquet`.
-
-**Step 2 (`preprocess interactions`)** — processes `australian_users_items.json.gz`:
-- Only keeps items with `playtime_forever >= MIN_HOURS_PER_GAME * 60` (playtime stored in minutes)
-- Filters to corpus games only
-- Counts valid playtime per user → builds `valid_users`
-- Collects interactions for valid users
-- Joins `recommend` signal and `posted` date from `australian_user_reviews.json.gz` where available
-- **User play history order is not sorted** — `australian_users_items.json.gz` contains no buy date, install date, or first-play timestamp per game. item_id order (Steam app ID ≈ release date) is a spurious proxy that biases targets toward newer games. History is left in ingestion order; `dataset.py` shuffles each user's history with a seeded RNG before building rollback examples, so rollback simulates "given a random subset of games this user plays, predict another" rather than "predict newer releases."
-
-**Playtime normalization:** Raw `playtime_forever` is in minutes. Convert to hours. Apply log transform for rating weighting: `log(1 + hours)` — compresses the extreme tail (10,000-hour outliers) while preserving order.
+- **Step 1 `preprocess games`** — reads `steam_games.json.gz`, filters by interaction count (first pass over user items to count), collects metadata, computes **global per-game median playtime** (`median_hours` in `base_games.parquet`, used for Liked/Disliked partitioning). Writes `base_games.parquet`, `base_game_tags.parquet`.
+- **Step 2 `preprocess interactions`** — processes user items (keep `playtime ≥ MIN_HOURS_PER_GAME*60`, corpus games only), joins `recommend`/`posted` from reviews. **History is NOT sorted** — Steam has no per-game timestamp; item_id order ≈ release date is a spurious newer-game bias. `dataset.py` shuffles each user's history with a seeded RNG, so rollback = "given a random subset, predict another."
 
 ### Tag signals
 
-Steam community tags (`tags` field in `steam_games.json.gz`) are granular user-applied labels (e.g. `Roguelike`, `Co-op`, `Open World`, `Dark Souls-like`). Functionally identical to Goodreads shelves. The field is a plain ordered list — no per-tag counts are provided.
-
-**Tag weighting:** Since `steam_games.json.gz` gives only a list (not counts), we treat list position as an implicit relevance signal. Tags listed first are most commonly applied. Weight by inverse position: `weight = 1 / (position + 1)`, then normalize per game. IDF is computed from corpus frequency (how many games carry each tag). TF-IDF = `(positional_weight) * log(N / df)`.
-
-- Only tags appearing `>= MIN_TAG_COUNT` times across corpus games are kept
-- Stored in `base_game_tags.parquet`
-
-## Key Differences from Book/Movie Models
-
-| Concept            | MovieLens                              | Goodreads                                    | Steam                                                         |
-|--------------------|----------------------------------------|----------------------------------------------|---------------------------------------------------------------|
-| Item ID column     | movieId                                | book_id                                      | item_id (app_id)                                              |
-| User ID column     | userId                                 | user_id                                      | user_id                                                       |
-| Rating signal      | 0.5–5.0 star ratings                   | 1–5 integer ratings                          | `playtime_forever` (minutes) — log-transformed to hours       |
-| Explicit feedback  | Star rating                            | Star rating                                  | `recommend` boolean (supplementary)                           |
-| Timestamp          | Unix timestamp int                     | `read_at` → `date_updated` → `date_added`    | Not available in user_items — omit or use review `posted`     |
-| Year               | Parsed from title (YYYY) regex         | `publication_year` field                     | Parsed from `release_date` string                             |
-| Genres             | Pipe-separated string                  | Curated label dict (vote counts)             | `genres` list — broad labels (Action, RPG, Strategy…)         |
-| Tags               | Genome scores (dense ML)               | `popular_shelves` (sparse user counts)       | `tags` list (ordered, no counts) — IDF from corpus frequency  |
-| Domain tower       | None                                   | Author embedding                             | Developer embedding                                           |
-| Price              | Not available                          | Not available                                | `price` field — bucketed into embedding                       |
+Steam community `tags` are an ordered list, no counts. Treat list position as relevance: `weight = 1/(position+1)`, normalized per game; TF-IDF = `positional_weight * log(N/df)`. Only tags with `≥ MIN_TAG_COUNT` corpus occurrences are kept, stored in `base_game_tags.parquet`.
 
 ## Model Architecture
 
-Two-tower design with dot product prediction. V2 adds triple history pools, a user tag tower, and shallow sum pooling. A 4th playtime-weighted pool captures intensity of preference beyond the binary liked/disliked split.
+Two-tower, dot-product prediction. Both towers end in `F.normalize` (cosine sim consistently at train + inference). Only `item_id_embedding_size=32` (shared) and `output_dim=128` must match across towers.
 
 ```
-User Tower:
-  liked_pool:    sum(item_id_emb[liked_ids])                              → 32-dim
-  disliked_pool: sum(item_id_emb[disliked_ids])                          → 32-dim
-  full_pool:     sum(item_id_emb[full_ids])                              → 32-dim
-  playtime_pool: sum(item_id_emb[full_ids] * w) where w=log(1+h)/Σlog(1+h) → 32-dim
-  user_genre_tower([debiased_avg_log | play_frac]) → genre_emb           (32-dim)
-  user_tag_tower(rolling_tag_sum)                  → tag_emb             (32-dim)
-  concat → 192-dim
-  user_projection(Linear 256 → ReLU → Linear 128) → 128-dim
+User Tower (concat 192 → proj 256→ReLU→128):
+  liked / disliked / full / playtime-weighted pools — each sum(item_id_emb[ids])   4×32
+  user_genre_tower([debiased_avg_log | play_frac])                                  32
+  user_tag_tower(rolling_tag_sum)                                                   32
 
-Item Tower (V6a):
-  item_genre_tower(genre_onehot)          → item_genre_emb   (item_genre_embedding_size=8)
-  item_tag_tower(tfidf_tag_scores)        → item_tag_emb     (tag_embedding_size=32)
-  item_embedding_tower(item_id)           → item_emb         (item_id_embedding_size=32)
-  developer_tower(developer_idx)          → item_dev_emb     (developer_embedding_size=12)
-  year_embedding_tower(release_year)      → year_emb         (item_year_embedding_size=8)
-  price_embedding_tower(price_bucket)     → price_emb        (price_embedding_size=4)
-  item_text_tower(text_emb_768)           → item_text_emb    (text_embedding_size=32)
-  concat → 128-dim
-  item_projection(Linear 256 → ReLU → Linear 128) → 128-dim
+Item Tower (V6a, concat 128 → proj 256→ReLU→128):
+  item_genre_tower(genre_onehot)      8     developer_tower(dev_idx)       12
+  item_tag_tower(tfidf)              32     year_embedding_tower            8
+  item_embedding_tower(item_id)      32     price_embedding_tower           4
+  item_text_tower(text_emb_768)      32 (V6a)
 
-Prediction: dot_product(user_projection_out, item_projection_out)
+Prediction: dot(user_proj, item_proj)
 ```
 
-**Item text tower (V6a, item-side only):** Each game's store description (`short_description` + `about_the_game`, fetched offline from the Steam Storefront API) is encoded ONCE by a frozen sentence model (`BAAI/bge-base-en-v1.5`, 768-d) into `data/base_game_text_emb.parquet`. At train/serve time the frozen vector is a registered buffer lookup (`game_text_matrix`) → L2-norm → a trainable adapter (`item_text_tower`: 768→128→32) into the item concat. The encoder NEVER runs at train or inference — only corpus games are scored, and their vectors are precomputed. Gated by `use_item_text` (False reproduces the V5 96-d item tower exactly). Offline-flat for CG (item-side-only text has no direct text-vs-text path in a dot product) but kept — the `game_text_matrix` artifact is shared into `feature_store.pt` for a future ranker text bucket. **A user-history text pool (V6b) was tested and dropped** — it regressed offline uniformly (the mean text-centroid blurs eclectic taste and dilutes the id-history pools). The shared `game_text_matrix` artifact is consumed by the ranker's `item_text_tower` + `text_cosine` cross feature — see `ranker/CLAUDE.md`.
+**Shallow history pooling:** user pools sum the raw shared 32-dim `item_embedding_lookup` directly — they do NOT pass through the item tower. No LayerNorm after pooling (the projection MLP learns the scale; industry standard).
 
-**Shallow history pooling:** User history pools sum raw 32-dim `item_id` embeddings directly — they do NOT pass through the full item tower. This decouples user history from item tower capacity and is faster. No LayerNorm after pooling — industry standard (YouTube DNN, TikTok); the projection MLP learns the right scale.
+**Four pools** (per rollback position in `dataset.py`; an item can be in both Liked and Disliked):
+- **Liked:** `recommend==True` OR `hours ≥ game_median` OR `hours ≥ user_rolling_median×2`
+- **Disliked:** `recommend==False` OR `0.1 < hours < 1.0` OR `hours ≤ user_rolling_median/2`
+- **Full:** all context items (most recent MAX_HISTORY_LEN=50), equal-weight sum
+- **Playtime-weighted Full:** same items, weight `log(1+hours)` normalized by context total
 
-**Four pool partitioning** (computed per rollback position in `dataset.py`):
-- **Liked:** `recommend==True` OR `hours >= game_median` OR `hours >= user_rolling_median × 2`
-- **Disliked:** `recommend==False` OR `(0.1 < hours < 1.0)` OR `hours <= user_rolling_median / 2`
-- **Full:** all context items (most recent MAX_HISTORY_LEN=50) — equal-weight sum pool
-- **Playtime-weighted Full:** same items as Full; weighted sum where each item's weight is `log(1+hours)` normalized by the context total — captures intensity of engagement beyond the binary liked/disliked split
+`game_median` is the global per-game median (`base_games.parquet`); `user_rolling_median` is computed at each rollback step from context-so-far.
 
-Items can appear in both Liked and Disliked simultaneously. `game_median` is the global per-game median playtime (computed in `preprocess.py` Pass 1 and stored in `base_games.parquet`); `user_rolling_median` is computed at each rollback step from context hours so far.
+**In-model genre/tag context (V3):** computed inside `user_embedding()` from `game_genre_matrix` / `game_tag_matrix` registered buffers using `X_hist_full` indices. `dataset.py` only supplies `X_user_avg_log` (per-user avg log-playtime scalar, for in-model genre debiasing). These two buffers + `game_text_matrix` are excluded from `model.pth` and stored in `feature_store.pt`.
 
-**In-model genre/tag context (V3):** Genre and tag context are computed inside `user_embedding()` from `game_genre_matrix` and `game_tag_matrix` registered buffers using the `X_hist_full` indices. `dataset.py` no longer computes rolling genre/tag context — it only provides `X_user_avg_log` (per-user average log playtime scalar, used for genre debiasing inside the model). `features.py` similarly no longer builds the per-user genre context matrix.
+**Item text tower (V6a, item-side only):** each game's store description (`short_description` + `about_the_game`, fetched offline from the Steam Storefront API) is encoded ONCE by frozen `BAAI/bge-base-en-v1.5` (768-d) into `data/base_game_text_emb.parquet`. At train/serve it's a buffer lookup (`game_text_matrix`) → L2-norm → trainable adapter `item_text_tower` (768→128→32). The encoder never runs at train/inference. Gated by `use_item_text`. **Offline-flat for CG** (item-side-only text has no text-vs-text path in a dot product) but kept — `game_text_matrix` is shared into `feature_store.pt` and consumed by the ranker's `item_text_tower` + `text_cosine` cross feature. A user-history text pool (V6b) was tested and **dropped** (regressed offline).
 
-**`user_embedding()` signature (V3):**
-```python
-def user_embedding(self, X_user_avg_log,   # (B, 1)  per-user avg log-playtime
-                   X_hist_liked,            # (B, MAX_HISTORY_LEN) pre-padded int64
-                   X_hist_disliked,         # (B, MAX_HISTORY_LEN) pre-padded int64
-                   X_hist_full,             # (B, MAX_HISTORY_LEN) pre-padded int64
-                   X_hist_playtime_weights) # (B, MAX_HISTORY_LEN) pre-padded float32
-```
+**Why the projection MLP:** a plain concat into a dot product only learns additive combinations; the 2-layer MLP models interactions (e.g. "RPGs from Japanese devs"). **Init:** sub-tower linears `gain=0.1`, projections `gain=1.0`, embeddings `gain=0.01` (gain=0.01 on projections vanishes gradients).
 
-**`item_embedding()` signature (V3):**
-```python
-def item_embedding(self, target_year_idx, target_game_idx, target_dev_idx, target_price)
-# genre looked up internally: self.game_genre_matrix[target_game_idx]
-```
-
-**Registered buffers on model:** `game_tag_matrix` (n_games+1, n_tags) and `game_genre_matrix` (n_games+1, n_genres). Both excluded from `model.pth` and stored in `feature_store.pt`.
-
-**Why the projection MLP is required:** A plain concat fed directly into a dot product can only learn additive combinations. Nonlinearity is needed to model interactions (e.g. "RPGs from Japanese developers", "price sensitivity varies by history depth"). Each tower passes its concat through a 2-layer MLP. Only `output_dim=128` must match across towers.
-
-**Initialization:** Sub-tower linear layers use `gain=0.1`. Projection layers re-initialized to `gain=1.0`. Embedding tables use `gain=0.01`. Using `gain=0.01` for projections causes vanishing gradients — the projection layers go on top of already-small sub-tower outputs.
-
-### Shared embedding
-
-- `item_embedding_lookup` (32-dim) — shared between the item tower and all four user history pools. Only the raw lookup is shared; the user pools sum/average it directly, while the item tower passes it through `item_embedding_tower` (Linear 32→32 → ReLU).
-
-### Embedding sizes
-
-```python
-item_id_embedding_size      = 32   # shared: all 4 user history pools + item tower
-user_genre_embedding_size   = 32   # user only
-user_tag_embedding_size     = 32   # user only
-item_genre_embedding_size   = 8    # item only
-tag_embedding_size          = 32   # item only (was 16 in V1 — increased, tags are rich signal)
-developer_embedding_size    = 12   # item only
-item_year_embedding_size    = 8    # item only
-price_embedding_size        = 4    # item only
-text_embedding_size         = 32   # item only (V6a item_text_tower output; text_input_dim=768)
-
-proj_hidden  = 256
-output_dim   = 128   # only this must match across towers
-
-# user concat: 32+32+32+32 (pools) + 32 (genre) + 32 (tag) = 192 → proj → 128
-# item concat: 8+32+32+12+8+4 + 32 (text, V6a) = 128 → proj → 128
-```
-
-Only `item_id_embedding_size` and `output_dim` are constrained across towers.
-
-### Developer tower details
-
-- One developer embedding per game (primary developer only for multi-developer games)
-- `nn.Embedding(n_developers + 1, developer_embedding_size)` with padding index = `n_developers`
-- Developer index 0 = `__unknown__`
-- Developer signal lives on the **item side only** (same decision as author in book model)
-
-### Price tower details
-
-- `original_price` is a float (dollars). Bucket into ~10 price bins: Free, <$5, $5–$10, $10–$20, $20–$30, $30–$40, $40–$60, >$60, Unknown.
-- `nn.Embedding(n_price_buckets, price_embedding_size)`
-- Price is a real content signal for games — free-to-play vs. premium vs. AAA is a meaningful taste dimension.
+**Developer tower:** primary developer only; `nn.Embedding(n_developers+1, 12)`, padding idx `n_developers`, idx 0 = `__unknown__`. Item-side only. **Price tower:** `original_price` bucketed into ~10 bins (Free, <$5, …, >$60, Unknown) → `nn.Embedding(n_buckets, 4)`.
 
 ## Training Details
 
-**What the model predicts:** "Given a random subset of this user's play history, which game do they also play?" — a ranking problem, not a regression. Playtime is never a prediction target.
+Predicts "given a random subset of play history, which game do they also play?" — a ranking problem. **Full softmax over the entire ~5,437-game corpus** (Valve DENYLIST applied; corpus small enough to score all items exactly — no ANN, no separate ranking stage needed for CG).
 
-**Playtime role in V3:** Playtime is used to partition history into Liked/Disliked pools and to build the playtime-weighted Full pool. It is also used as the per-user avg_log scalar passed to `user_embedding()` for in-model genre debiasing. Playtime does not appear in the loss or item tower.
+- **Loss:** cross-entropy over all items. **Optimizer:** Adam `lr=0.001, weight_decay=0.0, eps=1e-6`. **Scheduler:** CosineAnnealingLR `T_max=50_000, eta_min=1e-4`. **Grad clip:** `max_norm=1.0`. **Batch:** 512. **Temperature:** `0.5/batch = 0.000977`. **Steps:** 50,000.
+- **Val eval:** fixed 8,192 examples sampled once at start (same indices every log step, comparable across steps).
+- **Checkpoint selection (2026-05-25):** best on **val NDCG@10**, not val CE (CE keeps falling via confidence calibration after ranks plateau). `val_loss` still logged as a diagnostic.
 
-**Note on YouTube DNN:** The YouTube paper predicts watch time, but that is their *ranking* model (stage 2), not the two-tower candidate generation model (stage 1) that we are replicating. Our corpus is ~5,400 games — small enough to score all items exactly at inference time with no ANN needed. A separate ranking stage is unnecessary.
-
-**Full softmax over entire corpus:**
-
-- **Loss**: cross-entropy over all ~5,437 items (Valve DENYLIST applied). Every step scores the full corpus.
-- **Dataset**: rollback examples with N_SHUFFLES=3 → ~4.3M training examples. 9-tuple of pre-padded tensors (no variable-length lists).
-- **Optimizer**: Adam, `lr=0.001`, `weight_decay=0.0`, `eps=1e-6`
-- **Scheduler**: CosineAnnealingLR, `T_max=50_000`, `eta_min=1e-4` (floor prevents LR going to zero)
-- **Gradient clipping**: `clip_grad_norm_(max_norm=1.0)` before each optimizer step
-- **Batch size**: 512
-- **Temperature**: `0.5 / minibatch_size = 0.000977`
-- **Steps**: 50,000
-- **Val eval**: fixed 8,192 val examples sampled once at run start — same indices every log step so val loss is comparable across steps (not a fresh random sample each time)
-- **Both towers use `F.normalize`** at the end of their projection MLPs — training and inference use cosine similarity consistently. The train/inference mismatch concern (from book model) does not apply here because normalization is applied in both settings.
-
-**Popularity logit adjustment — Menon et al. 2021, Path 2 (add at training, raw dot product at inference).**
-
-The training score formula is:
+**Popularity logit adjustment — Menon et al. 2021 Path 2 (add at training, raw dot product at inference):**
 ```python
-scores = (U @ V_all.T) / temperature + popularity_bias   # CORRECT (Menon Path 2)
+scores = (U @ V_all.T)/temperature + alpha*log1p(count)   # training (Menon Path 2)
+scores = user_emb @ item_embs.T                            # inference — no correction anywhere
 ```
+Adding the bias during training forces the model to learn preference *beyond* popularity, so popular items are naturally suppressed at inference. Temperature and alpha are read from the checkpoint config sidecar (`_config.json`) via `load_config_for_checkpoint()` — never hardcoded.
 
-Adding `alpha * log1p(count)` to popular items' logits during training forces the model to learn preference signals that exceed what popularity alone predicts. The trained dot products therefore represent "preference beyond popularity" — popular items are naturally suppressed at inference without any correction needed.
+**Alpha trade-off — α=0 wins offline, α=0.4 wins canary.** α=0 gives materially better offline metrics (+25% Recall@1) but worse canary on niche tastes (popular cross-genre titles leak in). **In the two-stage world (2026-05-23) both stages ship raw α=0** — the α=0 CG IS the deployed retrieval stage, the ranker reranks its top-100. A ranker-side α=0.2 penalty was tested and rejected (hurt offline ~27%, no better canary). No popularity penalty anywhere in the deployed pipeline. **α is the last knob: A/B new features at α=0, calibrate popularity last.**
 
-**Inference formula:**
-```python
-scores = user_emb @ item_embs.T   # raw dot products — no correction needed
-```
+## Evaluation
 
-`offline_eval.py` uses raw dot products. `evaluate.py` and `streamlit_app.py` (`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 0.0`) also use raw dot products. No inference correction is applied anywhere.
+**Canary** (`src/evaluate.py`): nine synthetic user types (Western RPG, JRPG, FPS, Civ, Indie, Racing, Fighting, Survival, Management Lover). Each has `USER_TYPE_TO_FAVORITE_GAMES` (seed weight 10.0) and `USER_TYPE_TO_TAGS` (5 anchor games/tag, weight 2.0); disliked dict currently empty. `POPULARITY_ALPHA_INFERENCE_MULTIPLE = 0.0` (raw dot products). All titles verified in corpus.
 
-**Current implementation uses `log1p(count)` with alpha=0.4.** Valve mega-popular titles (CS:GO, Garry's Mod, L4D2) are hard-filtered from the corpus via DENYLIST in `preprocess.py` (`{'730', '550', '620', '240', '4000'}`), so the popularity bias is only needed to suppress moderately popular games, not mega-popular ones.
+**Offline** (`python main.py eval [path]`): Recall@K, NDCG@K, Hit Rate@K, MRR at K=1,5,10,20,50,100, raw dot products. **Protocol:** user-level split — 90% train-only, 10% held out entirely (stricter cold-start test than a per-user split for a no-user-ID model; no leakage so no within-user cut needed). Val rollback examples generated fresh with `n_shuffles=1`; results → `eval_results/<stem>.txt`.
 
-**Alpha trade-off — α=0 wins offline, α=0.4 wins canary.** A CG checkpoint trained with `alpha=0.0` produces materially better offline metrics (+25% Recall@1, +15% MRR vs α=0.4 — see Offline Evaluation) but materially worse canary quality on niche tastes: popular cross-genre titles leak into specialized lists (Half-Life series invading an arena-FPS canary, popular Paradox strategy invading a 4X-Civ canary, popular shooters invading a Survival canary). This is the popularity correction working as designed — α=0.4 deliberately suppresses globally popular items at training time to force the model onto preference signals, and pays for that with offline metrics that reward retrieving easy popular hits. Prod uses α=0.4 because canary quality on niche tastes is what users notice; the α=0 CG also serves as the offline-metrics baseline for ranker comparisons (see `ranker/CLAUDE.md`, §2 "Fair-α rule").
+**V6a DEPLOYED** (item text, α=0, NDCG@10-selected — served retrieval stage as of 2026-05-25):
 
-**Superseded by the two-stage serving architecture (2026-05-23):** the α=0 CG is no longer a throwaway. In the ranker-serving world it IS the deployed retrieval stage — raw α=0 CG retrieves the top-100, and the ranker reranks them. The standalone α=0.4-CG-only Streamlit experience was the pre-ranker compromise. A ranker-side popularity penalty (α=0.2) was tested 2026-05-23 and rejected (hurt offline ~27%, no meaningfully better canary), so **both stages ship raw α=0** — no popularity penalty anywhere in the deployed pipeline. See "Serving / Export Notes" and `ranker/CLAUDE.md` §10 rule 10.
+| K | 1 | 5 | 10 | 20 | 50 | 100 |
+|---|---|---|---|---|---|---|
+| Recall | 0.0279 | 0.0875 | 0.1444 | 0.2299 | 0.3968 | 0.5575 |
+| NDCG   | 0.0279 | 0.0576 | 0.0758 | 0.0972 | 0.1302 | 0.1562 |
 
-Temperature and alpha must be read from the checkpoint's config sidecar (`_config.json`) via `load_config_for_checkpoint()`, not hardcoded.
+MRR 0.0704 (random ≈ 0.0017). Flat vs the no-text α=0 baseline (every Δ ≤ .0014) — text adds no CG lift but is kept for ranker reuse. **Use this α=0 row (not the α=0.4 prod CG) as the offline yardstick for ranker comparisons.**
 
-**Timestamp:** Steam `australian_user_items.json` does not include timestamps per game interaction. Timestamp tower omitted. The review `posted` date is available but only for reviewed games — too sparse.
+## Serving / Export
 
-## Canary Users for Eval
+Registered buffers (`game_tag_matrix`, `game_genre_matrix`, `game_text_matrix`) and `game_dev_idx` are excluded from `model.pth` and stored in `feature_store.pt`; the app reconstructs `GameRecommender` from those buffers and loads weights `strict=False`.
 
-Nine synthetic user types defined in `src/evaluate.py`. All titles verified against corpus. Note that Valve titles (CS:GO, L4D2, etc.) are excluded from the corpus and therefore absent from favorite game lists.
+**Deployed (2026-05-25):** `serving/` exported from α=0 item-text CG `best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`; PROD ranker `ranker_wd_alpha_0_20260525_113932.pth` retrained against it (24 wide features, deep_in 320, `text_cosine` cross feature; NDCG@10 +0.0120 over the text CG). See `ranker/CLAUDE.md`.
 
-User types: Western RPG Lover, JRPG Lover, FPS Lover, Civ Lover, Indie Lover, Racing Lover, Fighting Lover, Survival Lover, Management Lover.
-
-Each user type has:
-- `USER_TYPE_TO_FAVORITE_GAMES` — seed games (high simulated playtime weight = 10.0)
-- `USER_TYPE_TO_TAGS` — tags used to find 5 anchor games per tag (anchor weight = 2.0)
-- `USER_TYPE_TO_DISLIKED_GAMES` — currently empty dict (all entries commented out)
-
-`POPULARITY_ALPHA_INFERENCE_MULTIPLE = 0.0` — canary scoring uses raw dot products (Menon Path 2: no inference correction needed). Canary users are synthetic — no real play timestamps.
-
-## Offline Evaluation
-
-`python main.py eval [checkpoint_path]` — Recall@K, NDCG@K, Hit Rate@K, MRR at K = 1, 5, 10, 20, 50, 100.
-
-**Checkpoint selection (2026-05-25):** `train.py` saves the 'best' checkpoint on **val NDCG@10**, not val cross-entropy. CE is only a surrogate (it keeps falling via confidence calibration after ranks plateau); NDCG@10 is the ranking metric we ship and report, mirroring `ranker.train`. Computed each log step from the same full-corpus score matrix the CE pass already builds (ranks off raw dot products), plus a final post-loop eval. `val_loss` is still logged as a diagnostic. CG retrains are cheap (~10 min / 50k steps), so all comparisons are same-rule.
-
-### Current results
-
-**V6a DEPLOYED** (item text tower, α=0, NDCG@10-selected — the served retrieval stage as of 2026-05-25):
-
-| K | Recall@K | NDCG@K |
-|---|---|---|
-| 1 | 0.0279 | 0.0279 |
-| 5 | 0.0875 | 0.0576 |
-| 10 | 0.1444 | 0.0758 |
-| 20 | 0.2299 | 0.0972 |
-| 50 | 0.3968 | 0.1302 |
-| 100 | 0.5575 | 0.1562 |
-
-MRR: 0.0704. **Flat vs the no-text α=0 baseline** (every Δ ≤ .0014, noise) — item text adds no CG lift but is kept for ranker reuse (see Architecture > "Item text tower"). The no-text α=0 control under the same NDCG@10 rule (`…094445`): R@1 .0279 / @10 .1430 / @50 .3958 / @100 .5572 / MRR .0702. The dropped V6b (+user text pool) regressed: R@1 .0268 / @10 .1423 / @50 .3942 / MRR .0694.
-
-
-
-**V5 PROD** (5,437-game corpus — Valve titles removed, no LayerNorm, correct Menon Path 2 formula, α=0.4):
-
-| K | Recall@K | NDCG@K |
-|---|---|---|
-| 1 | 0.0226 | 0.0226 |
-| 5 | 0.0741 | 0.0481 |
-| 10 | 0.1253 | 0.0645 |
-| 20 | 0.2059 | 0.0848 |
-| 50 | 0.3673 | 0.1166 |
-
-MRR: 0.0611 (random: 0.0017)
-
-**V5 α=0 throwaway** (same architecture as V5 PROD, trained with `popularity_alpha=0.0`). Offline-only baseline for ranker comparisons — *not a deployment candidate*. Canary quality is materially worse on niche tastes (popular cross-genre titles leak in); see Training Details > "Alpha trade-off."
-
-| K | Recall@K | NDCG@K | Δ vs PROD |
-|---|---|---|---|
-| 1 | 0.0283 | 0.0283 | +25.2% |
-| 5 | 0.0867 | 0.0574 | +17.0% |
-| 10 | 0.1435 | 0.0755 | +14.5% |
-| 20 | 0.2301 | 0.0973 | +11.8% |
-| 50 | 0.3952 | 0.1299 | +7.6% |
-
-MRR: 0.0704 (+15.2% vs PROD)
-
-Lift concentrated at low K — exactly where the popularity tax hurts most. Use this row (not V5 PROD) as the offline yardstick when comparing the ranker on Recall/NDCG/MRR.
-
-**V4** (5,437-game corpus — Valve titles removed, no LayerNorm, incorrect Menon sign):
-
-| K | Recall@K | NDCG@K |
-|---|---|---|
-| 1 | 0.0294 | 0.0294 |
-| 5 | 0.0882 | 0.0589 |
-| 10 | 0.1430 | 0.0765 |
-| 20 | 0.2280 | 0.0978 |
-| 50 | 0.3913 | 0.1300 |
-
-MRR: 0.0715 (random: 0.0017)
-
-Note: V4 metrics are higher because the model was trained with `- popularity_bias` (subtracted), which penalizes popular items during training. The model compensated by making popular item embeddings universally closer to user embeddings, inflating Recall@K. V5 uses the correct `+ popularity_bias` (Menon Path 2), producing genuinely preference-driven rankings with cleaner canary quality.
-
-**V3 PROD** (5,437-game corpus — Valve titles removed, with LayerNorm after pools):
-
-| K | Recall@K | NDCG@K |
-|---|---|---|
-| 1 | 0.0278 | 0.0278 |
-| 5 | 0.0882 | 0.0581 |
-| 10 | 0.1428 | 0.0756 |
-| 20 | 0.2287 | 0.0971 |
-| 50 | 0.3944 | 0.1299 |
-
-MRR: 0.0706 (random: 0.0017)
-
-**V2 PROD** (5,442-game corpus — Valve titles included):
-
-| K | Recall@K | NDCG@K |
-|---|---|---|
-| 1 | 0.0389 | 0.0389 |
-| 5 | 0.1138 | 0.0767 |
-| 10 | 0.1743 | 0.0962 |
-| 20 | 0.2602 | 0.1177 |
-| 50 | 0.4256 | 0.1504 |
-
-MRR: 0.0875 (random: 0.0017)
-
-**Why V3 metrics are lower and not directly comparable:** Ultra-popular Valve titles (CS:GO, Garry's Mod, Left 4 Dead 2) appeared in nearly every val user's history and were trivially easy prediction targets — any model ranks them top-5 for most users, inflating V2 Recall@K. Removing them makes the eval strictly harder: every target requires genuine taste modeling. V3 canary quality is substantially better — cross-genre Valve pollution eliminated, per-genre coherence improved across all tested user types.
-
-**Protocol:** User-level train/val split. 90% of users are train-only; the remaining 10% are held out entirely and never seen during training.
-
-- **Train users**: all interactions used for rollback training examples — no within-user cut needed, no leakage possible.
-- **Val users**: all interactions used for rollback eval examples — no within-user cut needed either, since none of their data was ever in training. Any rollback pair from a val user is valid.
-
-At eval time, val user rollback examples are generated fresh (not from the saved dataset) using `_build_rollback_dataset` with `n_shuffles=1`. For each (context, target) pair, all corpus games are ranked and whether the target appears in top K is measured. Results are written to `eval_results/<checkpoint_stem>.txt`.
-
-**Why no within-user 90/10 split:** The within-user split exists in the book model to prevent leakage — you can't let the model train on a future read and also use it as an eval label. That concern disappears entirely when val users are held out at the user level: the model has seen zero of their interactions, so there is nothing to leak.
-
-**Why not per-user 90/10 split (book model protocol):** That protocol tests "predict future interactions for users the model has already partially seen." For a no-user-ID model this is a weaker test — the model implicitly learned each user's taste profile from their 90% training context. Held-out users are a stricter and more realistic measure of cold-start generalization, which is the actual inference scenario.
-
-## Relationship to Book Repo
-
-| File            | Status                                                                              |
-|-----------------|-------------------------------------------------------------------------------------|
-| `preprocess.py` | Rewritten — Steam schema, playtime signal, two-step pipeline, global game medians, Valve DENYLIST |
-| `features.py`   | Adapted — game column names, developer feature, avg_log_playtime per user (genre context removed) |
-| `dataset.py`    | Rewritten (V3) — pre-allocated numpy arrays, pre-padded tensors, 9-tuple output, genre/tag moved to model |
-| `model.py`      | Extended (V6a) — 4 pools, in-model genre/tag context, game_genre_matrix + game_text_matrix buffers, item text tower (use_item_text), F.normalize on both towers |
-| `train.py`      | Extended — full softmax, gradient clipping, cosine schedule, checkpoint config sidecar, best-on-val-NDCG@10 selection |
-| `evaluate.py`   | Adapted — 9 canary user types, POPULARITY_ALPHA_INFERENCE_MULTIPLE, new signatures |
-| `offline_eval.py` | Adapted — V3 9-tuple inputs, pre-padded tensors, 1× popularity bias              |
-| `export.py`     | Adapted — exclude game_tag_matrix, game_genre_matrix and game_text_matrix buffers from model.pth |
-
-## Serving / Export Notes
-
-`game_tag_matrix`, `game_genre_matrix`, `game_text_matrix` (registered buffers) and `game_dev_idx` are excluded from `model.pth` and stored in `feature_store.pt`. The Streamlit app reconstructs `GameRecommender` using the buffers from `feature_store.pt` and loads weights with `strict=False`. (`game_text_matrix` is present only when the CG carries the V6a text tower; the app copies it when present.)
-
-**Two-stage serving (architecture decision 2026-05-23):** the deployed CG is the **raw α=0** triple CG (the fixed retrieval stage), and the Wide & Deep ranker reranks its top-100. We tested moving the popularity penalty onto the ranker (α=0.2) and rejected it — it hurt offline ~27% with no meaningfully better canary — so **both stages ship raw α=0** with no popularity penalty anywhere; retrieval is recall-maximizing and the ranker reranks purely on its content/cross features. See `ranker/serving.py` for the shared rerank path (used by both canary and Streamlit) and `ranker/CLAUDE.md` for the full ranker subsystem docs.
-
-**Deployed CG is now V6a item-text (2026-05-25).** `serving/` was re-exported from the α=0 item-text CG (`best_triple_full_softmax_text_popularity_alpha_0_20260525_100022.pth`). **The PROD ranker was retrained against it and shipped** (`ranker_wd_alpha_0_20260525_113932.pth`) — warm-started + precomputed from the text CG, with deep-tower `item_text_tower` parity and a `text_cosine` cross feature (24 wide features, deep_in 320). It replaces the prior Bucket-6 no-text ranker; eval lifts NDCG@10 +0.0120 over the text CG (beats Bucket 6's +0.0115), canary comparable-or-better on all 9 archetypes. See `ranker/CLAUDE.md` for the full integration details.
-
-CG serving artifacts (generated by `python main.py export`, or by the ranker export below which calls it with the α=0 CG):
-- `serving/model.pth` — CG weights only (buffers excluded)
-- `serving/game_embeddings.pt` — pre-computed per-game CG embeddings dict
-- `serving/feature_store.pt` — vocab maps, game metadata, CG buffers, model config, **+ 9 ranker source arrays** (`game_developer_idx`, `game_year_numeric`, `game_median_log_hours`, `game_log_count`, `game_sentiment`, `game_tag_binary_idf`, `game_tag_mean_idf`, `game_tag_max_idf`, `game_dev_log_catalog_size`) consumed by `ranker.train._buffers_from_fs` to rebuild the ranker's non-persistent buffers at app startup
-
-Ranker serving artifacts (generated by `python ranker/main.py export [ranker.pth]` — re-exports the CG from the α=0 checkpoint, then adds):
-- `serving/ranker.pth` — `WideDeepRanker` state_dict (params + persistent `wide_norm` buffers; the non-persistent `game_*` buffers are rebuilt on load from the feature_store source arrays, same recipe as canary)
-- `serving/ranker_config.json` — ranker reconstruction config (emb dims / `n_cross_features` / `n_wide_normalized` / α + provenance). The app rebuilds the ranker purely from serving artifacts — no `saved_models/` and no `get_config()` glob (prod has neither).
-
-## Streamlit App
-
-`streamlit run streamlit_app.py` — tabs:
-- **Recommend** — pick games you've played → raw α=0 CG retrieves the top-100 by dot product. A **⚡ Apply Ranker** button reranks the same 100 with the Wide & Deep ranker and shows CG vs ranker **side-by-side with rank-delta badges** (how far each game moved). Degrades gracefully to CG-only if `serving/ranker.pth` is absent.
-- **Similar** — pick a game → cosine-nearest games in combined embedding space
-- **Genres** — pick genres → cosine-nearest games in genre embedding space
-- **Tags** — pick Steam tags → anchor-averaged query → cosine-nearest in tag space
-
-Steam cover images fetched live from `cdn.cloudflare.steamstatic.com` using the Steam app ID.
+- `python main.py export` → `serving/model.pth` (CG weights), `serving/game_embeddings.pt` (per-game CG embeddings), `serving/feature_store.pt` (vocab maps, metadata, CG buffers, config, **+ 9 ranker source arrays** rebuilt by `ranker.train._buffers_from_fs`).
+- `python ranker/main.py export [ranker.pth]` re-exports the CG then adds `serving/ranker.pth` + `serving/ranker_config.json`. The app rebuilds the ranker purely from serving artifacts (no `saved_models/`, no `get_config()` glob).
 
 ## Working Style and Guidelines
 
 ### Git workflow
+- Never commit and push in the same command. Commit first, then ask before pushing. Solo repo — no PRs.
+- **Any change that affects training behavior** (hyperparameters, optimizer, scheduler, loss, dataset logic, architecture): write the code, then **stop**. Don't commit until the user has run `train` → `canary` → `eval` and confirmed results. Don't update the results table here until the user reports numbers — smoke tests verify shapes/imports, not metrics.
 
-Never commit and push in the same command. Always commit first, then ask before pushing.
-
-For changes that require retraining to validate (hyperparameters, optimizer, scheduler, loss, dataset logic, model architecture): write the code, then stop. Do not commit until the user has run training and confirmed the results look better.
-
-**After any model/training change: always wait for the user to run `python main.py train`, then `python main.py canary`, then `python main.py eval`, and confirm the results are acceptable before committing anything.**
-
-### Behavioral guidelines
-
-These supplement (not replace) the Claude Code system prompt. The standard "don't speculate, don't over-abstract, don't over-comment" rules already live there — what follows is project-specific or worth re-stating because it's bitten us before.
-
-- **Match the existing style.** This codebase has a strong house style: long docstring headers on every util, NamedTuple bundles for related buffers, multi-paragraph comment banners on training-loop functions, named slice offsets instead of magic numbers, parquet column comments that line up vertically. When you add code, match what's around it even if you'd structure it differently. New ranker buckets in particular should mirror the bucket that came before — same naming pattern, same util shape, same docstring conventions.
-
-- **Surgical changes.** Touch only what the task requires. Don't "improve" adjacent code, comments, or formatting. If you notice unrelated dead code or a refactor opportunity, mention it — don't act on it. The test: every changed line should trace directly to the user's request.
-
-- **Verification belongs to the user for model changes.** The Git workflow above is the contract: any change that affects training behavior gets the code-only treatment. You verify imports compile, shapes match, smoke-test passes — the user verifies metrics. Don't claim success on a model/dataset change based on smoke tests alone, and don't update results tables in CLAUDE.md or the implementation plan until the user reports numbers back.
-
-- **Surface tradeoffs early, in one or two sentences.** If multiple interpretations of a request exist, name them briefly and pick the one you think is right with a stated assumption — don't silently choose, and don't open a multi-option AskUserQuestion for routine calls. Default to action with a stated assumption; the user can redirect.
-
-- **Single-session multi-step work → TaskCreate, not a plan file.** When a task has 3+ steps with their own verifications and you'll finish it in one sitting (e.g. "implement Bucket N"), track it with TaskCreate/TaskUpdate so progress is visible in the UI. For work this size a separate plan `.md` is redundant — the task list is enough.
-
-- **Large multi-session features → a visible plan `.md` in the repo, plus TaskCreate for execution.** A feature that spans sessions (data loading → feature engineering → model retraining → A/B test on eval metrics → downstream changes) gets a human-readable plan doc checked into the repo next to CLAUDE.md (e.g. a `*_PLAN.md`) as the canonical plan — readable by both you and the user — holding strategy, design decisions, the step sequence, and a dated progress checkpoint you keep current. Use TaskCreate/TaskUpdate alongside it for live per-session work tracking. Do NOT stash the plan in agent memory: the user can't see memory, so it's the wrong home for a plan this size.
+### Behavioral (project-specific; supplements the system prompt)
+- **Match the house style.** Long docstring headers, NamedTuple bundles, multi-paragraph comment banners on training-loop functions, named slice offsets over magic numbers, vertically-aligned parquet column comments. New ranker buckets mirror the previous bucket exactly.
+- **Surgical changes.** Touch only what the task requires; every changed line traces to the request. Mention adjacent dead code / refactor opportunities — don't act on them.
+- **Surface tradeoffs early** in 1-2 sentences; pick the option you think is right with a stated assumption rather than opening a multi-option question for routine calls.
+- **Multi-step work in one session → TaskCreate** (not a plan file). **Multi-session features → a visible `*_PLAN.md` in the repo + TaskCreate** (never stash the plan in agent memory — the user can't see it).
